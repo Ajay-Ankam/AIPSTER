@@ -17,6 +17,7 @@ import { all, first, pageQuery } from '../lib/store.js';
 import { pagination } from '../lib/validate.js';
 import { parseStatusRow, resourceLiveness, STALE_AFTER_MS } from '../lib/status.mjs';
 import { handleDgmPreview } from '../dgm/router.mjs';
+import { readAudit } from './audit-read.mjs';
 
 // PRD Section 5 roles. Unknown role values authorize nothing.
 export const ADMIN_ROLES = [
@@ -330,7 +331,15 @@ export async function handleAdmin(ctx) {
     return read(ctx, 'admin.engineering.read', unavailableList('admin.engineering.assignments.v1', 'not_implemented'));
   }
   if (path === '/api/admin/v1/audit' && method === 'GET') {
-    return read(ctx, 'admin.audit.read', unavailableList('admin.audit.v1', 'not_implemented'));
+    // Gate first: the audit projection reads stored evidence, so the caller
+    // must already hold a live admin.audit.read grant before any query runs.
+    // (read() takes its body eagerly, so it cannot be used here.) The
+    // projection itself is column-allowlisted in ./audit-read.mjs; actor,
+    // target and detail never leave the database.
+    const gate = await requireAdmin(ctx, 'admin.audit.read');
+    if (gate.status) return send(ctx, gate.status, gate.body);
+    const q = pagination(ctx.url);
+    return send(ctx, 200, await readAudit(ctx.db, q));
   }
   if (path === '/api/admin/v1/coverage' && method === 'GET') {
     return read(ctx, 'admin.coverage.read', unavailableList('admin.coverage.v1', 'not_implemented'));

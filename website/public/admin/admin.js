@@ -50,11 +50,14 @@ document.querySelectorAll('button[data-endpoint]').forEach((button) => {
     if (!section) return;
     if (section.id === 'overview') { loadOverview(); return; }
     if (section.id === 'resources') { loadResources(0); return; }
+    if (section.id === 'audit') { loadAudit(0); return; }
     loadSection(section, button.getAttribute('data-endpoint'));
   });
 });
 document.getElementById('resources-prev').addEventListener('click', () => loadResources(Math.max(0, resourcesOffset - RESOURCES_LIMIT)));
 document.getElementById('resources-next').addEventListener('click', () => loadResources(resourcesOffset + RESOURCES_LIMIT));
+document.getElementById('audit-prev').addEventListener('click', () => loadAudit(Math.max(0, auditOffset - AUDIT_LIMIT)));
+document.getElementById('audit-next').addEventListener('click', () => loadAudit(auditOffset + AUDIT_LIMIT));
 
 loadStatus();
 
@@ -175,6 +178,82 @@ async function loadResources(offset) {
     }
   } catch {
     if (mySeq !== resourcesSeq) return;
+    state.textContent = 'Unavailable: request failed.';
+  }
+}
+
+// ---- Audit (read-only projection over stored events) ----
+//
+// The server owns the projection: it sends only id, a validated action (or
+// null), a category and a validated timestamp. This pane renders exactly that
+// and never asks for actor, target or detail — it has no field to put them in.
+
+let auditOffset = 0;
+let auditSeq = 0;
+const AUDIT_LIMIT = 20;
+
+async function loadAudit(offset) {
+  const section = document.getElementById('audit');
+  const state = section.querySelector('.state');
+  const box = document.getElementById('audit-result');
+  const pages = document.getElementById('audit-pages');
+  const label = document.getElementById('audit-page-label');
+  const prev = document.getElementById('audit-prev');
+  const next = document.getElementById('audit-next');
+  const myOffset = Math.max(0, offset || 0);
+  auditOffset = myOffset;
+  const mySeq = ++auditSeq;
+  state.textContent = 'Loading…';
+  box.textContent = '';
+  pages.hidden = true;
+  try {
+    const res = await fetch('/api/admin/v1/audit?limit=' + AUDIT_LIMIT + '&offset=' + myOffset, { credentials: 'same-origin' });
+    if (mySeq !== auditSeq) return;
+    const body = await res.json().catch(() => null);
+    if (mySeq !== auditSeq) return;
+    if (!res.ok || !body) {
+      state.textContent = 'Unavailable: ' + requestFailure(body, res.status) + '.';
+      return;
+    }
+    if (body.state !== 'available' || !Array.isArray(body.items)) {
+      // Unavailable is a measurement failure, never an empty feed.
+      state.textContent = 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').';
+      return;
+    }
+    const total = Number.isSafeInteger(body.total) && body.total >= 0 ? body.total : null;
+    state.textContent = 'Loaded ' + unknown(body.observed_at) + '.';
+    if (!body.items.length) {
+      box.textContent = total === 0 ? 'No audit events recorded (empty).' : 'No rows on this page.';
+    } else {
+      const rows = body.items.map((it) => {
+        const action = it.action_known && typeof it.action === 'string' ? esc(it.action) : 'unknown';
+        const at = it.at_known && typeof it.at === 'string' ? esc(it.at) : 'unknown';
+        return '<tr><td>' + esc(it.id) + '</td><td>' + action + '</td><td>'
+          + esc(it.category || 'unknown') + '</td><td>' + at + '</td></tr>';
+      }).join('');
+      box.innerHTML = '<table><tr><th>event</th><th>action</th><th>category</th><th>at</th></tr>' + rows + '</table>';
+    }
+    // Window bounds come from offset plus limit, never from items.length:
+    // rows the server declined to project still occupy a slot in total, and
+    // the shortfall is disclosed as "(N shown)".
+    const effOffset = Number.isSafeInteger(body.offset) && body.offset >= 0 ? body.offset : myOffset;
+    const effLimit = Number.isSafeInteger(body.limit) && body.limit > 0 ? body.limit : AUDIT_LIMIT;
+    if (total !== null && total > 0) {
+      const winStart = effOffset + 1;
+      const winEnd = Math.min(effOffset + effLimit, total);
+      if (winStart > winEnd) {
+        label.textContent = 'Rows 0 of ' + total + ' (' + body.items.length + ' shown).';
+      } else if (body.items.length < winEnd - winStart + 1) {
+        label.textContent = 'Rows ' + winStart + '–' + winEnd + ' of ' + total + ' (' + body.items.length + ' shown).';
+      } else {
+        label.textContent = 'Rows ' + winStart + '–' + winEnd + ' of ' + total + '.';
+      }
+      prev.disabled = effOffset === 0;
+      next.disabled = (effOffset + effLimit) >= total;
+      pages.hidden = false;
+    }
+  } catch {
+    if (mySeq !== auditSeq) return;
     state.textContent = 'Unavailable: request failed.';
   }
 }

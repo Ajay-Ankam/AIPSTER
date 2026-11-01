@@ -42,7 +42,7 @@ Built on `origin/main` at `2ed8fdf` (29 Oct 2026), not the PRD pin
 
 ## Still stubbed
 
-Elevation, audit writes, suspension/restoration/session/key/recovery
+Elevation, admin-side audit writes, suspension/restoration/session/key/recovery
 workflows, tickets, GitHub export and sync, coding assignments, metric
 instrumentation and privacy release, alerts and quotas, and
 grant-management UI. Only a working collector may turn an envelope
@@ -102,6 +102,48 @@ checked first.
   success and failure responses never paint or clear a painted page, a
   sparse final window keeps bounds from offset plus limit, and a page past
   a shrunken total reports an empty window). Run `npm test` from `website/`.
+
+## Milestone 2: read-only Audit
+
+`GET /api/admin/v1/audit` (`admin.audit.v1`) now serves a projection over the
+existing `audit` table, which `worker.js`, `lib/store.js`, `dgm/router.mjs` and
+`fabric/*` already populate. It is a read: no admin writer, migration, or role
+change is involved, and `requireAdmin(ctx, 'admin.audit.read')` still runs
+first, so only a live platform grant holding `security_reviewer` reaches it.
+
+- Columns selected: `id, at, action` only. `actor_id`, `target` and `detail`
+  are never read into the response — those carry identity, node ids,
+  addresses, fixture labels and free text.
+- `action` is admitted only when it is one of the exact strings those writers
+  emit today (`AUDIT_ACTIONS` in `src/admin/audit-read.mjs`). A grammar or
+  namespace-prefix check would still admit an arbitrary suffix such as
+  `resource.synthetic_secret_value`, so unlisted values become `action: null`,
+  `action_known: false`, `category: "unknown"`. Adding an action to that list
+  is a contract change: update `docs/admin-scaffold.md` with it.
+- `at` is admitted only when it is a canonical UTC timestamp naming a real
+  instant (the same rule as `grantIsLive`); otherwise `at: null`,
+  `at_known: false`. Rows whose `id` is not `[A-Za-z0-9_-]{1,127}` are skipped
+  and disclosed by the UI as `(N shown)`; they still count in `total`.
+- Pagination reuses `pagination()` (`limit` default 20, cap 50, `offset >= 0`)
+  with the deterministic `at DESC, id ASC` order.
+- Storage failure answers `state: "unavailable"`, `reason_code:
+  "audit_unavailable"`, `total: null` — never a healthy-looking zero. A
+  measured empty feed is `state: "available"`, `total: 0`, `items: []`.
+- `/admin` shell: the Audit section renders loading, rows, empty, unavailable
+  and denied states in an `aria-live` result region with native
+  Previous/Next buttons and the same sequence guard as Resources, so a stale
+  success or failure cannot repaint a newer page. Window bounds come from
+  `offset + limit`, not `items.length`.
+- Tests: `website/tests/admin-audit.test.mjs` (10 tests: denial matrix
+  including every non-security role, API key, demo, expired/revoked and
+  wrong-scope grant, no existence oracle, empty vs unavailable, omitted
+  columns, malformed rows, unlisted-but-namespace-shaped actions, the exact
+  writer vocabulary, and bounded deterministic pagination) and
+  `website/tests/admin-audit-ui.test.mjs` (9 tests: contracted ids in the
+  shell, escaped rendering, empty vs unavailable, denial and transport
+  failure, sparse/beyond-end pager windows, pager navigation, stale
+  success/failure suppression, and loading clearing the previous page). Run
+  `npm test` from `website/`.
 
 ## DGM fixture preview (0.5.0)
 
