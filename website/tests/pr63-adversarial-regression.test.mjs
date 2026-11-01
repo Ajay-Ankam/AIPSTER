@@ -487,15 +487,23 @@ test('F7: on real D1 pruning is per principal and concurrent claims keep each ca
     'pruning a receipt must not refund the settled charge');
 });
 
-test('F7: repeated released budget failures cannot grow retained operations past the cap', async () => {
+test('F7: repeated released budget failures are bounded by the claim allowance, not the active cap', async () => {
+  // Round-2 contract: terminal (released/settled) rows are the replay record and
+  // are pruned by age only; the active cap counts live work. Retained released
+  // rows are therefore bounded by the rolling claim allowance, not by the cap.
   const cap = 2;
+  const quota = 25;
   const h = createStoreHarness({
     ownerDaily: '0',
-    env: { INFERENCE_DISPATCH_MAX_OPERATIONS: String(cap), INFERENCE_DISPATCH_MAX_ADMISSIONS: '100' },
+    env: {
+      INFERENCE_DISPATCH_MAX_OPERATIONS: String(cap), INFERENCE_DISPATCH_MAX_ADMISSIONS: '100',
+      INFERENCE_DISPATCH_CLAIMS_PER_WINDOW: String(quota),
+      INFERENCE_DISPATCH_CLAIM_WINDOW_MS: '3600000',
+    },
   });
   const principal = alice; // owner admission; the 0-token ceiling refuses every hold
 
-  for (let i = 0; i < 25; i += 1) {
+  for (let i = 0; i < quota; i += 1) {
     const a = await h.store.issueAdmission({
       principal, resource_id: RES_1, model_id: 'model-x', max_tokens: 64,
     });
@@ -514,23 +522,25 @@ test('F7: repeated released budget failures cannot grow retained operations past
   }
 
   const retained = opRows(h.sqlite, principal.principal_id);
-  assert.ok(retained.length <= cap,
-    `retained operations (${retained.length}) must stay within the cap (${cap}): terminal rows are retained state and must either count or be pruned atomically`);
+  assert.equal(retained.length, quota,
+    `retained operations (${retained.length}) must be the budgeted claims (${quota}), and the active cap (${cap}) must not prune replay state`);
+  assert.ok(retained.length <= quota, 'retained released rows exceeded the claim allowance');
 
-  // The cap must also stay usable: a fresh claim is either admitted (terminal
-  // rows pruned) or refused with DISPATCH_LIMIT (terminal rows counted), never
-  // silently accepted while rows keep accumulating.
+  // The allowance is the bound: one more fresh key is refused and writes nothing,
+  // so repeated failures cannot grow retained rows past the allowance.
+  const binding = JSON.parse(h.sqlite.prepare('SELECT binding_json FROM dispatch_operations LIMIT 1')
+    .get().binding_json);
+  const before = h.sqlite.prepare('SELECT total_changes() AS n').get().n;
   const fresh = await h.store.claimOperation({
     op_key: 'f7-after', request_digest: 'sha256:after',
-    principal_id: principal.principal_id, tenant_id: principal.tenant_id,
-    binding: JSON.parse(h.sqlite.prepare('SELECT binding_json FROM dispatch_operations LIMIT 1').get().binding_json),
+    principal_id: principal.principal_id, tenant_id: principal.tenant_id, binding,
   }).then((v) => ({ claimed: v.claimed }), (e) => ({ status: e.status, code: e.code }));
-  assert.ok(fresh.claimed === true || (fresh.status === 429 && fresh.code === 'DISPATCH_LIMIT'),
-    `a fresh claim after the cap is either admitted or limited, got ${JSON.stringify(fresh)}`);
-  if (fresh.claimed === true) {
-    assert.ok(opRows(h.sqlite, principal.principal_id).length <= cap,
-      'admitting a fresh claim must not raise retained rows above the cap');
-  }
+  assert.deepEqual(fresh, { status: 429, code: 'DISPATCH_LIMIT' },
+    `a fresh claim past the allowance is a bounded refusal, got ${JSON.stringify(fresh)}`);
+  assert.equal(h.sqlite.prepare('SELECT total_changes() AS n').get().n, before,
+    'the refusal at the allowance wrote rows');
+  assert.equal(opRows(h.sqlite, principal.principal_id).length, quota,
+    'a refusal past the allowance added a retained row');
 });
 
 // Documented default retention window for settled replay receipts
@@ -538,7 +548,7 @@ test('F7: repeated released budget failures cannot grow retained operations past
 // file still loads against the base commit, where the constant does not exist.
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
-test('F7: settled operations are bounded retained state — refusal, not a leak', async () => {
+test('F7: settled receipts are bounded retained state, not a cap trigger', async () => {
   const cap = 2;
   const h = createStoreHarness({
     env: { INFERENCE_DISPATCH_MAX_OPERATIONS: String(cap), INFERENCE_DISPATCH_MAX_ADMISSIONS: '100' },
@@ -573,20 +583,33 @@ test('F7: settled operations are bounded retained state — refusal, not a leak'
     principal_id: bob.principal_id, tenant_id: bob.tenant_id, binding,
   });
 
-  // Inside the replay window the settled rows ARE the retained state, so a
-  // third distinct key must be refused. A bounded 429 is the supported
-  // behaviour; silently accepting it would be the storage leak this finding is
-  // about. Either way the retained row count may never exceed the cap.
-  await assert.rejects(third(), (e) => e.status === 429 && e.code === 'DISPATCH_LIMIT',
-    'at the cap a fresh key is a bounded refusal, not an unbounded row');
-  assert.equal(opRows(h.sqlite, bob.principal_id).length, cap, 'a refusal never adds a retained row');
-
-  // The refusal must also be bounded in time: past the retention window the
-  // expired receipts are pruned in the same batch as the new claim.
-  h.clock.advance(RETENTION_MS + 1);
+  // Round-2 contract: a settled receipt is replay state, not live work. It does
+  // not consume the active cap, so a third distinct key is admitted while the
+  // rolling allowance permits — the old "bounded refusal at the cap" expectation
+  // is what turned 20 receipts into a 7-day lockout.
   const claimed = await third();
-  assert.equal(claimed.claimed, true, 'after the replay window a claim is admitted by pruning');
-  assert.ok(opRows(h.sqlite, bob.principal_id).length <= cap);
+  assert.equal(claimed.claimed, true,
+    'settled receipts must not block new work that the rolling allowance permits');
+  assert.equal(opRows(h.sqlite, bob.principal_id).length, cap + 1,
+    'the fresh claim was not retained');
+  assert.equal(count(h.sqlite,
+    "SELECT COUNT(*) AS n FROM dispatch_operations WHERE principal_id = ? AND phase = 'settled'",
+    bob.principal_id), 2, 'fresh settled receipts must not be pruned to make room');
+  assert.deepEqual(grantUsed(h.sqlite), { used_jobs: 2, used_tokens: 256 },
+    'admitting new work must not touch a settled charge');
+
+  // Bounded in time: past the replay window the expired receipts and their side
+  // rows are pruned in the same batch as the next admitted claim, and pruning
+  // never refunds the settled charge.
+  h.clock.advance(RETENTION_MS + 1);
+  const fourth = await h.store.claimOperation({
+    op_key: 'f7-settled-3', request_digest: 'sha256:fourth',
+    principal_id: bob.principal_id, tenant_id: bob.tenant_id, binding,
+  });
+  assert.equal(fourth.claimed, true, 'after the replay window a claim is admitted by pruning');
+  assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_settlements'), 0,
+    'expired receipts survived a post-retention claim');
+  assert.ok(opRows(h.sqlite, bob.principal_id).length <= 3);
   assert.deepEqual(grantUsed(h.sqlite), { used_jobs: 2, used_tokens: 256 },
     'pruning receipts must never refund a settled charge');
 });
@@ -620,11 +643,14 @@ test('F7: an evicted released key is a fresh operation; a retained one still rec
   assert.equal(replay.claimed, false, 'a released key reconciles while its row is retained');
   assert.equal(replay.op.op_id, first.op.op_id);
 
-  // At the cap the released row is evicted inside the same claim batch.
+  // Age is the only eviction reason now: age the released row past retention,
+  // then the next admitted claim prunes it inside the same batch.
+  h.sqlite.prepare('UPDATE dispatch_operations SET updated_at = ? WHERE op_id = ?')
+    .run(new Date(T0 - RETENTION_MS - 1000).toISOString(), first.op.op_id);
   const second = await submit('rel-key-2');
   assert.equal(second.claimed, true);
   assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations WHERE op_key = ?', 'rel-key-1'), 0,
-    'the released row is evicted to make room at the cap');
+    'the aged released row is pruned by the next claim');
   assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations WHERE principal_id = ?',
     alice.principal_id), 1);
 
@@ -670,9 +696,23 @@ test('F7: eviction never leaves a side-table row pointing at a pruned operation'
     assert.deepEqual(await h.store.releaseHolds({ op_id: claim.op.op_id, generation: 1, reason: 'cancelled' }),
       { released: 1 });
   }
-  assert.ok(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations') <= 2);
+  // Age-only contract: the 25 released operations are retained for the replay
+  // horizon (they are bounded by the claim allowance, not the active cap). Age
+  // them and let one admitted claim prune a batch: every pruned operation must
+  // take its released hold row with it, leaving no orphan.
+  assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations'), 25);
+  h.sqlite.prepare('UPDATE dispatch_operations SET updated_at = ?').run(new Date(T0 - RETENTION_MS - 1000).toISOString());
+  const freshReleased = await h.store.claimOperation({
+    op_key: 'f7-side-released-fresh', request_digest: 'sha256:side-fresh',
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+  });
+  assert.equal(freshReleased.claimed, true);
+  assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations'), 22,
+    'one admitted claim must prune exactly PRUNE_BATCH aged operations');
   assert.deepEqual(orphanRows(h.sqlite), NO_ORPHANS,
     'pruned operations left side-table rows behind (storage outlives the operation)');
+  assert.equal(ownerPoolUsed(h.sqlite, binding.pools[0].pool_id), 0,
+    'pruning released holds must not move the pool counter');
 
   // Settled path: an expired receipt is pruned with its charged hold, its
   // settlement, its queue row and its start/fence tombstones.
@@ -754,6 +794,10 @@ test('F7: a stale coordinator cancel cannot fence a pruned operation', async () 
             { outcome: 'fenced' }, 'the competing cancel fences first');
           assert.deepEqual(await other.releaseHolds({ op_id: op.op_id, generation: 1, reason: 'cancel' }),
             { released: 0 });
+          // Age is the only eviction reason: make the released row old enough
+          // that the pressure claim's batch prunes it.
+          h.sqlite.prepare('UPDATE dispatch_operations SET updated_at = ? WHERE op_id = ?')
+            .run(new Date(T0 - RETENTION_MS - 1000).toISOString(), op.op_id);
           assert.equal((await other.claimOperation({
             op_key: opKey(`race-pressure-${i}`), request_digest: `sha256:pressure-${i}`,
             principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,

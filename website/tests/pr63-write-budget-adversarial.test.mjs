@@ -144,7 +144,14 @@ test('budget: at exhaustion a fresh key is refused with zero writes and total vo
     assert.ok(quotaCode(responses[i]),
       `refused key ${i} returned ${responses[i].http}:${responses[i].code}, not a 429 limit refusal`);
   }
-  assert.equal(opRows(h.sqlite), 2, 'retained operations exceed the configured cap');
+  // Round-2 contract: refused claims write nothing, and retained rows are the
+  // budgeted claims themselves (released receipts kept for replay), not a cap
+  // count. The active cap still bounds live work.
+  assert.equal(opRows(h.sqlite), QUOTA,
+    `retained ${opRows(h.sqlite)} operations for ${QUOTA} budgeted claims`);
+  assert.ok(count(h.sqlite,
+    "SELECT COUNT(*) AS n FROM dispatch_operations WHERE phase <> 'released'") <= 2,
+  'live work exceeded the configured active cap');
   assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_fences'), 0, 'a refusal left fence rows');
   assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_holds'), 0, 'a refusal left hold rows');
 });
@@ -397,9 +404,12 @@ test('budget: a spent allowance survives released-row pruning and a restart', as
       { released: 0 });
     h.clock.advance(1000);
   }
-  // Released rows are pruned at the cap; that must not restore allowance.
-  const pruned = opRows(h.sqlite);
-  assert.ok(pruned <= 2, `released pruning retained ${pruned} operations`);
+  // Age-only contract: the released rows are retained replay state. A spent
+  // allowance is what refuses; a restart must not forget it, and a refusal must
+  // not prune (only an admitted claim may).
+  assert.equal(opRows(h.sqlite), QUOTA, 'released receipts must be retained for the replay horizon');
+  h.sqlite.prepare('UPDATE dispatch_operations SET updated_at = ?')
+    .run(new Date(T0 - 8 * 24 * 3600 * 1000).toISOString());
 
   const restarted = createD1DispatchStore(h.db, { now: h.clock.now, env });
   const before = changes(h.sqlite);
@@ -407,7 +417,33 @@ test('budget: a spent allowance survives released-row pruning and a restart', as
     op_key: opKey(alice, 'restart-after'), request_digest: 'sha256:restart-after',
     principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
   }), isLimitError, 'a restarted store forgot the spent allowance');
-  assert.equal(changes(h.sqlite), before, 'the restarted refusal wrote rows');
+  assert.equal(changes(h.sqlite), before, 'the restarted refusal wrote or pruned rows');
+  assert.equal(opRows(h.sqlite), QUOTA, 'a refusal pruned aged rows: only an admitted claim may');
+
+  // When the window rolls, the allowance refills and one admitted claim prunes a
+  // batch of aged receipts; pruning must not hand back more than the window.
+  h.clock.advance(3600000 + 1);
+  const admitted = await restarted.claimOperation({
+    op_key: opKey(alice, 'restart-after'), request_digest: 'sha256:restart-after',
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+  });
+  assert.equal(admitted.claimed, true, 'the allowance did not roll with the clock');
+  assert.equal(opRows(h.sqlite), 1, 'the admitted claim did not prune the aged receipts it replaced');
+  await restarted.releaseHolds({ op_id: admitted.op.op_id, generation: 1, reason: 'cancelled' });
+  for (let i = 0; i < QUOTA - 1; i += 1) {
+    const next = await restarted.claimOperation({
+      op_key: opKey(alice, `restart-window-${i}`), request_digest: `sha256:restart-window-${i}`,
+      principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+    });
+    assert.equal(next.claimed, true, 'the rolled window did not allow its full allowance');
+    await restarted.releaseHolds({ op_id: next.op.op_id, generation: 1, reason: 'cancelled' });
+  }
+  const spent = changes(h.sqlite);
+  await assert.rejects(() => restarted.claimOperation({
+    op_key: opKey(alice, 'restart-over'), request_digest: 'sha256:restart-over',
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+  }), isLimitError, 'pruning aged receipts refunded the window allowance');
+  assert.equal(changes(h.sqlite), spent, 'the post-roll refusal wrote rows');
 });
 
 // ---------------------------------------------------------------------------
@@ -909,6 +945,16 @@ test('budget: a losing same-key racer writes nothing after the winner and append
   let winner = null;
   let resumeAt = 0;
   let agedBeforeResume = 0;
+  let ledgerAfterWinner = 0;
+  let ledgerAtResume = 0;
+  const ledgerRows = () => {
+    const tables = h.sqlite.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND lower(name) LIKE '%claim%'").all()
+      .map((r) => r.name)
+      .filter((n) => n !== 'dispatch_operations');
+    return tables.reduce((sum, t) =>
+      sum + count(h.sqlite, `SELECT COUNT(*) AS n FROM ${t} WHERE principal_id = ?`, alice.principal_id), 0);
+  };
   const pausedDb = {
     prepare(sql) {
       const stmt = h.db.prepare(sql);
@@ -944,6 +990,7 @@ test('budget: a losing same-key racer writes nothing after the winner and append
       principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
     });
     assert.equal(winner.claimed, true, 'the winner could not claim the key');
+    ledgerAfterWinner = ledgerRows();
     // Work that becomes prunable only after the winner's own cleanup ran, so the
     // loser still has candidates to delete if its cleanup is not gated.
     for (let i = 0; i < 6; i += 1) await settleCycle(h, `race-aged-${i}`);
@@ -951,6 +998,7 @@ test('budget: a losing same-key racer writes nothing after the winner and append
       .run(new Date(T0 - 8 * 24 * 3600 * 1000).toISOString(), 'settled');
     agedBeforeResume = count(h.sqlite,
       'SELECT COUNT(*) AS n FROM dispatch_operations WHERE phase = ?', 'settled');
+    ledgerAtResume = ledgerRows();
     resumeAt = changes(h.sqlite);
   };
 
@@ -970,11 +1018,8 @@ test('budget: a losing same-key racer writes nothing after the winner and append
   assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations WHERE phase = ?', 'settled'), 6,
     'the loser deleted settled history that the winner owned');
 
-  const ledger = h.sqlite.prepare(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND lower(name) LIKE '%claim%'").all()
-    .map((r) => r.name).filter((n) => n !== 'dispatch_operations');
-  for (const table of ledger) {
-    assert.equal(count(h.sqlite, `SELECT COUNT(*) AS n FROM ${table} WHERE principal_id = ?`, alice.principal_id), 1,
-      `${table} recorded more than one budgeted claim for the race`);
+  if (ledgerAfterWinner > 0) {
+    assert.equal(ledgerAfterWinner, 1, 'the winning claim did not record exactly one ledger event');
+    assert.equal(ledgerRows(), ledgerAtResume, 'the losing claim appended a second ledger event');
   }
 });
