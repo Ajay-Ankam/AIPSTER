@@ -208,8 +208,12 @@ test('A6-A10: expired, malformed, revoked, wrong-scope and unknown-role grants a
 });
 
 test('A12: denial is identical with and without stored rows (no existence oracle)', async () => {
+  // The caller holds no admin grant in either environment; the only variable
+  // is whether audit rows exist. An authorized caller legitimately sees
+  // different data, so authority must stay denied for the comparison to mean
+  // anything. (First version granted bob in both envs and compared the whole
+  // envelope, including observed_at — a defect in this test, not the server.)
   const empty = await createTestEnv();
-  await grant(empty, 'u_bob');
   const emptyOut = await getAudit(empty, '', empty.as(empty.bob));
 
   const seeded = await createTestEnv();
@@ -217,10 +221,10 @@ test('A12: denial is identical with and without stored rows (no existence oracle
     { id: 'a_x1', at: CANON, action: 'resource.register' },
     { id: 'a_x2', at: CANON, action: 'grant.create' },
   ]);
-  await grant(seeded, 'u_bob');
   const seededOut = await getAudit(seeded, '', seeded.as(seeded.bob));
 
-  assert.equal(emptyOut.status, seededOut.status);
+  assert.equal(emptyOut.status, 403, 'no grant means denied whether or not rows exist');
+  assert.equal(seededOut.status, 403);
   assert.deepEqual(emptyOut.json, seededOut.json, 'row existence must not change the denial');
 });
 
