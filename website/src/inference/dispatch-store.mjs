@@ -45,17 +45,28 @@ import { resourceLiveness } from '../lib/status.mjs';
 import { CONTENT_MAX } from './worker-transport.mjs';
 
 export const ADMISSION_TTL_MS = 10 * 60 * 1000;
-// Per-principal retained-state caps (findings 4437303806, 4437419399). Expired
-// admissions are swept, so they never count. Operations are counted in every
-// phase, terminal ones included: a refused hold releases the operation but
-// leaves its row, so counting only non-terminal phases let an exhausted
-// principal park unbounded rows. Released rows never executed and carry no
-// receipt, so they are pruned as soon as a principal is at the cap; settled
-// rows are the replay record and are kept for DISPATCH_RETENTION_MS. Queued jobs
-// are one per dispatched operation, so the operation cap bounds them too; a
-// pruned operation takes its terminal queue rows, its settlement receipt, its
+// Per-principal limits. Three independent caps, because one number cannot
+// express "how much may run at once", "how much new work may arrive" and "how
+// much history may be kept":
+//
+//   * Active work (DEFAULT_DISPATCH_MAX_OPERATIONS) counts only non-terminal
+//     phases. A settled or released row is history, not concurrency.
+//   * The rolling claim quota (DEFAULT_DISPATCH_CLAIMS_PER_WINDOW per
+//     DEFAULT_DISPATCH_CLAIM_WINDOW_MS) bounds *new* operations per principal.
+//     It is consumed atomically in the claim batch, so a spent window refuses a
+//     fresh key with zero row changes; a replay of a retained key never costs
+//     quota.
+//   * Terminal history is the replay record, kept for
+//     DEFAULT_DISPATCH_RETENTION_MS and pruned only by age. Its retained size is
+//     bounded by the quota and the retention horizon (retainedOperationLimit);
+//     fresh receipts are never deleted to make room, because that would break
+//     the replay promise and could redispatch an old idempotency key.
+//
+// Expired admissions are swept, so they never count. Queued jobs are one per
+// dispatched operation, so the active cap bounds them too; a pruned operation
+// takes its terminal queue rows, its settlement receipt, its
 // start-redemption/fence tombstones and its released/charged hold rows with it
-// in the same batch, so no durable table keeps a row the cap does not count.
+// in the same batch, so no durable table keeps a row no cap counts.
 // Held/committed holds belong to live reservations and are never pruned.
 export const DEFAULT_DISPATCH_MAX_ADMISSIONS = 20;
 export const DEFAULT_DISPATCH_MAX_OPERATIONS = 20;
@@ -64,6 +75,17 @@ export const DEFAULT_DISPATCH_MAX_OPERATIONS = 20;
 // reconciles to the original operation instead of dispatching again.
 export const DEFAULT_DISPATCH_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_DISPATCH_RETENTION_MS = 60 * 60 * 1000;
+// A true trailing window: at most this many claim events in any window-length
+// interval, enforced by a per-event ledger. A tumbling counter would let 100
+// claims just before an anchored reset and 100 just after through (200 inside
+// one hour); the ledger cannot. 100 new operations per hour is five times the
+// active cap, so legitimate churn never waits on capacity.
+export const DEFAULT_DISPATCH_CLAIMS_PER_WINDOW = 100;
+export const DEFAULT_DISPATCH_CLAIM_WINDOW_MS = 60 * 60 * 1000;
+const MIN_DISPATCH_CLAIM_WINDOW_MS = 60 * 1000;
+// Age pruning is bounded per claim so one claim can never write an unbounded
+// batch, however long the principal was idle.
+const PRUNE_BATCH = 4;
 export const DISPATCH_LIMIT_CODE = 'DISPATCH_LIMIT';
 export const INFERENCE_RUNTIME_IDS = Object.freeze(['ganglion', 'llama-server']);
 const RUNTIME_IDS = new Set(INFERENCE_RUNTIME_IDS);
@@ -129,6 +151,30 @@ function retentionMs(env) {
   const n = env ? Number(env.INFERENCE_DISPATCH_RETENTION_MS) : NaN;
   return Number.isSafeInteger(n) && n >= MIN_DISPATCH_RETENTION_MS ? n : DEFAULT_DISPATCH_RETENTION_MS;
 }
+
+function claimLimit(env) {
+  return limitFromEnv(env, 'INFERENCE_DISPATCH_CLAIMS_PER_WINDOW', DEFAULT_DISPATCH_CLAIMS_PER_WINDOW);
+}
+
+function claimWindowMs(env) {
+  const n = env ? Number(env.INFERENCE_DISPATCH_CLAIM_WINDOW_MS) : NaN;
+  return Number.isSafeInteger(n) && n >= MIN_DISPATCH_CLAIM_WINDOW_MS ? n : DEFAULT_DISPATCH_CLAIM_WINDOW_MS;
+}
+
+// A proven upper bound on retained operations per principal, not a prune
+// trigger and not a refusal guard. Any retention-length span can be partitioned
+// into `windows` claim windows of at most `quota` claims each; one extra window
+// covers the trailing boundary, the active set is bounded separately (an
+// unresolved operation counts as active in every phase), and PRUNE_BATCH covers
+// age-prunable rows still awaiting the next claim. Fresh settled receipts are
+// never deleted to satisfy it: that would break the replay promise and could
+// redispatch an old idempotency key as a new operation.
+export function retainedOperationLimit(env = null) {
+  const windows = Math.ceil(retentionMs(env) / claimWindowMs(env));
+  return claimLimit(env) * (windows + 1) + operationLimit(env) + PRUNE_BATCH;
+}
+
+export const DEFAULT_DISPATCH_MAX_RETAINED_OPERATIONS = retainedOperationLimit(null);
 
 function principalOf(value) {
   if (!isObj(value) || !isStr(value.principal_id) || !isStr(value.tenant_id)) return null;
@@ -402,61 +448,139 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       const tms = clock();
       const t = isoAt(tms);
       const cap = operationLimit(env);
-      // Finding 4437419399: count every retained operation, terminal ones
-      // included, and make room in the same batch. Only state that cannot be
-      // replayed is prunable:
-      //   * `released` — releaseHolds requires that no start was redeemed (and
-      //     that an admitted operation is fenced), so nothing ran and no
-      //     receipt exists; the row may go as soon as the principal is at the
-      //     cap. That is what keeps an exhausted budget from parking rows.
-      //   * `settled` — the durable replay/receipt record. Kept for the
-      //     retention window and pruned only after it, so a retry inside the
-      //     window still reconciles instead of dispatching again.
-      // An uncertain operation, a held/committed hold, or a queued/leased job
-      // is never pruned at any age. Every statement is scoped to this
-      // principal, so the cap never borrows another tenant's allowance.
-      const prunable = `SELECT o.op_id FROM dispatch_operations o
+      const quota = claimLimit(env);
+      const windowMs = claimWindowMs(env);
+      const windowStart = tms - windowMs;
+      // Finding 4437419399 moved the cap onto terminal rows but counted them
+      // against the *concurrency* cap, which turned 20 settled receipts into a
+      // 7-day lockout. The limits are now separate.
+      //
+      // Active work is every non-terminal operation *and* every operation whose
+      // outcome is unresolved or whose resources are still live, whatever its
+      // phase. An uncertain row that was released or settled still represents
+      // work nobody has resolved. A live hold or a queued/leased job is the same
+      // problem without the flag: releaseHolds commits `phase = 'released'` in
+      // one batch and flips/refunds the holds in the next, so a crash in between
+      // leaves a released operation that still owns reserved budget. Both states
+      // must consume the cap, or protected rows could accumulate past it.
+      const active = `(SELECT COUNT(*) FROM dispatch_operations a
+          WHERE a.principal_id = ?
+            AND (a.phase NOT IN ('settled', 'released')
+              OR a.uncertain_phase IS NOT NULL
+              OR EXISTS (SELECT 1 FROM dispatch_holds ha
+                WHERE ha.op_id = a.op_id AND ha.state IN ('held', 'committed'))
+              OR EXISTS (SELECT 1 FROM dispatch_jobs ja
+                WHERE ja.op_id = a.op_id AND ja.status IN ('queued', 'leased')))) < ?`;
+      // A true trailing window over the claim ledger: at most `quota` events in
+      // (now - window, now]. A tumbling counter would let a principal spend 100
+      // just before an anchored reset and 100 just after, i.e. 200 inside one
+      // hour; this cannot. The count is evaluated inside the batch, so two
+      // isolates cannot both pass it on a stale read.
+      const withinWindow = `(SELECT COUNT(*) FROM dispatch_claim_events e
+          WHERE e.principal_id = ? AND e.claimed_at > ?) < ?`;
+      // The same-key existence check is repeated inside the batch. The lookup
+      // above is not authority: another isolate can win the identical claim
+      // between that read and the insert. A loser must then be a pure replay —
+      // `INSERT OR IGNORE` already refuses to duplicate the row, but without
+      // this gate it would still have pruned up to PRUNE_BATCH aged families on
+      // the way there. The key cannot be absent before the winning insert, so
+      // this gate never blocks the winner.
+      const keyFree = `NOT EXISTS (SELECT 1 FROM dispatch_operations x WHERE x.op_key = ?)`;
+      const claimable = `${active} AND ${withinWindow} AND ${keyFree}`;
+      const claimBinds = [principal_id, cap, principal_id, windowStart, quota, op_key];
+
+      // Age is the only reason terminal state is pruned. Fresh settled receipts
+      // are the replay record and are never deleted to make room: doing that
+      // would turn a replay of the same idempotency key into a new operation
+      // that could dispatch again. `retainedOperationLimit` is the documented
+      // bound the quota makes unreachable, not a deletion trigger.
+      // A candidate read outside the batch may only decide *whether* to emit
+      // prune statements. It is never authority: another isolate can mark the
+      // operation uncertain, re-hold it or enqueue work between that read and
+      // the batch. Every prune statement therefore re-derives the same set from
+      // the same inline predicate, evaluated in transaction order. The set is
+      // stable across the statements because they select on dispatch_operations
+      // and only the final delete removes an operation row.
+      const cutoff = isoAt(tms - retentionMs(env));
+      const prunable = `(SELECT o.op_id FROM dispatch_operations o
         WHERE o.principal_id = ?
+          AND o.phase IN ('settled', 'released')
           AND o.uncertain_phase IS NULL
           AND NOT EXISTS (SELECT 1 FROM dispatch_holds h
             WHERE h.op_id = o.op_id AND h.state IN ('held', 'committed'))
           AND NOT EXISTS (SELECT 1 FROM dispatch_jobs j
             WHERE j.op_id = o.op_id AND j.status IN ('queued', 'leased'))
-          AND ((o.phase = 'settled' AND o.updated_at <= ?)
-            OR (o.phase = 'released'
-              AND (SELECT COUNT(*) FROM dispatch_operations c WHERE c.principal_id = ?) >= ?))`;
-      const pruneBinds = [principal_id, isoAt(tms - retentionMs(env)), principal_id, cap];
-      const results = await db.batch([
-        db.prepare(`DELETE FROM dispatch_start_redemptions WHERE op_id IN (${prunable})`).bind(...pruneBinds),
-        db.prepare(`DELETE FROM dispatch_fences WHERE op_id IN (${prunable})`).bind(...pruneBinds),
-        db.prepare(`DELETE FROM dispatch_settlements WHERE op_id IN (${prunable})`).bind(...pruneBinds),
-        db.prepare(`DELETE FROM dispatch_jobs WHERE op_id IN (${prunable})`).bind(...pruneBinds),
-        // A terminal operation's hold rows are history, not accounting: a
+          AND o.updated_at <= ?
+        ORDER BY o.updated_at ASC, o.op_id ASC
+        LIMIT ?)`;
+      const pruneBinds = [principal_id, cutoff, PRUNE_BATCH];
+      const candidate = await first(db, `SELECT COUNT(*) AS n FROM dispatch_operations o
+        WHERE o.principal_id = ?
+          AND o.phase IN ('settled', 'released')
+          AND o.uncertain_phase IS NULL
+          AND NOT EXISTS (SELECT 1 FROM dispatch_holds h
+            WHERE h.op_id = o.op_id AND h.state IN ('held', 'committed'))
+          AND NOT EXISTS (SELECT 1 FROM dispatch_jobs j
+            WHERE j.op_id = o.op_id AND j.status IN ('queued', 'leased'))
+          AND o.updated_at <= ?`, principal_id, cutoff);
+
+      const stmts = [];
+      if (Number(candidate && candidate.n) > 0) {
+        // A terminal operation's children are history, not accounting: a
         // released hold already refunded its charge in releaseHolds and a
         // charged hold is the settled charge itself, so deleting them moves no
-        // counter. Only those two states are deletable; `held`/`committed`
-        // belong to live reservations and are excluded twice — by this state
-        // filter and by the held/committed guard in `prunable`, which also keeps
-        // their operation.
-        db.prepare(`DELETE FROM dispatch_holds WHERE op_id IN (${prunable})
-          AND state IN ('released', 'charged')`).bind(...pruneBinds),
-        db.prepare(`DELETE FROM dispatch_operations WHERE op_id IN (${prunable})`).bind(...pruneBinds),
+        // counter. `held`/`committed` rows are excluded twice — by this state
+        // filter and by the prunable predicate, which also keeps their parent.
+        stmts.push(
+          db.prepare(`DELETE FROM dispatch_start_redemptions
+            WHERE op_id IN ${prunable} AND ${claimable}`).bind(...pruneBinds, ...claimBinds),
+          db.prepare(`DELETE FROM dispatch_fences
+            WHERE op_id IN ${prunable} AND ${claimable}`).bind(...pruneBinds, ...claimBinds),
+          db.prepare(`DELETE FROM dispatch_settlements
+            WHERE op_id IN ${prunable} AND ${claimable}`).bind(...pruneBinds, ...claimBinds),
+          db.prepare(`DELETE FROM dispatch_jobs
+            WHERE op_id IN ${prunable} AND status NOT IN ('queued', 'leased') AND ${claimable}`)
+            .bind(...pruneBinds, ...claimBinds),
+          db.prepare(`DELETE FROM dispatch_holds
+            WHERE op_id IN ${prunable} AND state IN ('released', 'charged') AND ${claimable}`)
+            .bind(...pruneBinds, ...claimBinds),
+          db.prepare(`DELETE FROM dispatch_operations
+            WHERE op_id IN ${prunable} AND ${claimable}`).bind(...pruneBinds, ...claimBinds),
+        );
+      }
+      stmts.push(
+        // Ledger entries outside the trailing window are no longer counted and
+        // are removed here; the ledger therefore holds at most one window of
+        // events per principal.
+        db.prepare(`DELETE FROM dispatch_claim_events
+          WHERE principal_id = ? AND claimed_at <= ? AND ${claimable}`)
+          .bind(principal_id, windowStart, ...claimBinds),
         db.prepare(`INSERT OR IGNORE INTO dispatch_operations
           (op_id, op_key, principal_id, tenant_id, request_digest, binding_json, generation, phase,
            cancel_intent, created_at, updated_at)
           SELECT ?, ?, ?, ?, ?, ?, 1, 'claimed', 0, ?, ?
-          WHERE (SELECT COUNT(*) FROM dispatch_operations
-            WHERE principal_id = ?) < ?`).bind(
-          op_id, op_key, principal_id, tenant_id, request_digest, json(binding), t, t, principal_id, cap),
-      ]);
-      const wrote = changes(results, results.length - 1) === 1;
+          WHERE ${claimable}`).bind(
+          op_id, op_key, principal_id, tenant_id, request_digest, json(binding), t, t, ...claimBinds),
+        // Atomic ledger append. `changes() = 1` is the insert immediately above:
+        // a refused claim, or a concurrent same-key insert that made ours a
+        // no-op (replay), records no event and therefore consumes no quota.
+        db.prepare(`INSERT INTO dispatch_claim_events (principal_id, claimed_at)
+          SELECT ?, ? WHERE changes() = 1`).bind(principal_id, tms),
+      );
+
+      await db.batch(stmts);
       const row = await first(db, 'SELECT * FROM dispatch_operations WHERE op_key = ?', op_key);
       // A concurrent claim of the same key leaves a row (replay). A missing row
-      // therefore means the guarded insert was refused by the cap.
+      // therefore means this claim was refused; the read-only probe below picks
+      // the reason for the message, and both map to the same 429 code.
       if (!row) {
-        throw httpError(429, 'Too many retained inference operations for this principal.', DISPATCH_LIMIT_CODE);
+        const ev = await first(db, `SELECT COUNT(*) AS n FROM dispatch_claim_events
+          WHERE principal_id = ? AND claimed_at > ?`, principal_id, windowStart);
+        throw httpError(429, Number(ev && ev.n) >= quota
+          ? 'Inference claim quota exhausted for this principal.'
+          : 'Too many active inference operations for this principal.', DISPATCH_LIMIT_CODE);
       }
-      return { claimed: wrote && row.op_id === op_id, op: mapOperation(row) };
+      return { claimed: row.op_id === op_id, op: mapOperation(row) };
     });
   }
 

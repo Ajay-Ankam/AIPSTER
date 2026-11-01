@@ -47,20 +47,101 @@ Every response is shape-checked. A throw, a malformed response or an unexpected 
 
 ### Retained state and retention
 
-Durable state is bounded per principal. `INFERENCE_DISPATCH_MAX_ADMISSIONS` (default 20) caps live admissions; expired admissions are swept and never count. `INFERENCE_DISPATCH_MAX_OPERATIONS` (default 20) caps retained operations in **every** phase, terminal ones included, and is enforced by a guarded insert inside the claim batch: at the cap the claim either makes room by pruning or fails with `429 DISPATCH_LIMIT`.
+Durable state is bounded per principal by three independent limits. One number cannot
+express them: counting terminal receipts against the concurrency cap turned 20 settled
+operations into a seven-day lockout, and a fixed history cap only moves that lockout to the
+cap. All three are enforced inside the claim batch.
 
-With the defaults, 20 settled operations can exhaust capacity for up to seven days even when no jobs are in flight. Confirm this retained-state budget before enabling inference; increasing throughput requires an explicit budget or retention decision.
+| Limit | Default | Bounds |
+|---|---|---|
+| Active work — `INFERENCE_DISPATCH_MAX_OPERATIONS` | 20 | Operations in a non-terminal phase, **plus** any operation whose `uncertain_phase` is set whatever its phase, **plus** any operation that still owns a `held`/`committed` hold or a `queued`/`leased` job. The last two cases have no flag: `releaseHolds` commits `phase = 'released'` in one batch and flips/refunds its holds in the next, so a crash between the two leaves live work wearing a terminal phase. Counting it keeps protected rows inside the cap. |
+| Claim window — `INFERENCE_DISPATCH_CLAIMS_PER_WINDOW` per `INFERENCE_DISPATCH_CLAIM_WINDOW_MS` | 100 per 3,600,000 ms (1 h; values under 60 s are ignored) | **New** operations per principal in a true trailing window, recorded in `dispatch_claim_events`. The count is `events in (now - window, now]`; there is no anchored reset. A tumbling counter would admit 100 just before its reset and 100 just after — 200 inside one hour — and is deliberately not used. |
+| Replay horizon — `INFERENCE_DISPATCH_RETENTION_MS` | 7 days (values under 1 h are ignored) | How long a terminal receipt (`settled` or `released`) is kept and reconciles to its original operation. |
 
-Only state that cannot be replayed is pruned, and only for the claiming principal:
+`INFERENCE_DISPATCH_MAX_ADMISSIONS` (default 20) separately caps live admissions; expired
+admissions are swept and never count.
+
+#### Derived retained bound
+
+The quota can admit `quota` operations per window for the whole replay horizon, so the number
+of retained rows is derived rather than configured:
+
+```
+retainedOperationLimit = quota × (ceil(retention / window) + 1) + activeCap + PRUNE_BATCH
+                       = 100 × (ceil(7 d / 1 h) + 1) + 20 + 4
+                       = 100 × 169 + 24 = 16,924 per principal
+```
+
+The `+1` covers a partially elapsed window at the boundary; `+ activeCap` covers live work
+held while the history ages out; `+ PRUNE_BATCH` covers the oldest rows that a claim may be
+about to remove. The value is a **documented bound**, exported as
+`retainedOperationLimit(env)` — not a deletion trigger. Rows are never removed to make room.
+
+#### Pruning is by age only
+
+A terminal operation is prunable when it is older than retention, its `uncertain_phase` is
+`NULL`, it owns no `held`/`committed` hold and no `queued`/`leased` job. Every prune statement
+in the batch re-derives that set from the same inline predicate, ordered by age and limited
+to `PRUNE_BATCH` (4) per claim:
 
 | State | When it is pruned |
 |---|---|
-| `released` operation | As soon as the principal is at the cap. `releaseHolds` requires that no start was redeemed (and that an admitted operation is fenced), so nothing ran and no result or receipt exists. |
-| `settled` operation | After `INFERENCE_DISPATCH_RETENTION_MS` (default 7 days; values under 1 hour are ignored). This row is the replay/receipt record, so it is kept for that window. |
+| `settled` / `released` operation | Only once older than retention. Fresh receipts are never deleted, because that would break the replay promise and could re-dispatch an old idempotency key as a new operation. |
 | `dispatch_settlements`, terminal `dispatch_jobs`, `dispatch_start_redemptions`, `dispatch_fences` | With their pruned operation, in the same batch. |
 | `dispatch_holds` in `released` or `charged` | With their pruned operation. These rows are history, not accounting: a released hold already refunded its charge in `releaseHolds` and a charged hold *is* the settlement charge, so deleting either moves no pool or grant counter. |
+| `dispatch_claim_events` | Once outside the trailing window. The ledger therefore holds at most one window of events per principal and survives eviction, restart and store instances. |
 
-Never pruned at any age: an operation with `uncertain_phase`, one owning a `held`/`committed` hold, one owning a `queued`/`leased` job, or any non-terminal phase. Such an operation keeps counting against the cap, so unresolved work blocks new claims for that principal with `429 DISPATCH_LIMIT` until it is resolved or cancelled — the deliberate trade of availability for never re-running uncertain work.
+Never pruned at any age, and counted as active: an operation with `uncertain_phase`, one
+owning a `held`/`committed` hold, one owning a `queued`/`leased` job, or any non-terminal
+phase. Such an operation blocks new claims for its principal with `429 DISPATCH_LIMIT` until
+it is resolved or cancelled — the deliberate trade of availability for never re-running
+uncertain work.
+
+#### Quantitative bounds at defaults
+
+The payload ceilings are the existing transport limits: a prompt is at most 65,536
+characters and a worker result content at most 65,536 characters. JSON escaping of arbitrary
+characters (`\uXXXX`) can cost up to ~6 bytes per character, so:
+
+| Quantity | Bound at defaults |
+|---|---|
+| Retained operations / principal | ≤ 16,924 (derived above) |
+| Worst-case stored payload / operation | ≈ 0.79 MB (65,536 chars × 6 B for prompt and result) |
+| Worst-case retained storage / principal | ≈ 13.3 GB at full saturation with maximum-size prompts and results; ≈ 68 MB at a realistic 2 KB prompt + result |
+| `dispatch_claim_events` / principal | ≤ quota + 1 ≈ 101 rows |
+| SQLite changes, denied claim (active cap or spent window) | **0** |
+| SQLite changes, losing same-key claim | **0** — a replay is free |
+| SQLite changes, granted claim | ≤ ~131 worst case (≤ 28 pruned child/operation rows + at most one expired window of ledger events + 1 operation + 1 event); ≈ 8–12 typical |
+| Changes / day at sustained quota | ≈ 24,000 (2,400 granted claims × ~10); a full expired window can only be deleted once per hour, so the 131-change ceiling is not sustainable per claim |
+
+These are configuration changes, not silent weakenings: lowering the quota lowers the derived
+bound; shortening retention shortens the replay promise. The production D1 quota and policy
+decision remains a separate HOLD.
+
+#### Atomicity of a claim
+
+Claim is a single `db.batch([...])`, serialized by D1 inside one transaction:
+
+1. **Replay fast path.** A retained `op_key` returns from a read-only lookup. Free: 0 row
+   changes, no quota consumed, even when the window is spent.
+2. **Prune (age-only, ≤ 4 operations).** Every child delete and the operation delete carry the
+   same inline prunable predicate *and* the claim predicate, so a stale candidate list cannot
+   strip the children of an operation another isolate just marked uncertain, re-held or
+   re-queued. A denied claim prunes nothing.
+3. **Insert.** `INSERT OR IGNORE … SELECT … WHERE active < cap AND windowCount < quota AND
+   NOT EXISTS(same op_key)`. The same-key check is repeated in the batch: the earlier lookup
+   is not authority, and a loser of the same-key race must be a pure replay rather than a
+   claim that pruned history on its way to `INSERT OR IGNORE`. It cannot block the winner,
+   because the key is absent before the winning insert.
+4. **Ledger append.** `INSERT INTO dispatch_claim_events … SELECT … WHERE changes() = 1`, so
+   only a claim that actually inserted an operation consumes quota.
+
+With the window spent, all four steps write nothing. The post-batch read distinguishes the
+two 429 reasons (active cap vs claim quota) with a read-only query; both keep the existing
+`DISPATCH_LIMIT` → 429 mapping.
+
+The same-key guarantee the coordinator already relies on still holds: a concurrent identical
+claim leaves one operation and one ledger event, and the loser reports that same operation.
 
 A fence tombstone is written only for an operation that exists at exactly the requested generation. The guard makes a stale `cancel` harmless: if it read the operation before another store fenced and released it and a later claim pruned it, the resumed `fenceStart` is a no-op that still reports `fenced` and writes nothing. Without that guard it would recreate a tombstone for a dead operation, and such a row is keyed only by the pruned `op_id`, so no retention pass could ever reach it — repeated unique operations would grow `dispatch_fences` without bound. A fence naming a generation the operation does not have is refused the same way and never blocks the real generation; an operation whose start was already redeemed is still reported as `already_redeemed`.
 
