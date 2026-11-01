@@ -309,6 +309,40 @@ test('budget: the allowance is a rolling window and recovers with time', async (
 });
 
 // ---------------------------------------------------------------------------
+// 5b — an anchored reset is not a rolling window
+// ---------------------------------------------------------------------------
+test('budget: an anchored reset cannot double the hourly allowance at a window boundary', async () => {
+  const QUOTA = 5;
+  const WINDOW = 3600000;
+  const h = createStoreHarness({
+    start: T0 - 1000,
+    env: quotaEnv(QUOTA, WINDOW, { INFERENCE_DISPATCH_MAX_OPERATIONS: '1000', INFERENCE_OWNER_DAILY_TOKENS: '10000' }),
+  });
+  // 1 ms before the UTC hour anchor, then 1 ms after it: a true trailing
+  // window still sees both batches; a per-hour counter reset would allow 2x.
+  h.clock.advance(999);
+  const { binding } = await bindingOverStore(h);
+  const claim = (key) => h.store.claimOperation({
+    op_key: opKey(alice, key), request_digest: `sha256:${key}`,
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+  });
+  for (let i = 0; i < QUOTA; i += 1) {
+    assert.equal((await claim(`anchor-before-${i}`)).claimed, true);
+  }
+  h.clock.advance(2);
+  const beforeRefusals = changes(h.sqlite);
+  for (let i = 0; i < QUOTA; i += 1) {
+    await assert.rejects(() => claim(`anchor-after-${i}`), isLimitError,
+      'a claim just after the hour anchor was admitted although the previous batch is 1 ms old');
+  }
+  assert.equal(changes(h.sqlite), beforeRefusals, 'a boundary refusal wrote rows');
+
+  h.clock.advance(WINDOW + 2);
+  const recovered = await claim('anchor-recovered');
+  assert.equal(recovered.claimed, true, 'the trailing window never expired');
+});
+
+// ---------------------------------------------------------------------------
 // 6 — malformed env falls back to the documented finite default
 // ---------------------------------------------------------------------------
 async function firstLimitIndex(env, keys = 400) {
@@ -378,7 +412,9 @@ test('budget: a spent allowance survives released-row pruning and a restart', as
 // 8 — the 21st legitimate job after 20 settlements, when the allowance permits
 // ---------------------------------------------------------------------------
 async function settleCycle(h, key, maxTokens = 64, deadline_at = T0 + 60000) {
-  const flow = await dispatchedOperation(h, { principal: alice, max_tokens: maxTokens, op_key: key, deadline_at });
+  const flow = await dispatchedOperation(h, {
+    principal: alice, max_tokens: maxTokens, op_key: opKey(alice, key), deadline_at,
+  });
   const frame = await h.store.leaseNextJob({ resource_id: RES_1 });
   assert.ok(frame && frame.job_id, `no job to lease for ${key}`);
   assert.deepEqual(await h.store.completeJob({
@@ -530,6 +566,53 @@ test('budget: quota pressure never prunes uncertain work, live holds or queued j
 });
 
 // ---------------------------------------------------------------------------
+// 9b — an uncertain row stays active even after it leaves the active phase
+// ---------------------------------------------------------------------------
+test('budget: uncertain work released from its phase still occupies the active cap and is never pruned', async () => {
+  const h = createStoreHarness({
+    env: quotaEnv(6, 3600000, {
+      INFERENCE_DISPATCH_MAX_OPERATIONS: '2', INFERENCE_DISPATCH_MAX_ADMISSIONS: '200',
+      INFERENCE_OWNER_DAILY_TOKENS: '10000',
+    }),
+  });
+  const { binding } = await bindingOverStore(h);
+  const claim = (key) => h.store.claimOperation({
+    op_key: opKey(alice, key), request_digest: `sha256:${key}`,
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+  });
+  const ids = [];
+  for (let i = 0; i < 2; i += 1) {
+    const c = await claim(`unc-released-${i}`);
+    assert.equal(c.claimed, true);
+    await h.store.markUncertain({ op_id: c.op.op_id, generation: 1, phase: 'holds', detail: 'test' });
+    // Released phase, uncertain outcome: must still count as active.
+    assert.deepEqual(await h.store.releaseHolds({ op_id: c.op.op_id, generation: 1, reason: 'test' }),
+      { released: 0 });
+    ids.push(c.op.op_id);
+  }
+  const rows = h.sqlite.prepare('SELECT op_id, phase, uncertain_phase FROM dispatch_operations').all();
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.equal(row.phase, 'released');
+    assert.equal(row.uncertain_phase, 'holds', 'an uncertain marker was dropped by release');
+  }
+  assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations'), 2);
+
+  // Two never-resolved rows fill the active cap even though their phase is
+  // terminal; they cannot accumulate outside it and are not pruned for room.
+  const before = changes(h.sqlite);
+  await assert.rejects(() => claim('unc-released-fresh'), isLimitError,
+    'released-but-uncertain rows stopped counting as active');
+  assert.equal(changes(h.sqlite), before, 'the refusal wrote rows');
+  assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations'), 2,
+    'an uncertain row was pruned for capacity');
+  for (const id of ids) {
+    assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations WHERE op_id = ? AND uncertain_phase IS NOT NULL', id),
+      1, 'an uncertain operation disappeared');
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 10 — bounded terminal history and an explicit replay horizon
 // ---------------------------------------------------------------------------
 test('budget: terminal history is bounded and the replay horizon is explicit', async () => {
@@ -585,4 +668,44 @@ test('budget: terminal history is bounded and the replay horizon is explicit', a
   assert.equal(reuse.claimed, true, 'the key was locked out forever instead of starting a new operation');
   assert.notEqual(reuse.op.op_id, flows[0].op.op_id);
   assert.ok(opRows(h.sqlite) <= QUOTA, 'history grew past the allowance after the horizon');
+});
+
+// ---------------------------------------------------------------------------
+// 11 — a lowered cap or quota never prunes a fresh settled receipt
+// ---------------------------------------------------------------------------
+test('budget: lowering the caps never prunes a fresh settled receipt or re-dispatches its key', async () => {
+  const env = quotaEnv(10, 24 * 3600000, {
+    INFERENCE_DISPATCH_MAX_OPERATIONS: '10', INFERENCE_OWNER_DAILY_TOKENS: '100000',
+  });
+  const h = createStoreHarness({ env });
+  const keys = Array.from({ length: 5 }, (_, i) => `lower-${String(i).padStart(2, '0')}`);
+  const flows = [];
+  for (const key of keys) flows.push(await settleCycle(h, key, 32));
+  assert.equal(count(h.sqlite, "SELECT COUNT(*) AS n FROM dispatch_operations WHERE phase = 'settled'"), 5);
+
+  // Operator lowers every cap. Fresh receipts are inside the promised replay
+  // horizon and no policy may count-prune them to satisfy the smaller number.
+  const small = { ...env, INFERENCE_DISPATCH_MAX_OPERATIONS: '1', INFERENCE_DISPATCH_MAX_ADMISSIONS: '1' };
+  for (const k of BUDGET_KEYS) small[k] = '1';
+  const restarted = createD1DispatchStore(h.db, { now: h.clock.now, env: small });
+  try {
+    await restarted.claimOperation({
+      op_key: opKey(alice, 'lower-fresh'), request_digest: 'sha256:lower-fresh',
+      principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding: flows[0].binding,
+    });
+  } catch (e) {
+    if (!isLimitError(e)) throw e;
+  }
+
+  for (let i = 0; i < keys.length; i += 1) {
+    const row = await restarted.getOperation({ op_key: opKey(alice, keys[i]) });
+    assert.ok(row, `the settled receipt for ${keys[i]} was pruned by a lowered cap inside the replay horizon`);
+    assert.equal(row.phase, 'settled');
+    const replay = await restarted.claimOperation({
+      op_key: opKey(alice, keys[i]), request_digest: 'sha256:lower-replay',
+      principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding: flows[0].binding,
+    });
+    assert.equal(replay.claimed, false, `${keys[i]} was re-dispatched after the cap change`);
+    assert.equal(replay.op.op_id, flows[i].op.op_id, `${keys[i]} no longer reconciles to its original operation`);
+  }
 });
