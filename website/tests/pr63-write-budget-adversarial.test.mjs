@@ -114,8 +114,18 @@ test('budget: at exhaustion a fresh key is refused with zero writes and total vo
   const deltas = [];
   const responses = [];
   for (let i = 0; i < 500; i += 1) {
+    const key = `budget-key-${String(i).padStart(4, '0')}`;
     const before = changes(h.sqlite);
-    const res = await coordinator.submit('ctx-alice', submitBody(admission, `budget-key-${String(i).padStart(4, '0')}`));
+    let res;
+    // A quota refusal may be a thrown limit error (store contract) or a mapped
+    // 429 response (coordinator contract). Both are recorded the same way, so
+    // exhaustion can never abort the loop before the write bounds are asserted.
+    try {
+      res = await coordinator.submit('ctx-alice', submitBody(admission, key));
+    } catch (e) {
+      if (!isLimitError(e)) throw e;
+      res = { status: 'rejected', http: e.status || e.http, code: e.code };
+    }
     deltas.push(changes(h.sqlite) - before);
     responses.push(res);
   }
@@ -367,8 +377,8 @@ test('budget: a spent allowance survives released-row pruning and a restart', as
 // ---------------------------------------------------------------------------
 // 8 — the 21st legitimate job after 20 settlements, when the allowance permits
 // ---------------------------------------------------------------------------
-async function settleCycle(h, key, maxTokens = 64) {
-  const flow = await dispatchedOperation(h, { principal: alice, max_tokens: maxTokens, op_key: key });
+async function settleCycle(h, key, maxTokens = 64, deadline_at = T0 + 60000) {
+  const flow = await dispatchedOperation(h, { principal: alice, max_tokens: maxTokens, op_key: key, deadline_at });
   const frame = await h.store.leaseNextJob({ resource_id: RES_1 });
   assert.ok(frame && frame.job_id, `no job to lease for ${key}`);
   assert.deepEqual(await h.store.completeJob({
@@ -405,6 +415,68 @@ test('budget: a 21st legitimate job works after 20 settlements when the allowanc
 
   // Retained history is bounded by the configured allowance, not by lifetime work.
   assert.ok(opRows(h.sqlite) <= 20 + 30, `retained ${opRows(h.sqlite)} operations for 20 settlements`);
+});
+
+// ---------------------------------------------------------------------------
+// 8b — a second window of legitimate work, first-window receipts still promised
+// ---------------------------------------------------------------------------
+test('budget: a second window of legitimate work succeeds while first-window receipts stay replayable', async () => {
+  const WINDOW = 3600000;
+  const QUOTA = 20;
+  const h = createStoreHarness({
+    env: quotaEnv(QUOTA, WINDOW, {
+      INFERENCE_DISPATCH_MAX_OPERATIONS: '20', INFERENCE_OWNER_DAILY_TOKENS: '100000',
+    }),
+  });
+  const settled = () => count(h.sqlite,
+    "SELECT COUNT(*) AS n FROM dispatch_operations WHERE phase = 'settled'");
+  const firstFlows = [];
+  for (let i = 0; i < QUOTA; i += 1) {
+    firstFlows.push(await settleCycle(h, `w1-${String(i).padStart(2, '0')}`));
+  }
+  assert.equal(settled(), QUOTA, 'a full first window of settled work must be retained');
+
+  const beforeReplay = changes(h.sqlite);
+  const replay = await h.store.claimOperation({
+    op_key: opKey(alice, 'w1-00'), request_digest: 'sha256:w1-00',
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding: firstFlows[0].binding,
+  });
+  assert.equal(replay.claimed, false);
+  assert.equal(replay.op.op_id, firstFlows[0].op.op_id);
+  assert.equal(changes(h.sqlite), beforeReplay, 'a first-window replay wrote rows');
+
+  // Hour 2: the rolling allowance refills while every first-window receipt is
+  // still inside the promised replay horizon (default 7 days). A design that
+  // merely moves the lockout from 20 to 100 cannot satisfy this.
+  h.clock.advance(WINDOW + 1);
+  h.sqlite.prepare('UPDATE resources SET heartbeat_at = ?')
+    .run(new Date(h.clock.now()).toISOString());
+  const deadline = h.clock.now() + 60000;
+  for (let i = 0; i < QUOTA; i += 1) {
+    await settleCycle(h, `w2-${String(i).padStart(2, '0')}`, 64, deadline);
+  }
+  assert.equal(settled(), 2 * QUOTA, 'the second window of legitimate work was refused');
+  assert.notEqual(await h.store.getOperation({ op_key: opKey(alice, 'w1-00') }), null,
+    'a first-window receipt was pruned inside the promised replay horizon');
+  const afterReplay = changes(h.sqlite);
+  const stillReplayable = await h.store.claimOperation({
+    op_key: opKey(alice, 'w1-00'), request_digest: 'sha256:w1-00',
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding: firstFlows[0].binding,
+  });
+  assert.equal(stillReplayable.claimed, false, 'the first-window key stopped reconciling after hour 2 work');
+  assert.equal(stillReplayable.op.op_id, firstFlows[0].op.op_id);
+  assert.equal(changes(h.sqlite), afterReplay, 'the post-hour-2 replay wrote rows');
+
+  // The second window is now saturated: one more fresh key is a zero-write
+  // refusal and does not disturb the retained receipts.
+  const beforeDenied = changes(h.sqlite);
+  await assert.rejects(() => h.store.claimOperation({
+    op_key: opKey(alice, 'w2-over'), request_digest: 'sha256:w2-over',
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding: firstFlows[0].binding,
+  }), isLimitError, 'a saturated second window accepted another claim');
+  assert.equal(changes(h.sqlite), beforeDenied, 'the saturated-window refusal wrote rows');
+  assert.notEqual(await h.store.getOperation({ op_key: opKey(alice, 'w1-00') }), null,
+    'the refusal pruned a receipt inside the replay horizon');
 });
 
 // ---------------------------------------------------------------------------
