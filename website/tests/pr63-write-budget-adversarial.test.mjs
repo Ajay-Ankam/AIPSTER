@@ -709,3 +709,181 @@ test('budget: lowering the caps never prunes a fresh settled receipt or re-dispa
     assert.equal(replay.op.op_id, flows[i].op.op_id, `${keys[i]} no longer reconciles to its original operation`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// 12 — a prune decision that read ids outside its batch must not delete a
+//      child row of an operation another store made uncertain in between
+// ---------------------------------------------------------------------------
+const REAL_STMT = Symbol('real-statement');
+
+function dbWithReadHook(db, onFirstOperationRead) {
+  let inBatch = 0;
+  let fired = false;
+  const maybe = async (sql) => {
+    if (inBatch || fired) return;
+    if (!/^\s*SELECT\b/i.test(sql) || !/dispatch_operations/.test(sql)) return;
+    fired = true;
+    await onFirstOperationRead(sql);
+  };
+  const wrap = (stmt, sql) => new Proxy(stmt, {
+    get(target, prop) {
+      if (prop === REAL_STMT) return target;
+      if (prop === 'bind') return (...args) => wrap(target.bind(...args), sql);
+      if (prop === 'first') return async (...args) => {
+        const out = await target.first(...args);
+        await maybe(sql);
+        return out;
+      };
+      if (prop === 'all') return async (...args) => {
+        const out = await target.all(...args);
+        await maybe(sql);
+        return out;
+      };
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return {
+    prepare: (sql) => wrap(db.prepare(sql), sql),
+    async batch(statements) {
+      inBatch += 1;
+      try {
+        return await db.batch(statements.map((s) => s[REAL_STMT] || s));
+      } finally {
+        inBatch -= 1;
+      }
+    },
+    exec: (sql) => db.exec(sql),
+  };
+}
+
+test('budget: a markUncertain racing a prune decision keeps the operation and every child row', async () => {
+  const h = createStoreHarness({
+    env: quotaEnv(10, 3600000, {
+      INFERENCE_DISPATCH_MAX_OPERATIONS: '1', INFERENCE_DISPATCH_MAX_ADMISSIONS: '200',
+      INFERENCE_OWNER_DAILY_TOKENS: '10000',
+    }),
+  });
+  const { binding } = await bindingOverStore(h);
+  // One released operation owning a released hold row: prunable, with a child.
+  const victim = await h.store.claimOperation({
+    op_key: opKey(alice, 'race-victim'), request_digest: 'sha256:race-victim',
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+  });
+  assert.equal(victim.claimed, true);
+  assert.equal((await h.store.acquireHold({
+    op_id: victim.op.op_id, generation: 1, pool_id: binding.pools[0].pool_id, amount: binding.pools[0].amount,
+  })).held, true);
+  assert.deepEqual(await h.store.releaseHolds({ op_id: victim.op.op_id, generation: 1, reason: 'cancelled' }),
+    { released: 1 });
+
+  let raced = false;
+  let hookSql = null;
+  const hooked = dbWithReadHook(h.db, async (sql) => {
+    hookSql = sql;
+    const marked = await h.store.markUncertain({
+      op_id: victim.op.op_id, generation: 1, phase: 'prune-race', detail: 'concurrent uncertainty',
+    });
+    raced = marked.recorded === true;
+  });
+  const store = createD1DispatchStore(hooked, {
+    now: h.clock.now,
+    env: { ...quotaEnv(10, 3600000, {
+      INFERENCE_DISPATCH_MAX_OPERATIONS: '1', INFERENCE_DISPATCH_MAX_ADMISSIONS: '200',
+      INFERENCE_OWNER_DAILY_TOKENS: '10000',
+    }) },
+  });
+  try {
+    await store.claimOperation({
+      op_key: opKey(alice, 'race-fresh'), request_digest: 'sha256:race-fresh',
+      principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+    });
+  } catch (e) {
+    if (!isLimitError(e)) throw e;
+  }
+
+  if (raced) {
+    const op = h.sqlite.prepare('SELECT uncertain_phase FROM dispatch_operations WHERE op_id = ?')
+      .get(victim.op.op_id);
+    assert.ok(op, `the pruning read (${hookSql}) ran outside its batch and the operation was deleted after a concurrent markUncertain`);
+    assert.equal(op.uncertain_phase, 'prune-race', 'the operation survived but its uncertainty marker was lost');
+    assert.equal(count(h.sqlite, `SELECT COUNT(*) AS n FROM dispatch_holds WHERE op_id = ?`, victim.op.op_id), 1,
+      'a child hold row was deleted although the operation was protected by a concurrent markUncertain');
+    for (const table of ['dispatch_holds', 'dispatch_fences', 'dispatch_jobs', 'dispatch_settlements',
+      'dispatch_start_redemptions']) {
+      assert.equal(count(h.sqlite, `SELECT COUNT(*) AS n FROM ${table} t
+        WHERE NOT EXISTS (SELECT 1 FROM dispatch_operations o WHERE o.op_id = t.op_id)`), 0,
+        `pruning deleted a ${table} row while keeping its operation`);
+    }
+  } else {
+    // The hook fired only after the claim batch: the prune decision and its
+    // child deletes were one atomic unit, so the race could not split them.
+    const op = await h.store.getOperation({ op_key: opKey(alice, 'race-victim') });
+    assert.equal(op, null, 'the mark landed before the prune batch, so the victim should have been kept');
+    assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_holds WHERE op_id = ?', victim.op.op_id), 0,
+      'pruning removed the operation but left its hold row');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 13 — live protected work that never reached the uncertain flag still counts
+//      against the active cap (crash between release gate and refunds)
+// ---------------------------------------------------------------------------
+test('budget: a crash between the release gate and its refunds leaves protected work that consumes the cap', async () => {
+  const env = quotaEnv(10, 3600000, {
+    INFERENCE_DISPATCH_MAX_OPERATIONS: '1', INFERENCE_DISPATCH_MAX_ADMISSIONS: '200',
+    INFERENCE_OWNER_DAILY_TOKENS: '10000',
+  });
+  const h = createStoreHarness({ env });
+  const flow = await admittedOperation(h, { principal: alice, max_tokens: 64, op_key: opKey(alice, 'crash-op') });
+  assert.equal(flow.admitted.outcome, 'admitted');
+  assert.deepEqual(await h.store.fenceStart({ op_id: flow.op.op_id, generation: 1, reason: 'cancel' }),
+    { outcome: 'fenced' });
+
+  // Crash exactly between the release gate batch and the refund batch: the
+  // operation is `released` but its hold is still `committed`, and no
+  // uncertain flag was ever written.
+  const realBatch = h.db.batch.bind(h.db);
+  let batches = 0;
+  const crashingDb = {
+    prepare: h.db.prepare.bind(h.db),
+    exec: h.db.exec.bind(h.db),
+    async batch(statements) {
+      batches += 1;
+      if (batches === 2) throw new Error('simulated crash between the release gate and its refunds');
+      return realBatch(statements);
+    },
+  };
+  const crashing = createD1DispatchStore(crashingDb, { now: h.clock.now, env });
+  await assert.rejects(() => crashing.releaseHolds({
+    op_id: flow.op.op_id, generation: 1, reason: 'crash',
+  }), /simulated crash/);
+
+  const row = h.sqlite.prepare('SELECT phase, uncertain_phase FROM dispatch_operations WHERE op_id = ?')
+    .get(flow.op.op_id);
+  assert.equal(row.phase, 'released');
+  assert.equal(row.uncertain_phase, null, 'the fixture must model a crash without an uncertainty marker');
+  assert.equal(count(h.sqlite, `SELECT COUNT(*) AS n FROM dispatch_holds WHERE op_id = ? AND state = 'committed'`,
+    flow.op.op_id), 1, 'the reservation must survive the crash');
+
+  // The stuck reservation is live protected work: it consumes the active cap
+  // even though its phase is terminal, and no pressure may prune it.
+  const before = changes(h.sqlite);
+  for (let i = 0; i < 5; i += 1) {
+    try {
+      await h.store.claimOperation({
+        op_key: opKey(alice, `crash-fresh-${i}`), request_digest: `sha256:crash-fresh-${i}`,
+        principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding: flow.binding,
+      });
+    } catch (e) {
+      if (!isLimitError(e)) throw e;
+    }
+  }
+  assert.equal(changes(h.sqlite), before, 'claim attempts under the stuck reservation wrote rows');
+  assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations WHERE op_id = ?', flow.op.op_id), 1,
+    'live protected work was pruned for capacity');
+  assert.equal(count(h.sqlite, `SELECT COUNT(*) AS n FROM dispatch_holds WHERE op_id = ? AND state = 'committed'`,
+    flow.op.op_id), 1, 'the committed hold was pruned');
+  assert.equal(h.sqlite.prepare('SELECT used_tokens FROM dispatch_pool_usage').get().used_tokens, 64,
+    'the unrefunded charge must stay charged until the reservation is repaired');
+});
