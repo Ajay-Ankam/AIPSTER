@@ -25,7 +25,9 @@
  *     or aged-settled operation never restores allowance;
  *   - the allowance is durable (survives a new store instance over the same
  *     database), per principal, and rolls with the clock;
- *   - a replay of a retained key is a read: no writes, no charge, no refund;
+ *   - a replay of a retained key is a read: no writes, no charge, no refund,
+ *     including when the claim loses a same-key race after its lookup returned
+ *     null — the loser must not run cleanup or append a second claim event;
  *   - malformed limit env falls back to the documented finite default, never to
  *     "unlimited" and never to a zero-claim lockout;
  *   - the allowance does not replace the operation cap: unknown work and live
@@ -722,6 +724,9 @@ function dbWithReadHook(db, onFirstOperationRead) {
   const maybe = async (sql) => {
     if (inBatch || fired) return;
     if (!/^\s*SELECT\b/i.test(sql) || !/dispatch_operations/.test(sql)) return;
+    // Only a read that picks prune candidates can split the decision from its
+    // deletes. The plain existence check on the requesting key cannot.
+    if (!/uncertain_phase\s+IS\s+NULL/i.test(sql)) return;
     fired = true;
     await onFirstOperationRead(sql);
   };
@@ -886,4 +891,90 @@ test('budget: a crash between the release gate and its refunds leaves protected 
     flow.op.op_id), 1, 'the committed hold was pruned');
   assert.equal(h.sqlite.prepare('SELECT used_tokens FROM dispatch_pool_usage').get().used_tokens, 64,
     'the unrefunded charge must stay charged until the reservation is repaired');
+});
+
+// ---------------------------------------------------------------------------
+// 14 — a claim that loses a same-key race must not run its cleanup
+// ---------------------------------------------------------------------------
+test('budget: a losing same-key racer writes nothing after the winner and appends one claim event', async () => {
+  const env = quotaEnv(20, 3600000, {
+    INFERENCE_DISPATCH_MAX_OPERATIONS: '200', INFERENCE_DISPATCH_MAX_ADMISSIONS: '200',
+    INFERENCE_OWNER_DAILY_TOKENS: '100000',
+  });
+  const h = createStoreHarness({ env });
+  const raceKey = opKey(alice, 'same-key-race');
+  const { binding } = await bindingOverStore(h);
+
+  let pause = null;
+  let winner = null;
+  let resumeAt = 0;
+  let agedBeforeResume = 0;
+  const pausedDb = {
+    prepare(sql) {
+      const stmt = h.db.prepare(sql);
+      if (!/^\s*SELECT \* FROM dispatch_operations WHERE op_key = \?\s*$/.test(sql)) return stmt;
+      return {
+        sql, params: [],
+        bind: (...args) => {
+          const bound = stmt.bind(...args);
+          return {
+            sql, params: args,
+            all: (...a) => bound.all(...a),
+            run: () => bound.run(),
+            first: async () => {
+              const stale = await bound.first(); // the pre-race lookup, still null
+              if (pause) { const p = pause; pause = null; await p(); }
+              return stale;
+            },
+          };
+        },
+        all: (...a) => stmt.all(...a),
+        run: () => stmt.run(),
+        first: (...a) => stmt.first(...a),
+      };
+    },
+    batch: (statements) => h.db.batch(statements),
+    exec: (sql) => h.db.exec(sql),
+  };
+
+  pause = async () => {
+    // Another store wins the same idempotency key while this claim is paused.
+    winner = await h.store.claimOperation({
+      op_key: raceKey, request_digest: 'sha256:same-key-race',
+      principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+    });
+    assert.equal(winner.claimed, true, 'the winner could not claim the key');
+    // Work that becomes prunable only after the winner's own cleanup ran, so the
+    // loser still has candidates to delete if its cleanup is not gated.
+    for (let i = 0; i < 6; i += 1) await settleCycle(h, `race-aged-${i}`);
+    h.sqlite.prepare('UPDATE dispatch_operations SET updated_at = ? WHERE phase = ?')
+      .run(new Date(T0 - 8 * 24 * 3600 * 1000).toISOString(), 'settled');
+    agedBeforeResume = count(h.sqlite,
+      'SELECT COUNT(*) AS n FROM dispatch_operations WHERE phase = ?', 'settled');
+    resumeAt = changes(h.sqlite);
+  };
+
+  const loser = createD1DispatchStore(pausedDb, { now: h.clock.now, env });
+  const result = await loser.claimOperation({
+    op_key: raceKey, request_digest: 'sha256:same-key-race',
+    principal_id: alice.principal_id, tenant_id: alice.tenant_id, binding,
+  });
+
+  assert.equal(result.claimed, false, 'the loser must report a replay, not a new claim');
+  assert.equal(result.op.op_id, winner.op.op_id, 'the loser replayed a different operation');
+  assert.equal(agedBeforeResume, 6, 'the fixture must leave six aged families for the loser to prune');
+  assert.equal(changes(h.sqlite) - resumeAt, 0,
+    'the losing claim wrote rows after the winner completed: its cleanup is not gated on the same key');
+  assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations WHERE op_key = ?', raceKey), 1,
+    'a losing same-key claim created a second operation row');
+  assert.equal(count(h.sqlite, 'SELECT COUNT(*) AS n FROM dispatch_operations WHERE phase = ?', 'settled'), 6,
+    'the loser deleted settled history that the winner owned');
+
+  const ledger = h.sqlite.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND lower(name) LIKE '%claim%'").all()
+    .map((r) => r.name).filter((n) => n !== 'dispatch_operations');
+  for (const table of ledger) {
+    assert.equal(count(h.sqlite, `SELECT COUNT(*) AS n FROM ${table} WHERE principal_id = ?`, alice.principal_id), 1,
+      `${table} recorded more than one budgeted claim for the race`);
+  }
 });
