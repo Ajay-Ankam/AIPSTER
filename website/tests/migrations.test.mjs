@@ -71,6 +71,10 @@ test('migrations create the auth and app tables', () => {
   for (const c of ['op_id', 'generation', 'job_id', 'outcome', 'result_digest', 'settled_at']) {
     assert.ok(cols('dispatch_settlements').includes(c), `dispatch_settlements.${c}`);
   }
+  assert.ok(names.includes('dispatch_claim_events'), 'missing table dispatch_claim_events (0025)');
+  for (const c of ['principal_id', 'claimed_at']) {
+    assert.ok(cols('dispatch_claim_events').includes(c), `dispatch_claim_events.${c}`);
+  }
   const unique = sqlite.prepare('SELECT * FROM pragma_index_list(?)').all('dispatch_holds');
   assert.ok(unique.some((i) => i.unique === 1), 'dispatch_holds is unique per (op_id, pool_id)');
 });
