@@ -99,6 +99,8 @@ uncertain work.
 
 #### Quantitative bounds at defaults
 
+These payload, storage and write estimates assume the coordinator-issued single-pool binding. Privileged direct store callers must enforce equivalent payload and pool-count bounds; `validateBinding` alone does not cap pool count.
+
 The payload ceilings are the existing transport limits: a prompt is at most 65,536
 characters and a worker result content at most 65,536 characters. JSON escaping of arbitrary
 characters (`\uXXXX`) can cost up to ~6 bytes per character, so:
