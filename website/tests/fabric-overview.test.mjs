@@ -17,7 +17,9 @@ import path from 'node:path';
 import { parseFragment } from 'parse5';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const APP_JS = path.resolve(HERE, '..', 'public', 'app', 'app.js');
+// Disposable-fixture override for the guard-discrimination diagnostic only:
+// FABRIC_APP_JS points loadClient at a temp copy of app.js (never committed).
+const APP_JS = process.env.FABRIC_APP_JS || path.resolve(HERE, '..', 'public', 'app', 'app.js');
 const APP_HTML = path.resolve(HERE, '..', 'public', 'app', 'index.html');
 const APP_CSS = path.resolve(HERE, '..', 'public', 'app', 'styles.css');
 
@@ -156,13 +158,22 @@ test('absent costs stay unknown, never zero', async () => {
 test('loading shells show first; a tab switch drops the stale first response', async () => {
   let release;
   const held = new Promise((r) => { release = r; });
-  let calls = 0;
+  // Ordinal capture BEFORE the await: the first pair of reads belongs to the
+  // stale generation even though both pairs resolve after release.
+  let statusCalls = 0, usageCalls = 0;
   const first = statusPayload([item({ id: 'r_first', name: 'first-render' })]);
   const second = statusPayload([item({ id: 'r_second', name: 'second-render' })]);
   const router = async (p) => {
-    if (p === '/api/status' || p === '/api/usage?limit=50') { calls += 1; if (calls <= 2) await held; }
-    if (p === '/api/status') return Response.json(calls <= 2 ? first : second);
-    if (p === '/api/usage?limit=50') return Response.json(usagePayload());
+    if (p === '/api/status') {
+      const n = (statusCalls += 1);
+      if (n === 1) await held;
+      return Response.json(n === 1 ? first : second);
+    }
+    if (p === '/api/usage?limit=50') {
+      const n = (usageCalls += 1);
+      if (n === 1) await held;
+      return Response.json(usagePayload());
+    }
     if (p === '/api/inventory?limit=50') return Response.json({ items: [], total: 0 });
     if (p === '/api/shared-with-me?limit=50') return Response.json({ items: [], total: 0 });
     if (p === '/api/catalog/summary') return Response.json({ privateAssets: 0, activeDeployments: 0 });
@@ -173,7 +184,7 @@ test('loading shells show first; a tab switch drops the stale first response', a
   assert.ok(el('fabric-flow').innerHTML.includes('Loading fabric flow'), 'loading shell first');
   el('nav-overview').listeners.click();
   release(); await pending;
-  await new Promise(setImmediate);
+  await new Promise((r) => setTimeout(r, 10));
   const flow = el('fabric-flow').innerHTML;
   assert.ok(flow.includes('second-render'), flow);
   assert.ok(!flow.includes('first-render'), 'stale first response dropped after session change');
