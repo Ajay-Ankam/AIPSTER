@@ -152,7 +152,37 @@ async function createRun(ctx) {
   }
   const checked = checkCreateBody(raw);
   if (isRefusal(checked)) return send(ctx, 400, { error: checked.detail, code: checked.reason });
-  const { fixture, held, label, target } = checked.body;
+  const { fixture, held, label, target, proposalOpKey } = checked.body;
+  // Advisory proposal input (verified before any budget is charged): only a
+  // DELIVERED Muse proposal op owned by this operator attaches, and only its
+  // safe receipt identity enters immutable provenance. No prompt, proposal
+  // text, or provider body is copied; the fixture verdict is unchanged.
+  let proposal = null;
+  if (proposalOpKey !== null && proposalOpKey !== undefined) {
+    let op = null;
+    try {
+      op = await first(ctx.db, 'SELECT state, mode, receipt_json FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', ctx.actor.user.id, proposalOpKey);
+    } catch (e) {
+      if (/no such table/i.test(String((e && e.message) || e))) {
+        return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
+      }
+      throw e;
+    }
+    if (!op) return send(ctx, 404, { error: 'DGM proposal operation not found.', code: 'DGM_MUSE_UNKNOWN_OP' });
+    if (op.state !== 'delivered') {
+      return send(ctx, 409, { error: 'Only a delivered DGM proposal attaches as advisory run input.', code: 'DGM_MUSE_NOT_DELIVERED' });
+    }
+    let receipt = null;
+    try { receipt = op.receipt_json ? JSON.parse(op.receipt_json) : null; } catch { receipt = null; }
+    proposal = {
+      opKey: proposalOpKey,
+      mode: op.mode || (receipt && receipt.mode) || null,
+      evaluation: (receipt && receipt.evaluation) || 'unknown',
+      model: (receipt && receipt.model) || null,
+      responseId: (receipt && receipt.responseId) || null,
+      usage: (receipt && receipt.usage) || null,
+    };
+  }
   const verdict = evaluateFixture(fixture);
   const status = creationStatus(verdict.status, held);
   await checkWriteBudget(ctx.db, ctx.actor.user.id);
@@ -162,7 +192,10 @@ async function createRun(ctx) {
   const me = ctx.actor.user.id;
   const traceEvents = [
     ...verdict.events.map((e) => ({ event: e.event, body: { detail: e.detail } })),
-    { event: 'preview.created', body: { detail: `fixture=${fixture} held=${held ? 'true' : 'false'}` } }
+    { event: 'preview.created', body: { detail: `fixture=${fixture} held=${held ? 'true' : 'false'}` } },
+    // Advisory input linkage only: identity + honest evaluation label. The
+    // verdict, gates, and scores remain the fixture table's alone.
+    ...(proposal ? [{ event: 'preview.proposal_attached', body: { detail: `op=${proposal.opKey} evaluation=${proposal.evaluation}` } }] : [])
   ];
   const telemetryEvents = fixtureTelemetryRows(status);
   const stored = [...traceEvents, ...telemetryEvents];
@@ -176,7 +209,8 @@ async function createRun(ctx) {
     ).bind(id, taskId, me, fixture, held ? 1 : 0, label, target, status,
       verdict.envelopeLabel, verdict.adviceReason, verdict.budgetFits ? 1 : 0,
       verdict.budgetReason, verdict.settlement,
-      JSON.stringify(verdict.gates), JSON.stringify(verdict.provenance), now, now,
+      JSON.stringify(verdict.gates),
+      JSON.stringify(proposal ? { ...verdict.provenance, proposal } : verdict.provenance), now, now,
       status, me),
     ...stored.map((r, seq) => eventInsert(ctx.db, id, seq, now, r.event, r.body)),
     auditInsert(ctx.db, now, me, 'dgm.preview.create', id, `fixture=${fixture} status=${status}`)

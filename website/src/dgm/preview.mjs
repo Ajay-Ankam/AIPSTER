@@ -75,7 +75,7 @@ export const DISABLED_ACTIONS = {
   'advise-live': 'live_adviser is disabled; no code path enables it'
 };
 
-export const ALLOWED_BODY_KEYS = ['fixture', 'held', 'label', 'target'];
+export const ALLOWED_BODY_KEYS = ['fixture', 'held', 'label', 'target', 'proposalOpKey'];
 export const MAX_LABEL_LEN = 128;
 
 // Controller validation, budgets and bindings. Any browser-supplied key here
@@ -306,7 +306,14 @@ export function checkCreateBody(raw) {
     return previewRefused('DGM_UNKNOWN_TARGET',
       `unknown DGM target ${JSON.stringify(target)}; known targets: ${TARGET_NAME}`);
   }
-  return { body: { fixture, held, label: redactText(label), target: target || TARGET_NAME } };
+  // Optional advisory input: the key of a DELIVERED DGM Muse proposal op.
+  // The router verifies delivery and copies only safe receipt identity into
+  // provenance; verdicts still come from the fixture table alone.
+  const proposalOpKey = raw.proposalOpKey === undefined ? null : raw.proposalOpKey;
+  if (proposalOpKey !== null && (typeof proposalOpKey !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(proposalOpKey))) {
+    return previewRefused('DGM_BAD_BODY', 'proposalOpKey must be 1..64 id chars');
+  }
+  return { body: { fixture, held, label: redactText(label), target: target || TARGET_NAME, proposalOpKey } };
 }
 
 // ---- fixture telemetry rows + summaries (pure; operate on stored rows) ----

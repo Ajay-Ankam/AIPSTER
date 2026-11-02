@@ -17,6 +17,7 @@
 // this module. fetchImpl is injectable so tests prove the boundary with
 // zero network calls.
 import { httpError } from '../lib/validate.js';
+import { META_PRICES } from '../routing/adapters/meta.mjs';
 
 export const DGM_MUSE_MODEL = 'muse-spark-1.3-contributor';
 export const DGM_MUSE_RESPONSES_URL = 'https://api.meta.ai/v1/responses';
@@ -62,6 +63,54 @@ export function museProviderStatus(env) {
 
 export const DGM_MUSE_REASONING_EFFORT = 'minimal';
 
+// Contributor price reference (same table as the reviewed routing adapter;
+// limits provisional and live verification required before production use).
+export const DGM_MUSE_PRICE_REF = META_PRICES.contributor;
+export const DGM_MUSE_PRICE_VERSION = META_PRICES.version;
+export const DGM_MUSE_PRICE_SOURCE = META_PRICES.source;
+
+/**
+ * Rigorous input-token upper bound (not a prediction): every text token
+ * spans at least one UTF-8 byte, so input tokens can never exceed the
+ * request byte length. Measured over the FULL request JSON, so instructions
+ * and protocol overhead are inside the bound. Labelled an estimate in
+ * receipts because actual usage is usually far lower — the bound only ever
+ * over-reserves, never under-reserves. Model pricing itself stays
+ * provisional until re-verified before any production activation.
+ */
+export function estimateMuseInputTokens(prompt) {
+  return new TextEncoder().encode(JSON.stringify(buildProposeRequest(typeof prompt === 'string' ? prompt : ''))).length;
+}
+
+/** Production spend cap in USD. Defaults to zero: live calls need explicit budget. */
+export function museSpendCapUsd(env) {
+  const raw = env ? env.DGM_MUSE_SPEND_CAP_USD : undefined;
+  const n = typeof raw === 'number' ? raw : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+/** Worst-case bounded cost of one generation: estimated input + full output budget. */
+export function museWorstCaseSpendUsd(prompt) {
+  const p = META_PRICES.contributor;
+  return Number(((estimateMuseInputTokens(prompt) * p.inPer1M + DGM_MUSE_OUTPUT_MAX_TOKENS * p.outPer1M) / 1e6).toFixed(6));
+}
+
+/** Actual cost from reported usage; null when usage is unusable (never zero). */
+export function museUsageSpendUsd(usage) {
+  if (!usage || !Number.isSafeInteger(usage.input_tokens) || !Number.isSafeInteger(usage.output_tokens)
+      || usage.input_tokens < 0 || usage.output_tokens < 0) return null;
+  const p = META_PRICES.contributor;
+  return Number(((usage.input_tokens * p.inPer1M + usage.output_tokens * p.outPer1M) / 1e6).toFixed(6));
+}
+
+function signalTimeoutError(signal) {
+  const reason = signal && signal.reason;
+  if (reason instanceof Error) return reason;
+  const err = new Error('DGM provider body read timed out.');
+  err.name = 'TimeoutError';
+  return err;
+}
+
 export function buildProposeRequest(prompt) {
   return {
     url: DGM_MUSE_RESPONSES_URL,
@@ -80,31 +129,63 @@ export function buildProposeRequest(prompt) {
   };
 }
 
-async function readCapped(response) {
+async function readCapped(response, signal) {
+  // The transport (or an injected stub) may ignore the deadline signal on
+  // the body: enforce the single total deadline on the read itself, with
+  // bounded owned-reader cleanup. Never waits past the provider deadline.
   const reader = response.body ? response.body.getReader() : null;
-  if (!reader) {
-    const text = await response.text();
-    if (text.length > DGM_MUSE_RESPONSE_MAX) {
-      throw fail(502, 'DGM provider response exceeded the size bound.', 'DGM_MUSE_RESPONSE_TOO_LARGE');
+  let onAbort = null;
+  const abort = new Promise((_, reject) => {
+    if (!signal) return;
+    // Reject FIRST, then clean up: cancelling the reader can settle the
+    // pending read (some runtimes resolve it as done), which must never
+    // win the race as an empty body.
+    const fire = () => {
+      reject(signalTimeoutError(signal));
+      if (reader) { try { const p = reader.cancel(); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch { /* bounded cleanup */ } }
+    };
+    if (signal.aborted) { fire(); return; }
+    onAbort = fire;
+    signal.addEventListener('abort', fire, { once: true });
+  });
+  const release = () => {
+    if (signal && onAbort) { try { signal.removeEventListener('abort', onAbort); } catch { /* gone */ } }
+  };
+  try {
+    if (!reader) {
+      const text = await Promise.race([response.text(), abort]);
+      if (text.length > DGM_MUSE_RESPONSE_MAX) {
+        throw fail(502, 'DGM provider response exceeded the size bound.', 'DGM_MUSE_RESPONSE_TOO_LARGE');
+      }
+      return text;
     }
-    return text;
-  }
-  const chunks = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > DGM_MUSE_RESPONSE_MAX) {
-      try { await reader.cancel(); } catch { /* best effort */ }
-      throw fail(502, 'DGM provider response exceeded the size bound.', 'DGM_MUSE_RESPONSE_TOO_LARGE');
+    const chunks = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await Promise.race([reader.read(), abort]);
+        if (done) break;
+        total += value.byteLength;
+        if (total > DGM_MUSE_RESPONSE_MAX) {
+          try { await reader.cancel(); } catch { /* best effort */ }
+          throw fail(502, 'DGM provider response exceeded the size bound.', 'DGM_MUSE_RESPONSE_TOO_LARGE');
+        }
+        chunks.push(value);
+      }
+    } catch (e) {
+      try { await reader.cancel(); } catch { /* bounded owned-reader cleanup */ }
+      // A firing deadline wins deterministically over whatever the
+      // cancelled read rejects with.
+      if (signal && signal.aborted) throw signalTimeoutError(signal);
+      throw e;
     }
-    chunks.push(value);
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { merged.set(c, off); off += c.length; }
+    return new TextDecoder().decode(merged);
+  } finally {
+    release();
   }
-  const merged = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) { merged.set(c, off); off += c.length; }
-  return new TextDecoder().decode(merged);
 }
 
 function extractText(wire) {
@@ -130,6 +211,19 @@ function usageOf(wire) {
 }
 
 /**
+ * Failure after the provider accepted the call (HTTP 2xx headers received,
+ * or an ambiguous 5xx): the call counts as sent, so the outcome is unknown
+ * and the tenant must quarantine, never silently retry. `accepted: true`
+ * tells the ledger to block new keys until operator reconciliation.
+ */
+function acceptedFailure(status, message, code, httpStatus) {
+  const err = fail(status, message, code);
+  err.accepted = true;
+  err.httpStatus = Number.isSafeInteger(httpStatus) ? httpStatus : null;
+  return err;
+}
+
+/**
  * One bounded proposal call. Throws typed DGM_MUSE_* failures; never leaks
  * the key, headers, or raw provider body. No retry: callers map lost
  * responses to `uncertain` and require a fresh key to retry.
@@ -147,6 +241,10 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
     throw fail(500, 'DGM provider deadline is out of bounds.', 'DGM_MUSE_BAD_DEADLINE');
   }
   const { url, body } = buildProposeRequest(prompt);
+  // Single total deadline for connect + headers + body: the same signal
+  // bounds the fetch and the body read (readCapped enforces it even when
+  // the transport ignores it on the stream).
+  const signal = AbortSignal.timeout(deadlineMs);
   let response;
   try {
     response = await fetchImpl(url, {
@@ -154,7 +252,7 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
       redirect: 'error',
-      signal: AbortSignal.timeout(deadlineMs),
+      signal,
     });
   } catch (e) {
     if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
@@ -168,16 +266,45 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
   }
   if (response.status === 400) throw fail(502, 'DGM provider rejected the request shape.', 'DGM_MUSE_REJECTED');
   if (response.status < 200 || response.status >= 300) {
+    // 5xx acceptance is ambiguous (the generation may have run and billed):
+    // quarantine rather than record a clean failure. 429/4xx are definitive
+    // rejections — nothing was accepted.
+    if (response.status >= 500) {
+      throw acceptedFailure(502, 'DGM provider errored; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_UPSTREAM', response.status);
+    }
     throw fail(502, 'DGM provider errored.', 'DGM_MUSE_UPSTREAM');
   }
+  let bodyText;
+  try {
+    bodyText = await readCapped(response, signal);
+  } catch (e) {
+    if (e && e.code === 'DGM_MUSE_RESPONSE_TOO_LARGE') {
+      e.accepted = true;
+      e.httpStatus = response.status;
+      throw e;
+    }
+    // The deadline can fire while the body is still streaming, and the
+    // stream itself can reset mid-body: both mean an accepted call with no
+    // usable output, never a malformed rejection.
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+      throw fail(504, 'DGM provider body read timed out.', 'DGM_MUSE_TIMEOUT');
+    }
+    throw acceptedFailure(502, 'DGM provider response body unreadable; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_UNREADABLE', response.status);
+  }
+  // Parsing is separate from transport: unparsable 2xx output is malformed
+  // (but still an accepted call — the provider ran), never "unreadable".
   let wire;
   try {
-    wire = JSON.parse(await readCapped(response));
-  } catch (e) {
-    if (e && e.code === 'DGM_MUSE_RESPONSE_TOO_LARGE') throw e;
-    throw fail(502, 'DGM provider returned malformed output.', 'DGM_MUSE_MALFORMED');
+    wire = JSON.parse(bodyText);
+  } catch {
+    throw acceptedFailure(502, 'DGM provider returned malformed output; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_MALFORMED', response.status);
   }
-  if (!wire || typeof wire !== 'object') throw fail(502, 'DGM provider returned malformed output.', 'DGM_MUSE_MALFORMED');
+  // Anything past the 2xx header is an accepted call: unusable output
+  // quarantines the tenant instead of failing clean and admitting a
+  // second chargeable call on a new key.
+  if (!wire || typeof wire !== 'object') {
+    throw acceptedFailure(502, 'DGM provider returned malformed output; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_MALFORMED', response.status);
+  }
   if (wire.status === 'incomplete' || wire.incomplete_details) {
     // Terminal known-truncated (HTTP 2xx with an incomplete marker): keep
     // exactly the safe metadata — terminal status, incomplete reason, model,
@@ -196,17 +323,22 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
     throw err;
   }
   if (typeof wire.model === 'string' && wire.model !== DGM_MUSE_MODEL) {
-    throw fail(502, `DGM provider answered as ${JSON.stringify(wire.model)}, not the pinned model.`, 'DGM_MUSE_WRONG_MODEL');
+    // Provider-controlled text reaches the caller only redacted and sliced;
+    // unbounded provider metadata is never reflected verbatim.
+    const observed = redactMuseText(JSON.stringify(wire.model)).slice(0, 64);
+    throw fail(502, `DGM provider answered with an unexpected model (${observed}); expected the pinned model.`, 'DGM_MUSE_WRONG_MODEL');
   }
   const text = extractText(wire);
   if (typeof text !== 'string' || text.length === 0 || text.length > DGM_MUSE_PROPOSAL_MAX_CHARS) {
-    throw fail(502, 'DGM provider returned no usable proposal text.', 'DGM_MUSE_MALFORMED');
+    throw acceptedFailure(502, 'DGM provider returned no usable proposal text; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_MALFORMED', response.status);
   }
   return {
     proposal: text,
     usage: usageOf(wire),
     responseId: typeof wire.id === 'string' ? wire.id : null,
-    model: typeof wire.model === 'string' ? wire.model : DGM_MUSE_MODEL,
+    // Observed identity only: a missing wire.model records null, never a
+    // fabricated fallback to the pinned model.
+    model: typeof wire.model === 'string' && wire.model !== '' ? wire.model : null,
   };
 }
 

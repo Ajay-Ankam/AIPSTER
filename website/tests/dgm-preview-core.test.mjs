@@ -25,7 +25,7 @@ test('dgm core: contract tables list every fixture, state, gate, and key', () =>
   assert.deepEqual(Object.keys(DISABLED_ACTIONS).sort(),
     ['advise-live', 'execute', 'final-audit', 'promote', 'reserve']);
   for (const detail of Object.values(DISABLED_ACTIONS)) assert.match(detail, /disabled|not implemented/);
-  assert.deepEqual([...ALLOWED_BODY_KEYS].sort(), ['fixture', 'held', 'label', 'target']);
+  assert.deepEqual([...ALLOWED_BODY_KEYS].sort(), ['fixture', 'held', 'label', 'proposalOpKey', 'target']);
   assert.ok(FORBIDDEN_BODY_KEYS.size >= 50);
   for (const k of ['seed', 'budgets', 'binding', 'protocol_id', 'receipt', 'idempotency_key']) {
     assert.ok(FORBIDDEN_BODY_KEYS.has(k), k);
@@ -137,7 +137,9 @@ test('dgm core: held creation pauses only valid verdicts', () => {
 
 test('dgm core: create bodies accept only the documented keys and shapes', () => {
   const ok = checkCreateBody({ fixture: 'good' });
-  assert.deepEqual(ok, { body: { fixture: 'good', held: false, label: '', target: 'coord-jobs-v0' } });
+  assert.deepEqual(ok, { body: { fixture: 'good', held: false, label: '', target: 'coord-jobs-v0', proposalOpKey: null } });
+  assert.equal(checkCreateBody({ fixture: 'good', proposalOpKey: 'op-1' }).body.proposalOpKey, 'op-1');
+  assert.equal(checkCreateBody({ fixture: 'good', proposalOpKey: '../x' }).reason, 'DGM_BAD_BODY');
   const full = checkCreateBody({ fixture: 'good', held: true, label: 'look', target: 'coord-jobs-v0' });
   assert.equal(full.body.held, true);
   assert.equal(full.body.label, 'look');

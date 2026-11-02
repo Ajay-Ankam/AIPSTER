@@ -19,7 +19,9 @@ import { readJson, httpError } from '../lib/validate.js';
 import { checkWriteBudget } from '../lib/quotas.js';
 import {
   DGM_MUSE_SCHEMA, DGM_MUSE_MODEL, DGM_MUSE_PROMPT_MAX_BYTES, DGM_MUSE_RESPONSE_MAX,
+  DGM_MUSE_PRICE_REF, DGM_MUSE_PRICE_VERSION, DGM_MUSE_PRICE_SOURCE,
   museLiveEnabled, museProviderStatus, buildProposeRequest, proposeLive, runFixtureProposal,
+  museSpendCapUsd, museWorstCaseSpendUsd, museUsageSpendUsd,
 } from './muse-provider.mjs';
 
 // Read permission reuses the preview grant: no new grant shape, no new
@@ -29,6 +31,11 @@ import {
 // engineering evaluation work, and the observer role must never authorize
 // model generation or cancellation alone. No ROLE_PERMISSIONS change.
 export const DGM_MUSE_PERMISSION = 'admin.dgm.preview';
+// A stranded reservation (no provider contact yet) or in-flight fetch older
+// than this is settled by the admission sweep: `reserved` proves no call
+// was sent (the only path to a call passes through `fetching`), `fetching`
+// may have sent one, so it becomes `uncertain`, never silently dropped.
+export const DGM_MUSE_STALE_MS = 10 * 60 * 1000;
 export const DGM_MUSE_WRITE_PERMISSION = 'admin.engineering.assign';
 
 async function requireMuseWrite(ctx) {
@@ -85,7 +92,58 @@ function storageMissing(e) {
   return /no such table/i.test(msg);
 }
 
-async function claimOp(db, tenant, opKey, digest) {
+function opAge(createdAt) {
+  const ms = Date.parse(createdAt);
+  if (!Number.isFinite(ms)) return '';
+  return `, ${Math.max(0, Math.round((Date.now() - ms) / 1000))}s old`;
+}
+
+function evaluationForMode(mode, fallback) {
+  if (mode === 'live') return 'synthetic-live';
+  if (mode === 'fixture') return 'fixture';
+  return fallback || 'unknown';
+}
+
+async function sweepStrandedOps(db, tenant) {
+  // Bounded-deadline recovery: reservations prove no provider contact (the
+  // only path to a call passes through `fetching`), so they fail closed;
+  // fetches may have sent a call, so they quarantine as uncertain. Either
+  // way the tenant wedge clears without operator key knowledge.
+  const cutoff = new Date(Date.now() - DGM_MUSE_STALE_MS).toISOString();
+  let stranded = null;
+  try {
+    stranded = await all(db,
+      "SELECT op_key, state, mode FROM dgm_muse_ops WHERE tenant_id = ? AND state IN ('reserved','fetching') AND created_at < ?",
+      tenant, cutoff);
+  } catch (e) {
+    if (storageMissing(e)) throw httpError(503, 'DGM Muse proposal store is not migrated.', 'DGM_MUSE_UNAVAILABLE');
+    throw e;
+  }
+  if (!stranded || !stranded.length) return 0;
+  const now = nowIso();
+  const stmts = stranded.map((r) => {
+    const toFailed = r.state === 'reserved';
+    const receipt = {
+      opKey: r.op_key,
+      mode: r.mode || null,
+      evaluation: evaluationForMode(r.mode, null),
+      error: 'DGM_MUSE_EXPIRED',
+      status: 502,
+      at: now,
+      ...(toFailed
+        ? { note: 'Reservation expired before provider contact; no provider call was sent.' }
+        : { accepted: true, note: 'Expired while fetching; outcome unknown. Reconcile from stored evidence, then cancel.' }),
+    };
+    return db.prepare(
+      `UPDATE dgm_muse_ops SET state = ?, receipt_json = ?, updated_at = ?
+       WHERE tenant_id = ? AND op_key = ? AND state = ?`
+    ).bind(toFailed ? 'failed' : 'uncertain', JSON.stringify(receipt), now, tenant, r.op_key, r.state);
+  });
+  await db.batch(stmts);
+  return stranded.length;
+}
+
+async function claimOp(db, tenant, opKey, digest, mode) {
   let found;
   try {
     found = await first(db, 'SELECT op_key, input_digest, state, receipt_json FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', tenant, opKey);
@@ -116,8 +174,12 @@ async function claimOp(db, tenant, opKey, digest) {
     try {
       await run(db, "DELETE FROM dgm_muse_ops WHERE tenant_id = ? AND state IN ('delivered','failed','cancelled') AND created_at < ?",
         tenant, new Date(Date.now() - OP_TTL_MS).toISOString());
+      // Bounded-deadline recovery first: stranded rows settle to failed
+      // (provably unsent) or uncertain (maybe sent) so no silent wedge
+      // survives a lost key or a dead Worker.
+      await sweepStrandedOps(db, tenant);
       const blockers = await all(db,
-        "SELECT op_key, state FROM dgm_muse_ops WHERE tenant_id = ? AND state IN ('reserved','fetching','uncertain') ORDER BY updated_at ASC LIMIT 5",
+        "SELECT op_key, state, created_at FROM dgm_muse_ops WHERE tenant_id = ? AND state IN ('reserved','fetching','uncertain') ORDER BY updated_at ASC LIMIT 5",
         tenant);
       const uncertain = (blockers || []).filter((r) => r && r.state === 'uncertain');
       if (uncertain.length) {
@@ -125,17 +187,18 @@ async function claimOp(db, tenant, opKey, digest) {
         throw httpError(409, `Tenant has unresolved quarantined DGM proposal(s) (${names}): outcome unknown, no duplicate was sent. Reconcile each listed op from its stored evidence (GET ops/{key}), then cancel to close it out; a new key does not reconcile them.`, 'DGM_MUSE_UNCERTAIN');
       }
       if (blockers && blockers.length) {
-        throw httpError(429, 'Another DGM proposal is already in flight for this tenant. Wait for it to settle or cancel it, then retry.', 'DGM_MUSE_IN_FLIGHT');
+        const named = blockers.slice(0, 3).map((r) => `${r.op_key} (${r.state}${opAge(r.created_at)})`).join(', ');
+        throw httpError(429, `Another DGM proposal is already in flight for this tenant (${named}). Wait for it to settle or cancel it by key, then retry.`, 'DGM_MUSE_IN_FLIGHT');
       }
       const now = new Date().toISOString();
       const res = await run(db,
-        `INSERT INTO dgm_muse_ops (tenant_id, op_key, input_digest, state, receipt_json, created_at, updated_at)
-         SELECT ?, ?, ?, 'reserved', NULL, ?, ? WHERE NOT EXISTS
+        `INSERT INTO dgm_muse_ops (tenant_id, op_key, input_digest, mode, state, receipt_json, created_at, updated_at)
+         SELECT ?, ?, ?, ?, 'reserved', NULL, ?, ? WHERE NOT EXISTS
          (SELECT 1 FROM dgm_muse_ops WHERE tenant_id = ? AND state IN ('reserved','fetching','uncertain'))`,
-        tenant, opKey, digest, now, now, tenant);
+        tenant, opKey, digest, mode, now, now, tenant);
       if (Number(res.meta.changes) === 1) return { outcome: 'claimed' };
       const raced = await first(db, 'SELECT op_key, input_digest, state, receipt_json FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', tenant, opKey);
-      if (raced) return claimOp(db, tenant, opKey, digest);
+      if (raced) return claimOp(db, tenant, opKey, digest, mode);
       // A concurrent cancel may have cleared the blocker between the check
       // and the insert; retry rather than misreporting a settled race.
     } catch (e) {
@@ -157,7 +220,7 @@ async function markOp(db, tenant, opKey, fromStates, to, receipt = null) {
   return { ok: Number(res.meta.changes) === 1 };
 }
 
-function receiptFor({ key, live, out, elapsedMs, replay }) {
+function receiptFor({ key, live, out, elapsedMs, replay, spendReserved = 0, spendUsed = null }) {
   return {
     opKey: key,
     mode: live ? 'live' : 'fixture',
@@ -166,6 +229,8 @@ function receiptFor({ key, live, out, elapsedMs, replay }) {
     responseId: live ? out.responseId : null,
     usage: live ? out.usage : null,
     elapsedMs,
+    spendUsdReserved: spendReserved,
+    spendUsdUsed: spendUsed,
     schemaVersion: DGM_MUSE_SCHEMA,
     validation: 'pass',
     replay: !!replay,
@@ -183,15 +248,38 @@ async function proposeOnce({ db, env, actor, prompt, opKey, mode = 'fixture', fe
     throw httpError(503, 'Live DGM proposals are not configured; no fixture was substituted. Request mode "fixture" for a labelled dry run.', 'DGM_MUSE_UNAVAILABLE');
   }
   const live = mode === 'live';
-  const claim = await claimOp(db, tenant, key, digest);
-  if (claim.outcome === 'replay') {
-    if (!live || claim.state !== 'delivered') {
-      if (claim.state === 'delivered' && !live) {
-        return { status: 200, body: { proposal: runFixtureProposal(prompt), receipt: { ...claim.receipt, replay: true }, replay: true } };
-      }
-      return { status: 200, body: { proposal: null, receipt: { ...claim.receipt, replay: true }, replay: true, note: 'Proposal text is not stored; this replay returns the original receipt only.' } };
+  // Finite server-controlled spend admission (advisor pattern): the
+  // worst-case bounded cost must fit an explicit operator-set cap, or the
+  // call is refused before any budget is touched or row written. No user
+  // budget is accepted; the production default is unset (fail closed).
+  let spendReserved = 0;
+  if (live) {
+    const cap = museSpendCapUsd(env);
+    spendReserved = museWorstCaseSpendUsd(prompt);
+    if (!(cap > 0) || spendReserved > cap) {
+      throw httpError(402, 'Live DGM proposal spend cap does not cover the worst-case bounded cost. No provider call was sent and nothing was charged.', 'DGM_MUSE_SPEND_EXCEEDED');
     }
-    return { status: 200, body: { proposal: null, receipt: { ...claim.receipt, replay: true }, replay: true, note: 'Proposal text is not stored; this replay returns the original receipt only.' } };
+  }
+  const claim = await claimOp(db, tenant, key, digest, mode);
+  if (claim.outcome === 'replay') {
+    const stored = claim.receipt || {};
+    // Truthful replays: delivered succeeds; failed replays its recorded
+    // failure status/code; cancelled answers 409. Every replay names its
+    // state — a failure is never reported as success.
+    if (claim.state === 'delivered' && !live) {
+      return { status: 200, body: { proposal: runFixtureProposal(prompt), receipt: { ...stored, replay: true }, state: 'delivered', replay: true } };
+    }
+    if (claim.state === 'delivered') {
+      return { status: 200, body: { proposal: null, receipt: { ...stored, replay: true }, state: 'delivered', replay: true, note: 'Proposal text is not stored; this replay returns the original receipt only.' } };
+    }
+    if (claim.state === 'failed') {
+      const code = typeof stored.error === 'string' && stored.error ? stored.error : 'DGM_MUSE_ERROR';
+      const status = Number.isSafeInteger(stored.status) && stored.status >= 400 && stored.status <= 599 ? stored.status : 502;
+      return { status, body: { proposal: null, receipt: { ...stored, replay: true }, state: 'failed', replay: true } };
+    }
+    if (claim.state === 'cancelled') {
+      return { status: 409, body: { proposal: null, receipt: { ...stored, replay: true }, state: 'cancelled', replay: true, note: 'This operation was cancelled by operator review; its stored receipt is returned unchanged apart from the replay marker.' } };
+    }
   }
   if (claim.outcome === 'in-progress') {
     throw httpError(409, 'This proposal is already running. Retry shortly with the same key.', 'DGM_MUSE_IN_PROGRESS');
@@ -228,7 +316,7 @@ async function proposeOnce({ db, env, actor, prompt, opKey, mode = 'fixture', fe
   }
   try {
     const out = await proposeLive({ fetchImpl, apiKey: env.DGM_MUSE_API_KEY, prompt });
-    const receipt = receiptFor({ key, live, out, elapsedMs: Date.now() - t0, replay: false });
+    const receipt = receiptFor({ key, live, out, elapsedMs: Date.now() - t0, replay: false, spendReserved, spendUsed: museUsageSpendUsd(out.usage) });
     const settled = await markOp(db, tenant, key, ['fetching'], 'delivered', receipt);
     if (!settled.ok) {
       // Local cancellation cannot recall an already-sent provider call: the
@@ -241,11 +329,20 @@ async function proposeOnce({ db, env, actor, prompt, opKey, mode = 'fixture', fe
     }
     return { status: 200, body: { proposal: out.proposal, receipt, replay: false } };
   } catch (e) {
-    const uncertain = e && (e.code === 'DGM_MUSE_TIMEOUT' || e.code === 'DGM_MUSE_UNREACHABLE');
+    // Unknown outcomes quarantine: lost responses AND accepted-but-unusable
+    // provider output (the call was sent, so a new key must not duplicate
+    // it). The worst-case reservation is retained on the receipt — charges
+    // are never silently refunded; reconciliation is explicit cancel.
+    const uncertain = e && (e.code === 'DGM_MUSE_TIMEOUT' || e.code === 'DGM_MUSE_UNREACHABLE' || e.accepted === true);
     await markOp(db, tenant, key, ['fetching'], uncertain ? 'uncertain' : 'failed', {
       opKey: key, mode: 'live', evaluation: 'synthetic-live',
       error: e && e.code ? e.code : 'DGM_MUSE_ERROR',
       status: e && Number.isSafeInteger(e.status) ? e.status : 502, at: new Date().toISOString(),
+      spendUsdReserved: spendReserved,
+      spendUsdUsed: null,
+      chargeNote: 'Worst-case reservation retained; no automatic refund. Reconcile by cancelling.',
+      ...(e && e.accepted === true ? { accepted: true } : {}),
+      ...(e && Number.isSafeInteger(e.httpStatus) ? { httpStatus: e.httpStatus } : {}),
     });
     throw e;
   }
@@ -276,6 +373,15 @@ async function statusRoute(ctx) {
     provider: museProviderStatus(ctx.env),
     authorization: { read: DGM_MUSE_PERMISSION, write: DGM_MUSE_WRITE_PERMISSION },
     modes: ['fixture', 'live'],
+    spendCapUsd: museSpendCapUsd(ctx.env),
+    priceRef: { version: DGM_MUSE_PRICE_VERSION, source: DGM_MUSE_PRICE_SOURCE, model: DGM_MUSE_PRICE_REF.model, limitsProvisional: true, liveVerificationRequired: true },
+    constraints: {
+      defaultState: 'off',
+      contributorTrainingUse: 'Contributor mode permits training use of submitted content: operators must submit synthetic qualification input only.',
+      inputMustBeSynthetic: 'Labelling the output synthetic does not make arbitrary input synthetic. Tenant, credential, personal, or production data must never be submitted.',
+      liveRequires: ['DGM_MUSE_LIVE=1', 'server-side DGM_MUSE_API_KEY binding', 'DGM_MUSE_SPEND_CAP_USD covering the worst-case bounded cost', 'admin.engineering.assign grant'],
+      spendAccounting: 'Worst-case cost is reserved per live call and retained on uncertain/failed receipts; no automatic refund. Reconciliation is explicit cancel.',
+    },
     promotion: { promote: 'disabled', execute: 'disabled', detail: 'promotion is disabled; no code path enables it', code: 'ADMIN_NOT_IMPLEMENTED' },
     responseCapBytes: DGM_MUSE_RESPONSE_MAX,
     expectedModel: DGM_MUSE_MODEL,
@@ -304,6 +410,18 @@ async function proposeRoute(ctx, fetchImpl) {
   } catch (error) {
     if (error && error.status) return send(ctx, error.status, { error: error.message, code: error.code || 'BAD_REQUEST' });
     throw error;
+  }
+  // Live preflight before the budget charge (advisor pattern): unconfigured
+  // or uncapped live requests are refused before any budget is touched or
+  // row written. proposeOnce re-checks as defense in depth.
+  if (body.mode === 'live') {
+    if (!museLiveEnabled(ctx.env)) {
+      return send(ctx, 503, { error: 'Live DGM proposals are not configured; no fixture was substituted. Request mode "fixture" for a labelled dry run.', code: 'DGM_MUSE_UNAVAILABLE' });
+    }
+    const cap = museSpendCapUsd(ctx.env);
+    if (!(cap > 0) || museWorstCaseSpendUsd(body.prompt) > cap) {
+      return send(ctx, 402, { error: 'Live DGM proposal spend cap does not cover the worst-case bounded cost. No provider call was sent and nothing was charged.', code: 'DGM_MUSE_SPEND_EXCEEDED' });
+    }
   }
   await checkWriteBudget(ctx.db, ctx.actor.user.id);
   try {
@@ -337,13 +455,39 @@ async function cancelRoute(ctx, opKey) {
   if (gate.status) return send(ctx, gate.status, gate.body);
   const csrf = ctx.needCsrf();
   if (csrf) return csrf;
+  // Cancellation preserves: the prior receipt is merged, never replaced —
+  // prior error/status/acceptance/evaluation survive, and the op's own
+  // claim-time mode is recorded, never the current flag/key environment.
+  // Unknown acceptance is therefore never erased or quashed, and a cancelled
+  // quarantine still blocks nothing silently: the receipt says so.
+  let current = null;
+  try {
+    current = await first(ctx.db, 'SELECT state, receipt_json, mode FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', ctx.actor.user.id, opKey);
+  } catch (e) {
+    if (storageMissing(e)) return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
+    throw e;
+  }
+  if (!current) return send(ctx, 404, { error: 'DGM proposal operation not found.', code: 'DGM_MUSE_UNKNOWN_OP' });
+  if (current.state !== 'reserved' && current.state !== 'fetching' && current.state !== 'uncertain') {
+    return send(ctx, 409, { error: `Proposal already settled as ${JSON.stringify(current.state)}; cancellation is a no-op.`, code: 'DGM_MUSE_STATE' });
+  }
+  let prior = null;
+  try { prior = current.receipt_json ? JSON.parse(current.receipt_json) : null; } catch { prior = null; }
+  const now = nowIso();
+  const merged = {
+    ...(prior || {}),
+    opKey,
+    state: 'cancelled',
+    cancelledFrom: current.state,
+    cancelledAt: now,
+    error: (prior && prior.error) || 'DGM_MUSE_CANCELLED',
+    status: (prior && Number.isSafeInteger(prior.status)) ? prior.status : 200,
+    mode: current.mode || (prior && prior.mode) || null,
+    evaluation: evaluationForMode(current.mode || (prior && prior.mode), (prior && prior.evaluation) || 'unknown'),
+  };
   let marked;
   try {
-    // Uncertain ops cancel too: operator-reviewed quarantine close-out.
-    marked = await markOp(ctx.db, ctx.actor.user.id, opKey, ['reserved', 'fetching', 'uncertain'], 'cancelled', {
-      opKey, mode: museLiveEnabled(ctx.env) ? 'live' : 'fixture', evaluation: museLiveEnabled(ctx.env) ? 'synthetic-live' : 'fixture',
-      error: 'DGM_MUSE_CANCELLED', status: 200, at: new Date().toISOString(),
-    });
+    marked = await markOp(ctx.db, ctx.actor.user.id, opKey, ['reserved', 'fetching', 'uncertain'], 'cancelled', merged);
   } catch (e) {
     if (storageMissing(e)) return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
     throw e;
