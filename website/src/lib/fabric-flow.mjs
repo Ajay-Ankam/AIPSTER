@@ -32,22 +32,33 @@ export function flowNode(item) {
   if (!item || typeof item !== 'object') return null;
   if (!isId(item.id)) return null;
   if (typeof item.name !== 'string' || item.name.length < 1 || item.name.length > 80) return null;
+  if (item.kind !== 'local' && item.kind !== 'cluster' && item.kind !== 'provider') return null;
   const liveness = item.liveness;
   if (liveness !== 'online' && liveness !== 'stale' && liveness !== 'offline' && liveness !== 'unknown') return null;
-  const lastSeenAt = item.lastSeenAt === null || item.lastSeenAt === undefined ? null : String(item.lastSeenAt);
+  // String-surface safety: kind and liveness are allowlisted above, and only
+  // plain strings cross into timestamps — anything else is absence, never
+  // coerced. Every surviving field is therefore either enumerated or rendered
+  // through the caller's esc().
+  const lastSeenAt = typeof item.lastSeenAt === 'string' ? item.lastSeenAt : null;
   const lastSeenAgeMs = item.lastSeenAgeMs === null || item.lastSeenAgeMs === undefined
     ? null
     : (Number.isSafeInteger(item.lastSeenAgeMs) && item.lastSeenAgeMs >= 0 ? item.lastSeenAgeMs : null);
+  // No live presentation from a bare historical timestamp: online/stale
+  // without a string heartbeat timestamp drops to unknown, matching the
+  // client mirror and the status adapter's unknown arm.
+  const derived = (liveness === 'online' || liveness === 'stale') && lastSeenAt !== null
+    ? liveness
+    : (liveness === 'offline' ? 'offline' : 'unknown');
   return {
     id: item.id,
     name: item.name,
     kind: item.kind,
-    liveness,
-    lastSeenAt: (liveness === 'online' || liveness === 'stale') ? lastSeenAt : null,
+    liveness: derived,
+    lastSeenAt: (derived === 'online' || derived === 'stale') ? lastSeenAt : null,
     // Units: milliseconds since the heartbeat was written, or null when no
     // heartbeat exists. Never seconds, never zero-filled.
-    lastSeenAgeMs: (liveness === 'online' || liveness === 'stale') ? lastSeenAgeMs : null,
-    usable: item.usable === null || item.usable === undefined ? null : item.usable === true,
+    lastSeenAgeMs: (derived === 'online' || derived === 'stale') ? lastSeenAgeMs : null,
+    usable: item.usable === true ? true : item.usable === false ? false : null,
     demoFixture: item.demoFixture === true,
   };
 }
@@ -57,8 +68,20 @@ export function flowNode(item) {
  * GET /api/usage payloads. Throughput is always reported unavailable: usage
  * carries cumulative counts, never measured rates.
  */
+function safeNow(nowMs) {
+  const candidate = Number.isFinite(nowMs) ? new Date(nowMs) : new Date();
+  // Fail-closed timestamp: an out-of-range nowMs must not throw RangeError.
+  return Number.isNaN(candidate.getTime()) ? new Date() : candidate;
+}
+
+function usageCoverageOf(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  if (!Array.isArray(usage.items) || !isCount(usage.total)) return null;
+  return { shown: usage.items.length, total: usage.total, complete: usage.items.length >= usage.total };
+}
+
 export function buildFabricFlow({ status, usage, nowMs }) {
-  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const now = safeNow(nowMs);
   const items = status && Array.isArray(status.items) ? status.items : [];
   const nodes = [];
   for (const raw of items) {
@@ -66,7 +89,8 @@ export function buildFabricFlow({ status, usage, nowMs }) {
     if (node) nodes.push(node);
   }
   const summary = status && status.summary && typeof status.summary === 'object' ? status.summary : null;
-  const counts = summary && ['online', 'stale', 'offline', 'unknown'].every((k) => isCount(summary[k]))
+  const validCounts = !!summary && ['online', 'stale', 'offline', 'unknown'].every((k) => isCount(summary[k]));
+  const counts = validCounts
     ? { online: summary.online, stale: summary.stale, offline: summary.offline, unknown: summary.unknown }
     : nodes.reduce((t, n) => ({ ...t, [n.liveness]: t[n.liveness] + 1 }),
       { online: 0, stale: 0, offline: 0, unknown: 0 });
@@ -75,23 +99,25 @@ export function buildFabricFlow({ status, usage, nowMs }) {
   // Absent-vs-zero: costs stay null (unknown) unless every contributing row
   // carried a real number; the /api/usage contract guarantees this, so the
   // flow view repeats it instead of summing around gaps.
+  // Costs live in a non-negative domain: negatives fail closed to unknown.
+  const costOrNull = (v) => (v === null || v === undefined || !(typeof v === 'number' && Number.isFinite(v) && v >= 0) ? null : v);
   const usageTotals = totals
     ? {
       requests: isCount(totals.requests) ? totals.requests : null,
       tokensIn: isCount(totals.tokensIn) ? totals.tokensIn : null,
       tokensOut: isCount(totals.tokensOut) ? totals.tokensOut : null,
-      modelCostUsd: totals.modelCostUsd === null || totals.modelCostUsd === undefined
-        ? null
-        : (Number.isFinite(totals.modelCostUsd) ? totals.modelCostUsd : null),
-      executionCostUsd: totals.executionCostUsd === null || totals.executionCostUsd === undefined
-        ? null
-        : (Number.isFinite(totals.executionCostUsd) ? totals.executionCostUsd : null),
+      modelCostUsd: costOrNull(totals.modelCostUsd),
+      executionCostUsd: costOrNull(totals.executionCostUsd),
     }
     : null;
+  // A totals object whose every value is absent measures nothing: the result
+  // edge stays unavailable rather than presenting an empty summary.
+  const measuredTotals = usageTotals && (usageTotals.requests !== null || usageTotals.tokensIn !== null
+    || usageTotals.tokensOut !== null || usageTotals.modelCostUsd !== null || usageTotals.executionCostUsd !== null);
   const anyHeartbeat = nodes.some((n) => n.lastSeenAt !== null);
   return {
     schema: 'aipster.fabric-flow/1',
-    generatedAt: new Date(now).toISOString(),
+    generatedAt: now.toISOString(),
     staleAfterMs: STALE_AFTER_MS,
     demo: status ? status.demo === true : false,
     source: status && status.demo === true ? 'demo-fixture' : 'declared-resources',
@@ -100,10 +126,10 @@ export function buildFabricFlow({ status, usage, nowMs }) {
       // request/result lanes are architectural labels, never live state.
       request: { state: 'architectural', label: 'Request (architectural: dispatch is disabled)' },
       result: {
-        state: usageTotals ? 'summarized' : 'unavailable',
-        label: usageTotals
+        state: measuredTotals ? 'summarized' : 'unavailable',
+        label: measuredTotals
           ? 'Result (architectural: usage totals only, no streamed results)'
-          : 'Result unavailable: no usage payload',
+          : 'Result unavailable: no measured usage',
       },
       heartbeat: {
         state: anyHeartbeat ? 'live' : 'none',
@@ -115,15 +141,18 @@ export function buildFabricFlow({ status, usage, nowMs }) {
     legend: [
       { key: 'request', state: 'architectural' },
       { key: 'result', state: 'architectural' },
-      { key: 'heartbeat', state: 'live' },
+      { key: 'heartbeat', state: anyHeartbeat ? 'live' : 'none' },
       { key: 'resident', state: 'unsupported' },
       { key: 'cached', state: 'unsupported' },
       { key: 'unprovisioned', state: 'unsupported' },
     ],
     nodes,
     counts: { total, ...counts },
-    sharedWithMe: status && isCount(status.sharedWithMe) ? status.sharedWithMe : 0,
-    itemsTruncated: status ? status.itemsTruncated === true : false,
+    countsSource: validCounts ? 'aggregate' : 'derived',
+    // Absent-vs-zero: a missing shared count or truncation flag is unknown
+    // (null), never zero-filled or assumed complete.
+    sharedWithMe: status && isCount(status.sharedWithMe) ? status.sharedWithMe : null,
+    itemsTruncated: status && typeof status.itemsTruncated === 'boolean' ? status.itemsTruncated : null,
     throughput: {
       state: 'unavailable',
       tokensPerSec: null,
@@ -132,6 +161,9 @@ export function buildFabricFlow({ status, usage, nowMs }) {
         + 'Unmeasured values stay null (unknown), never zero.',
     },
     usageTotals,
+    // Page coverage for FINDING-1: usage totals sum the returned page, so the
+    // view states how many of the universe rows they cover.
+    usageCoverage: usageCoverageOf(usage),
   };
 }
 

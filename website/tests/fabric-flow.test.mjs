@@ -89,7 +89,9 @@ test('request/result edges are architectural labels, never live connections', ()
   assert.match(out.edges.request.label, /dispatch is disabled/);
   assert.equal(out.edges.result.state, 'unavailable');
   assert.ok(out.legend.some((e) => e.key === 'resident' && e.state === 'unsupported'));
-  assert.ok(out.legend.some((e) => e.key === 'heartbeat' && e.state === 'live'));
+  // O-5: with no heartbeat seen, the legend agrees with the edge (none).
+  assert.ok(out.legend.some((e) => e.key === 'heartbeat' && e.state === 'none'));
+  assert.equal(out.edges.heartbeat.state, 'none');
 });
 
 test('denied shells carry no resource data', () => {
@@ -127,4 +129,57 @@ test('module has no DOM dependency (responsive/keyboard wiring stays deferred)',
   assert.equal(typeof document, 'undefined');
   assert.equal(typeof buildFabricFlow, 'function');
   assert.equal(typeof emptyFlow, 'function');
+});
+
+test('O-3: out-of-range or non-numeric nowMs never throws RangeError', () => {
+  const status = { items: [], summary: { total: 0, online: 0, stale: 0, offline: 0, unknown: 0 }, total: 0, sharedWithMe: 0, demo: false };
+  for (const nowMs of [1e21, -1e21, NaN, 'junk', undefined]) {
+    const out = buildFabricFlow({ status, usage: null, nowMs });
+    assert.ok(!Number.isNaN(Date.parse(out.generatedAt)), `valid generatedAt for ${String(nowMs)}`);
+  }
+});
+
+test('O-4: kind allowlist and strict timestamp/usable guards hold the string surface', () => {
+  const base = { id: 'r_1', name: 'lab', kind: 'local', liveness: 'online', lastSeenAt: iso(NOW - 1000), lastSeenAgeMs: 1000, usable: true };
+  assert.equal(flowNode({ ...base, kind: 'datacenter"><img src=x>' }), null);
+  assert.equal(flowNode({ ...base, id: 'r"x' }), null);
+  const coerced = flowNode({ ...base, lastSeenAt: 12345 });
+  assert.equal(coerced.liveness, 'unknown');
+  assert.equal(coerced.lastSeenAt, null);
+  assert.equal(flowNode({ ...base, usable: 'yes' }).usable, null);
+  assert.equal(flowNode({ ...base, usable: 1 }).usable, null);
+});
+
+test('O-5: negative costs fail closed; all-absent totals keep the result edge unavailable', () => {
+  const status = { items: [], summary: { total: 0, online: 0, stale: 0, offline: 0, unknown: 0 }, total: 0, sharedWithMe: 0, demo: false };
+  const neg = buildFabricFlow({ status, usage: { totals: { requests: 1, tokensIn: 2, tokensOut: 3, modelCostUsd: -9, executionCostUsd: -1 } }, nowMs: NOW });
+  assert.equal(neg.usageTotals.modelCostUsd, null);
+  assert.equal(neg.usageTotals.executionCostUsd, null);
+  const empty = buildFabricFlow({ status, usage: { totals: { requests: null, tokensIn: null, tokensOut: null, modelCostUsd: null, executionCostUsd: null } }, nowMs: NOW });
+  assert.equal(empty.edges.result.state, 'unavailable');
+  assert.equal(empty.legend.find((e) => e.key === 'result').state, 'architectural');
+});
+
+test('O-5/O-1: legend heartbeat mirrors the edge; missing shared/truncation stay null', () => {
+  const bare = { items: [], demo: false };
+  const none = buildFabricFlow({ status: bare, usage: null, nowMs: NOW });
+  assert.equal(none.edges.heartbeat.state, 'none');
+  assert.equal(none.legend.find((e) => e.key === 'heartbeat').state, 'none');
+  assert.equal(none.sharedWithMe, null);
+  assert.equal(none.itemsTruncated, null);
+  assert.equal(none.countsSource, 'derived');
+  const live = buildFabricFlow({
+    status: {
+      items: [{ id: 'r_1', name: 'lab', kind: 'local', liveness: 'online', lastSeenAt: iso(NOW - 1000), lastSeenAgeMs: 1000, usable: true, demoFixture: false }],
+      summary: { total: 1, online: 1, stale: 0, offline: 0, unknown: 0 }, total: 1, sharedWithMe: 2, itemsTruncated: false, demo: false,
+    },
+    usage: { items: [{ id: 'u_1' }], total: 4, totals: { requests: 7, tokensIn: 70, tokensOut: 7, modelCostUsd: null, executionCostUsd: null } },
+    nowMs: NOW,
+  });
+  assert.equal(live.legend.find((e) => e.key === 'heartbeat').state, 'live');
+  assert.equal(live.edges.result.state, 'summarized');
+  assert.equal(live.sharedWithMe, 2);
+  assert.equal(live.itemsTruncated, false);
+  assert.equal(live.countsSource, 'aggregate');
+  assert.deepEqual(live.usageCoverage, { shown: 1, total: 4, complete: false });
 });

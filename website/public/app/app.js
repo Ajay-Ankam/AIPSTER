@@ -137,6 +137,11 @@ function renderStatus(el, data) {
 // heartbeat timestamp never renders as live here.
 const FABRIC_LIVENESS = ['online', 'stale', 'offline', 'unknown'];
 const FABRIC_KINDS = ['local', 'cluster', 'provider'];
+function flowRowLiveness(r) {
+  if (!FABRIC_LIVENESS.includes(r.liveness)) return null;
+  const seen = (r.liveness === 'online' || r.liveness === 'stale') && typeof r.lastSeenAt === 'string';
+  return seen ? r.liveness : (r.liveness === 'offline' ? 'offline' : 'unknown');
+}
 function fabricFlowNode(r) {
   if (!r || typeof r !== 'object') return null;
   if (typeof r.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(r.id)) return null;
@@ -144,9 +149,10 @@ function fabricFlowNode(r) {
   if (!FABRIC_KINDS.includes(r.kind)) return null;
   if (!FABRIC_LIVENESS.includes(r.liveness)) return null;
   // No live presentation from a bare historical timestamp: online/stale
-  // without a heartbeat timestamp drops to unknown.
-  const seen = (r.liveness === 'online' || r.liveness === 'stale') && r.lastSeenAt !== null && r.lastSeenAt !== undefined;
-  const disp = seen ? r.liveness : (r.liveness === 'offline' ? 'offline' : 'unknown');
+  // without a string heartbeat timestamp drops to unknown.
+  const disp = flowRowLiveness(r);
+  if (!disp) return null;
+  const seen = disp === 'online' || disp === 'stale';
   const pill = disp === 'online' ? 'ok' : disp === 'offline' ? 'bad' : disp === 'stale' ? 'warn' : '';
   const age = r.lastSeenAgeMs === null || r.lastSeenAgeMs === undefined ? 'never' : formatAge(r.lastSeenAgeMs);
   const hb = !seen
@@ -171,32 +177,43 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData) {
   // from the listed page. Totals that are absent stay unknown, never zero.
   const s = statusData.summary;
   const validCounts = s && typeof s === 'object' && ['online', 'stale', 'offline', 'unknown'].every((k) => Number.isSafeInteger(s[k]) && s[k] >= 0);
-  const counts = validCounts ? s : nodes.reduce((t, n) => {
-    const m = /<span class="pill [^"]*">([a-z]+)<\/span>/.exec(n);
-    const k = m ? m[1] : 'unknown';
+  // Derived counts come from the same pure liveness helper as the rows, never
+  // by parsing rendered markup, and the fallback is labelled as derived.
+  const counts = validCounts ? s : rows.reduce((t, r) => {
+    const k = flowRowLiveness(r) || 'unknown';
     t[k] += 1; return t;
   }, { online: 0, stale: 0, offline: 0, unknown: 0 });
+  const countsNote = validCounts ? '' : ' · counts derived from the listed page (server aggregate unavailable)';
   const total = Number.isSafeInteger(statusData.total) && statusData.total >= 0 ? statusData.total : nodes.length;
+  // Absent-vs-zero: a missing shared count renders unknown, never zero.
+  const shared = Number.isSafeInteger(statusData.sharedWithMe) && statusData.sharedWithMe >= 0 ? statusData.sharedWithMe : 'unknown';
   const anyHeartbeat = rows.some((r) => (r.liveness === 'online' || r.liveness === 'stale') && r.lastSeenAt !== null && r.lastSeenAt !== undefined);
   const list = nodes.length
     ? `<ul class="flow-list">${nodes.join('')}</ul>`
     : '<p class="muted">No resources yet — register or pair one to see it here.</p>';
-  const truncated = statusData.itemsTruncated === true
+  const truncated = statusData.itemsTruncated === true || total > nodes.length
     ? `<p class="muted">showing ${nodes.length} of ${total} · older resources omitted from the list; counts cover all resources.</p>`
     : '';
   const note = statusData.demo
     ? 'DEMO DATA: simulated fixture, not a live node.'
     : 'Worker heartbeats prove reachability only, never inference acceptance. Nothing here means ready to run.';
-  flowEl.innerHTML = `<p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown</p>`
+  flowEl.innerHTML = `<p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown · ${shared} shared with me${countsNote}</p>`
     + `<p class="muted">Request (architectural: dispatch is disabled) · Result (architectural: usage totals only) · Heartbeat (${anyHeartbeat ? 'live' : 'none seen'}) · Resident, Cached, Unprovisioned (unsupported)</p>`
     + list + truncated + `<p class="muted">${esc(note)}</p>`;
   // Throughput is always unavailable: usage reports cumulative counts only.
-  const t = usageData && usageData.totals && typeof usageData.totals === 'object' ? usageData.totals : null;
+  const rawT = usageData && usageData.totals && typeof usageData.totals === 'object' ? usageData.totals : null;
+  // An all-absent totals object measures nothing: treat it as unavailable.
+  const t = rawT && (rawT.requests != null || rawT.tokensIn != null || rawT.tokensOut != null || rawT.modelCostUsd != null || rawT.executionCostUsd != null) ? rawT : null;
   const num = (v) => Number.isSafeInteger(v) && v >= 0 ? String(v) : 'unknown';
-  const usd = (v) => v === null || v === undefined ? 'unknown (unmeasured)' : (Number.isFinite(v) ? '$' + String(v) : 'unknown (unmeasured)');
+  const usd = (v) => v === null || v === undefined || v < 0 ? 'unknown (unmeasured)' : (Number.isFinite(v) ? '$' + String(v) : 'unknown (unmeasured)');
+  // Page coverage (review FINDING-1): usage totals sum the returned page.
+  const cov = usageData && Array.isArray(usageData.items) && Number.isSafeInteger(usageData.total) && usageData.total >= 0
+    ? (usageData.items.length >= usageData.total ? `totals cover all ${usageData.total} rows` : `totals cover the latest ${usageData.items.length} of ${usageData.total} rows (page-cumulative)`)
+    : null;
   tpEl.innerHTML = t
     ? `<p>${esc(num(t.requests))} requests · ${esc(num(t.tokensIn))} in / ${esc(num(t.tokensOut))} out tokens (cumulative, not a rate)</p>`
       + `<p class="muted">model cost ${esc(usd(t.modelCostUsd))} · execution cost ${esc(usd(t.executionCostUsd))}</p>`
+      + (cov ? `<p class="muted">${esc(cov)}</p>` : '')
       + '<p class="muted">Throughput unavailable: no measured tokens/sec exist in this build. Unmeasured values stay unknown, never zero.</p>'
     : '<p class="muted">Usage totals unavailable.</p><p class="muted">Throughput unavailable: no measured tokens/sec exist in this build.</p>';
 }
@@ -208,7 +225,7 @@ async function loadFabricFlow() {
   flow.innerHTML = '<p class="muted">Loading fabric flow…</p>';
   tp.innerHTML = '<p class="muted">Loading throughput…</p>';
   try {
-    const [statusData, usageData] = await Promise.all([api('/api/status'), api('/api/usage?limit=1')]);
+    const [statusData, usageData] = await Promise.all([api('/api/status'), api('/api/usage?limit=50')]);
     if (gen !== generation) return;
     renderFabricFlow(flow, tp, statusData, usageData);
   } catch (e) {

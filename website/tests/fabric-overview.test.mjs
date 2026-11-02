@@ -62,14 +62,15 @@ const statusPayload = (items, over = {}) => ({
   summary: { total: items.length, online: items.length, stale: 0, offline: 0, unknown: 0 },
   total: items.length, itemsTruncated: false, sharedWithMe: 0, items, ...over,
 });
-const usagePayload = (totals) => ({
-  items: [], total: 0, limit: 1, offset: 0,
+const usagePayload = (totals, over = {}) => ({
+  items: [], total: 0, limit: 50, offset: 0,
   totals: totals || { requests: 12, tokensIn: 300, tokensOut: 150, modelCostUsd: null, executionCostUsd: 2.5 },
   note: 'Model cost and execution cost are tracked separately. Unmeasured values stay null (unknown).',
+  ...over,
 });
 const okRouter = (status, usage) => async (p) => {
   if (p === '/api/status') return Response.json(status);
-  if (p === '/api/usage?limit=1') return Response.json(usage);
+  if (p === '/api/usage?limit=50') return Response.json(usage);
   if (p === '/api/inventory?limit=50') return Response.json({ items: [], total: 0 });
   if (p === '/api/shared-with-me?limit=50') return Response.json({ items: [], total: 0 });
   if (p === '/api/catalog/summary') return Response.json({ privateAssets: 0, activeDeployments: 0 });
@@ -89,7 +90,7 @@ test('flow panel renders nodes, counts, architectural lanes, and honest copy', a
   assert.ok(flow.includes('dispatch is disabled'), flow);
   assert.ok(flow.includes('usage totals only'), flow);
   assert.ok(flow.includes('unsupported'), flow);
-  assert.ok(!/ready to run(?!.*nothing here means)/.test(flow.replace(/not ready to run|nothing here means ready to run/g, '')), 'no ready presentation');
+  assert.ok(!/ready to run/i.test(flow.replace(/not ready to run|nothing here means ready to run/gi, '')), 'no ready presentation');
   assert.ok(tp.includes('cumulative, not a rate'), tp);
   assert.ok(tp.includes('Throughput unavailable'), tp);
   assert.ok(tp.includes('never zero'), tp);
@@ -115,7 +116,7 @@ test('hostile names render as text, never markup', async () => {
 });
 
 test('denied reads clear both panels and leak no resource data', async () => {
-  const denied = async (p) => (p === '/api/status' || p === '/api/usage?limit=1')
+  const denied = async (p) => (p === '/api/status' || p === '/api/usage?limit=50')
     ? Response.json({ error: 'Forbidden', code: 'KEY_SCOPE' }, { status: 403 })
     : Response.json({ items: [], total: 0 });
   const { context, el } = await loadClient(denied);
@@ -150,9 +151,9 @@ test('loading shells show first; a tab switch drops the stale first response', a
   const first = statusPayload([item({ id: 'r_first', name: 'first-render' })]);
   const second = statusPayload([item({ id: 'r_second', name: 'second-render' })]);
   const router = async (p) => {
-    if (p === '/api/status' || p === '/api/usage?limit=1') { calls += 1; if (calls <= 2) await held; }
+    if (p === '/api/status' || p === '/api/usage?limit=50') { calls += 1; if (calls <= 2) await held; }
     if (p === '/api/status') return Response.json(calls <= 2 ? first : second);
-    if (p === '/api/usage?limit=1') return Response.json(usagePayload());
+    if (p === '/api/usage?limit=50') return Response.json(usagePayload());
     if (p === '/api/inventory?limit=50') return Response.json({ items: [], total: 0 });
     if (p === '/api/shared-with-me?limit=50') return Response.json({ items: [], total: 0 });
     if (p === '/api/catalog/summary') return Response.json({ privateAssets: 0, activeDeployments: 0 });
@@ -192,4 +193,57 @@ test('overview markup carries labelled fabric sections with live regions', async
   assert.ok(labelled('fabric-throughput-panel', 'fabric-throughput-h'));
   const live = (id) => (byId[id].attrs || []).some((a) => a.name === 'role' && a.value === 'status');
   assert.ok(live('fabric-flow') && live('fabric-throughput'));
+});
+
+test('FINDING-1: usage totals state page coverage, never universe totals', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const page = render(context, el, statusPayload([item()]),
+    usagePayload({ requests: 5, tokensIn: 50, tokensOut: 25, modelCostUsd: null, executionCostUsd: null },
+      { items: [{ id: 'u_1' }, { id: 'u_2' }], total: 9 }));
+  assert.ok(page.tp.includes('page-cumulative'), page.tp);
+  assert.ok(page.tp.includes('2 of 9'), page.tp);
+  const full = render(context, el, statusPayload([item()]),
+    usagePayload({ requests: 5, tokensIn: 50, tokensOut: 25, modelCostUsd: null, executionCostUsd: null },
+      { items: [{ id: 'u_1' }], total: 1 }));
+  assert.ok(full.tp.includes('totals cover all 1 rows'), full.tp);
+});
+
+test('O-1: missing shared count renders unknown; derived counts are labelled', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const noShared = statusPayload([item()]);
+  delete noShared.sharedWithMe;
+  const { flow } = render(context, el, noShared, usagePayload());
+  assert.ok(flow.includes('unknown shared with me'), flow);
+  assert.ok(!flow.includes('0 shared with me'), 'no zero-filled shared count');
+  const noSummary = statusPayload([item()]);
+  delete noSummary.summary;
+  const derived = render(context, el, noSummary, usagePayload());
+  assert.ok(derived.flow.includes('derived from the listed page'), derived.flow);
+});
+
+test('O-5: negative costs and all-absent totals stay unavailable', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const neg = render(context, el, statusPayload([item()]),
+    usagePayload({ requests: 3, tokensIn: 10, tokensOut: 5, modelCostUsd: -4.5, executionCostUsd: null }));
+  assert.ok(neg.tp.includes('model cost unknown (unmeasured)'), neg.tp);
+  assert.ok(!neg.tp.includes('$-'), 'no negative cost presentation');
+  const empty = render(context, el, statusPayload([item()]),
+    usagePayload({ requests: null, tokensIn: null, tokensOut: null, modelCostUsd: null, executionCostUsd: null }));
+  assert.ok(empty.tp.includes('Usage totals unavailable'), empty.tp);
+});
+
+test('O-4: hostile kind, id, and non-string timestamps never reach markup', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([]), usagePayload()));
+  const badKind = item({ id: 'r_k', name: 'evil-kind"><script>alert(1)</script>', kind: 'datacenter"><img src=x>' });
+  const badId = item({ id: 'r"x onerror="alert(1)', name: 'evil-id' });
+  const badTime = item({ id: 'r_t', name: 'evil-time', lastSeenAt: 12345, lastSeenAgeMs: 10 });
+  const { flow } = render(context, el, statusPayload([badKind, badId, badTime]), usagePayload());
+  const doc = parseFragment(flow);
+  let elements = 0;
+  const walk = (n) => { if (n.tagName) elements += 1; (n.childNodes || []).forEach(walk); if (n.content) walk(n.content); };
+  walk(doc);
+  assert.ok(!flow.includes('evil-kind'), 'hostile-kind row dropped');
+  assert.ok(!flow.includes('evil-id'), 'hostile-id row dropped');
+  assert.ok(flow.includes('>unknown<'), 'non-string timestamp drops to unknown');
+  assert.ok(elements < 30, `no injected elements (saw ${elements})`);
 });
