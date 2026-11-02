@@ -1492,3 +1492,85 @@ test('muse routes R3 N-R2-4: readback separates recorded flag from current block
   assert.equal(status.json.spend.usedBasis, 'reported-usage-from-delivered-calls-only');
   assert.match(status.json.spend.note, /accepted-but-unusable|lower bound|not a bill/i);
 });
+
+// ---------- fix round 4: fixture cancellation during a genuine fetch ----------
+
+test('muse routes R4 N-R3-1a: a fixture op cancelled while fetching stays usable and sends nothing', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  let transport = 0;
+  const stub = async () => { transport += 1; return new Response(JSON.stringify(wireProposal('unused')), { status: 200 }); };
+  const realDigest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle);
+  let seen = 0;
+  let hook = null;
+  let enter;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  hook = { entered: enter, gate };
+  // The second digest fires after the durable `fetching` mark and before the
+  // fixture settles, so the cancel below really lands on a fetching row.
+  globalThis.crypto.subtle.digest = async (...args) => {
+    seen += 1;
+    if (hook && seen >= 2) { const h = hook; hook = null; h.entered(); await h.gate; }
+    return realDigest(...args);
+  };
+  try {
+    const pending = handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'R4 fixture in flight.', opKey: 'r4-fx', mode: 'fixture' }, fetchImpl: stub });
+    // The proposal must reject after the cancel; keep an early assertion
+    // failure from turning that expected rejection into an unhandled one.
+    pending.catch(() => {});
+    const reached = await Promise.race([entered.then(() => 'entered'), new Promise((resolve) => setTimeout(() => resolve('timeout'), 2000))]);
+    assert.equal(reached, 'entered', 'the fixture proposal reached its fetching phase');
+    const cancel = await postMuse(t, `${BASE}/ops/r4-fx/cancel`, {});
+    assert.equal(cancel.status, 200, 'the cancel bookkeeping succeeds');
+    assert.equal(cancel.json.unknownOutcome, false, 'a fixture fetch cancellation is provably unsent');
+    const row = await museOp(t, 'r4-fx');
+    assert.equal(Number(row.unknown_outcome), 0);
+    const receipt = JSON.parse(row.receipt_json);
+    assert.equal(receipt.cancelledFrom, 'fetching', 'the truthful cancelled phase is still recorded');
+    assert.equal(receipt.providerContact, 'none');
+    const read = await readJson(await t.call(`${BASE}/ops/r4-fx`, { headers: t.as(t.alice) }));
+    assert.equal(read.json.unknownOutcome, false);
+    assert.equal(read.json.blocking, false, 'readback must not report a provably-unsent cancel as blocking');
+    const next = await handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'R4 next fixture.', opKey: 'r4-fx-next', mode: 'fixture' }, fetchImpl: stub });
+    assert.equal(next.status, 200, 'the next fixture admission is not quarantined');
+    release();
+    await assert.rejects(pending, (e) => e.code === 'DGM_MUSE_CANCELLED', 'the cancelled first proposal does not deliver');
+    assert.equal(transport, 0, 'fixture mode never contacts the provider');
+  } finally {
+    globalThis.crypto.subtle.digest = realDigest;
+    release();
+  }
+});
+
+test('muse routes R4 N-R3-1b: fixture fetch evidence is unsent, but retained sent evidence still blocks', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  // A migrated/seeded fixture row that is genuinely fetching, before a sweep.
+  await seedMuseRow(t, {
+    key: 'r4-fx-seeded', state: 'fetching', mode: 'fixture', unknown: 0,
+    receipt: { state: 'fetching', providerContact: 'none', acceptance: 'not-sent', billing: 'not-chargeable', spendUsdReserved: 0 },
+  });
+  const cancel = await postMuse(t, `${BASE}/ops/r4-fx-seeded/cancel`, {});
+  assert.equal(cancel.status, 200);
+  assert.equal(cancel.json.unknownOutcome, false);
+  assert.equal(Number((await museOp(t, 'r4-fx-seeded')).unknown_outcome), 0);
+  const op = await readJson(await t.call(`${BASE}/ops/r4-fx-seeded`, { headers: t.as(t.alice) }));
+  assert.equal(op.json.unknownOutcome, false);
+  assert.equal(op.json.blocking, false);
+  const next = await handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'R4 after seeded fixture cancel.', opKey: 'r4-fx-seeded-next', mode: 'fixture' }, fetchImpl: okFetch() });
+  assert.equal(next.status, 200, 'a provably-unsent fixture cancellation admits the next fixture op');
+
+  // The mode exemption applies only to the phase literal: actual contact
+  // evidence on a cancelled fixture row stays quarantined.
+  await seedMuseRow(t, {
+    key: 'r4-fx-sent', state: 'cancelled', mode: 'fixture', unknown: 0,
+    receipt: { cancelledFrom: 'fetching', providerContact: 'sent', acceptance: 'accepted', billing: 'possibly-chargeable' },
+  });
+  let calls = 0;
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'R4 sent evidence.', opKey: 'r4-fx-sent-next', mode: 'fixture' }, fetchImpl: async () => { calls += 1; return new Response('{}', { status: 200 }); } }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+  assert.equal(calls, 0);
+});

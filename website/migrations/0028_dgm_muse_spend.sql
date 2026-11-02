@@ -35,9 +35,13 @@
 -- state and from retained receipt evidence: an uncertain op, a live fetch, or
 -- a cancellation recorded while fetching (or after contact) may have reached
 -- the provider and must stay quarantined. A cancellation recorded before
--- contact stays 0 and remains usable. Runtime code also derives the flag from
--- evidence on every cancel/read, so the invariant does not depend on this
--- backfill alone or on a future writer remembering the column.
+-- contact stays 0 and remains usable. Fixture mode has no provider transport,
+-- so its fetching phase and the cancelledFrom literal are not contact
+-- evidence; NULL/unknown mode stays conservative. Actual contact fields are
+-- mode-independent, so fabricated sent evidence still quarantines a fixture
+-- row. Runtime code applies the same rule on every cancel/read, so the
+-- invariant does not depend on this backfill alone or on a future writer
+-- remembering the column.
 -- Additive only; applies once via the D1 migration journal.
 CREATE TABLE IF NOT EXISTS dgm_muse_spend (
   scope TEXT NOT NULL,
@@ -49,15 +53,19 @@ CREATE TABLE IF NOT EXISTS dgm_muse_spend (
 );
 ALTER TABLE dgm_muse_ops ADD COLUMN unknown_outcome INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE dgm_muse_ops ADD COLUMN spend_micros INTEGER NOT NULL DEFAULT 0;
-UPDATE dgm_muse_ops SET unknown_outcome = 1 WHERE state IN ('uncertain', 'fetching');
+UPDATE dgm_muse_ops SET unknown_outcome = 1 WHERE state = 'uncertain';
+UPDATE dgm_muse_ops SET unknown_outcome = 1
+  WHERE state = 'fetching' AND (mode IS NULL OR mode <> 'fixture');
 UPDATE dgm_muse_ops SET unknown_outcome = 1
   WHERE state = 'cancelled' AND (
-    receipt_json LIKE '%"cancelledFrom":"fetching"%'
-    OR receipt_json LIKE '%"providerContact":"sent"%'
+    receipt_json LIKE '%"providerContact":"sent"%'
     OR receipt_json LIKE '%"providerContact":"unknown"%'
     OR receipt_json LIKE '%"acceptance":"accepted"%'
     OR receipt_json LIKE '%"acceptance":"unknown"%'
     OR receipt_json LIKE '%"billing":"possibly-chargeable"%'
     OR receipt_json LIKE '%"accepted":true%'
+    OR receipt_json LIKE '%"accepted": true%'
+    OR (receipt_json LIKE '%"cancelledFrom":"fetching"%'
+      AND (mode IS NULL OR mode <> 'fixture'))
   );
 CREATE INDEX IF NOT EXISTS idx_dgm_muse_ops_unknown ON dgm_muse_ops(tenant_id, unknown_outcome);

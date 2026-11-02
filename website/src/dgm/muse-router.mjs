@@ -68,32 +68,52 @@ const SPEND_WINDOW = 'all-time';
 // of the predicate, so evidence — not only a flag — keeps a possibly-sent
 // cancellation quarantined. Every pattern only ever makes the predicate more
 // conservative.
+//
+// The phase literal `cancelledFrom:"fetching"` is contact evidence only for a
+// mode that can reach the provider. Fixture mode has no transport path, so a
+// fixture cancellation during its durable fetching phase is provably unsent
+// and must stay usable; NULL/unknown mode stays conservative. Actual contact
+// fields remain mode-independent, so fabricated sent evidence still blocks.
+const SENT_EVIDENCE_PATTERNS = [
+  '"providerContact":"sent"',
+  '"providerContact":"unknown"',
+  '"acceptance":"accepted"',
+  '"acceptance":"unknown"',
+  '"billing":"possibly-chargeable"',
+  '"accepted":true',
+  '"accepted": true',
+];
+const CANCELLED_FROM_FETCHING = '"cancelledFrom":"fetching"';
+const SENT_EVIDENCE_SQL = SENT_EVIDENCE_PATTERNS.map((p) => `receipt_json LIKE '%${p}%'`).join(' OR ');
+const CANCELLED_FROM_FETCHING_SQL = `receipt_json LIKE '%${CANCELLED_FROM_FETCHING}%'`;
 const CANCELLED_MAY_HAVE_BEEN_SENT = `(
       unknown_outcome = 1
-      OR receipt_json LIKE '%"providerContact":"sent"%'
-      OR receipt_json LIKE '%"providerContact":"unknown"%'
-      OR receipt_json LIKE '%"acceptance":"accepted"%'
-      OR receipt_json LIKE '%"acceptance":"unknown"%'
-      OR receipt_json LIKE '%"billing":"possibly-chargeable"%'
-      OR receipt_json LIKE '%"cancelledFrom":"fetching"%'
-      OR receipt_json LIKE '%"accepted":true%')`;
+      OR ${SENT_EVIDENCE_SQL}
+      OR (${CANCELLED_FROM_FETCHING_SQL} AND (mode IS NULL OR mode <> 'fixture')))`;
 const BLOCKING_WHERE = `(state IN ('reserved','fetching','uncertain') OR (state = 'cancelled' AND ${CANCELLED_MAY_HAVE_BEEN_SENT}))`;
 const RECONCILE_STATES = ['fetching', 'uncertain', 'cancelled'];
 
 /**
  * The same derivation as CANCELLED_MAY_HAVE_BEEN_SENT, in JS, for rows
- * already read. Used by admission classification and the op readback so a
- * legacy cancelled row is treated exactly as the SQL predicate treats it.
+ * already read. Both encodings apply the same pattern list to the stored
+ * receipt text (and the same mode rule for the phase literal), so a legacy
+ * cancelled row is treated exactly as the SQL predicate treats it.
  */
-function rowMayHaveBeenSent(row, receipt = null) {
+function rowMayHaveBeenSent(row) {
   if (Number(row && row.unknown_outcome) === 1) return true;
-  const r = receipt || parseReceipt(row && row.receipt_json, null);
+  const text = String((row && row.receipt_json) || '').toLowerCase();
+  if (SENT_EVIDENCE_PATTERNS.some((p) => text.includes(p.toLowerCase()))) return true;
+  const fromFetching = text.includes(CANCELLED_FROM_FETCHING);
+  if (fromFetching && (!row || row.mode !== 'fixture')) return true;
+  // Parsed fallback keeps equivalent hand-written shapes conservative even
+  // when their whitespace does not appear literally in the pattern list.
+  const r = parseReceipt(row && row.receipt_json, null);
   if (!r || typeof r !== 'object') return false;
-  return r.providerContact === 'sent' || r.providerContact === 'unknown'
+  if (r.providerContact === 'sent' || r.providerContact === 'unknown'
     || r.acceptance === 'accepted' || r.acceptance === 'unknown'
     || r.billing === 'possibly-chargeable'
-    || r.cancelledFrom === 'fetching'
-    || r.accepted === true;
+    || r.accepted === true) return true;
+  return r.cancelledFrom === 'fetching' && (!row || row.mode !== 'fixture');
 }
 
 function send(ctx, status, body) {
@@ -274,7 +294,7 @@ function resolveExisting(found, digest) {
  */
 async function admissionBlockers(db, tenant) {
   const rows = await all(db,
-    `SELECT op_key, state, unknown_outcome, receipt_json, created_at FROM dgm_muse_ops
+    `SELECT op_key, state, mode, unknown_outcome, receipt_json, created_at FROM dgm_muse_ops
      WHERE tenant_id = ? AND ${BLOCKING_WHERE} ORDER BY updated_at ASC LIMIT 5`,
     tenant);
   // Same evidence rule as the SQL predicate: a cancelled row blocks when its
@@ -841,7 +861,7 @@ async function opRoute(ctx, opKey) {
   if (gate.status) return send(ctx, gate.status, gate.body);
   let row;
   try {
-    row = await first(ctx.db, 'SELECT state, receipt_json, unknown_outcome FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', ctx.actor.user.id, opKey);
+    row = await first(ctx.db, 'SELECT state, mode, receipt_json, unknown_outcome FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', ctx.actor.user.id, opKey);
   } catch (e) {
     if (storageMissing(e)) return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
     throw e;
@@ -855,7 +875,7 @@ async function opRoute(ctx, opKey) {
   // operator reading only this projection cannot mistake the two.
   const unknownOutcome = Number(row.unknown_outcome) === 1;
   const blocking = row.state === 'reserved' || row.state === 'fetching' || row.state === 'uncertain'
-    || (row.state === 'cancelled' && (unknownOutcome || rowMayHaveBeenSent(row, receipt)));
+    || (row.state === 'cancelled' && (unknownOutcome || rowMayHaveBeenSent(row)));
   return send(ctx, 200, {
     opKey,
     state: row.state,
@@ -902,7 +922,7 @@ async function cancelRoute(ctx, opKey) {
   // provider, so its cancellation is provably unsent even from `fetching`;
   // an unknown mode stays conservative. `rowMayHaveBeenSent` covers migrated
   // rows whose flag defaulted to 0 but whose receipt still records contact.
-  const mayHaveBeenSent = rowMayHaveBeenSent(current, prior)
+  const mayHaveBeenSent = rowMayHaveBeenSent(current)
     || current.state === 'uncertain'
     || (current.state === 'fetching' && mode !== 'fixture');
   const merged = {

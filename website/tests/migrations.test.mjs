@@ -92,15 +92,21 @@ test('migration 0028 backfills the unknown-outcome flag for migrated rows', () =
   const now = new Date().toISOString();
   sqlite.prepare('INSERT INTO "user" (id, name, email, emailVerified, image, createdAt, updatedAt) VALUES (?, ?, ?, 1, NULL, ?, ?)')
     .run('u_legacy', 'Legacy', 'legacy@synthetic.invalid', now, now);
-  const insert = (key, state, receipt) => sqlite.prepare(
+  const insert = (key, state, receipt, mode = 'live') => sqlite.prepare(
     'INSERT INTO dgm_muse_ops (tenant_id, op_key, input_digest, mode, state, receipt_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run('u_legacy', key, `d-${key}`, 'live', state, JSON.stringify(receipt), now, now);
+  ).run('u_legacy', key, `d-${key}`, mode, state, JSON.stringify(receipt), now, now);
   insert('unc', 'uncertain', { providerContact: 'sent', acceptance: 'accepted' });
   insert('fetch', 'fetching', { providerContact: 'sent', acceptance: 'unknown' });
   insert('cancelled-inflight', 'cancelled', { cancelledFrom: 'fetching' });
   insert('cancelled-sent', 'cancelled', { providerContact: 'sent' });
   insert('cancelled-reserved', 'cancelled', { cancelledFrom: 'reserved', providerContact: 'none' });
   insert('delivered', 'delivered', { providerContact: 'sent' });
+  // Fixture mode never contacts the provider, so its in-flight state and
+  // cancelled-from-fetching phase are not contact evidence.
+  insert('fixture-fetch', 'fetching', { providerContact: 'none', acceptance: 'not-sent' }, 'fixture');
+  insert('fixture-cancelled-inflight', 'cancelled', { cancelledFrom: 'fetching', providerContact: 'none' }, 'fixture');
+  insert('fixture-cancelled-sent', 'cancelled', { providerContact: 'sent' }, 'fixture');
+  insert('unknown-mode-fetch', 'fetching', { providerContact: 'none' }, null);
   applyMigrations(sqlite, ['0028_dgm_muse_spend.sql']);
   const flag = (k) => Number(sqlite.prepare('SELECT unknown_outcome FROM dgm_muse_ops WHERE op_key = ?').get(k).unknown_outcome);
   assert.equal(flag('unc'), 1, 'a migrated uncertain row is conservatively unknown');
@@ -109,6 +115,10 @@ test('migration 0028 backfills the unknown-outcome flag for migrated rows', () =
   assert.equal(flag('cancelled-sent'), 1, 'retained contact evidence marks the outcome unknown');
   assert.equal(flag('cancelled-reserved'), 0, 'a cancellation before contact stays provably unsent');
   assert.equal(flag('delivered'), 0);
+  assert.equal(flag('fixture-fetch'), 0, 'a fixture fetch has no provider transport and is provably unsent');
+  assert.equal(flag('fixture-cancelled-inflight'), 0, 'the fixture phase alone is not contact evidence');
+  assert.equal(flag('fixture-cancelled-sent'), 1, 'actual contact evidence still marks a fixture row unknown');
+  assert.equal(flag('unknown-mode-fetch'), 1, 'an unknown mode stays conservative');
   sqlite.close();
 });
 
