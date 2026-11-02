@@ -116,6 +116,14 @@ test('README thumbnail links to the public watch location', async () => {
   assert.match(readme.replace(/\s+/g, ' '), /not proof of working live inference/);
 });
 
+test('player focus ring is drawn inside the clipping figure', async () => {
+  const css = await readFile(resolve(PUBLIC, 'styles.css'), 'utf8');
+  assert.match(css, /\.video-feature\{[^}]*overflow:hidden/);
+  // Chromium focuses the video's UA controls, so the host matches
+  // :focus-within rather than :focus-visible; both selectors are kept.
+  assert.match(css, /\.video-feature video:focus-visible,\.video-feature video:focus-within\{outline:3px solid #bd8d30;outline-offset:-3px\}/);
+});
+
 test('served media headers declare video, caption and poster types', async () => {
   const headers = await readFile(resolve(PUBLIC, '_headers'), 'utf8');
   assert.match(headers, /\/assets\/aipster-intro-mix\.mp4\s+Content-Type: video\/mp4/);

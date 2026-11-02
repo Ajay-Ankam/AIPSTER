@@ -55,4 +55,7 @@
 .video-feature summary{cursor:pointer;font-weight:650;color:var(--green);font-size:12px}
 .video-feature details p{margin-top:9px;line-height:1.7}
 .video-links .text-link{display:inline-block;font-size:12px;font-weight:600;color:var(--green)}
+/* Inset focus ring: the figure clips overflow, and Chromium focuses the
+   video's UA controls rather than the host, so match :focus-within too. */
+.video-feature video:focus-visible,.video-feature video:focus-within{outline:3px solid #bd8d30;outline-offset:-3px}
 @media(max-width:760px){.video-feature{margin-bottom:30px;border-radius:10px}.video-feature figcaption{padding:16px 16px 18px;gap:10px}.video-feature figcaption>p{font-size:12px}.video-feature details{font-size:11px}}
