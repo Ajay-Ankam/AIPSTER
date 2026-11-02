@@ -221,7 +221,11 @@ export async function fromHarnessProposal(proposal, { workItem, tenantId, actorI
       verification: shortText(proposal && proposal.verification, 1024)
     }
   };
-  return buildRequest(merged, { tenantId, actorId, reportState });
+  const built = await buildRequest(merged, { tenantId, actorId, reportState });
+  // The seal names the merged fixture, so return it: evaluating the caller's
+  // original work item would fail the identity check even though the request
+  // is genuine. `fixture` is the object to evaluate and to pass to selection.
+  return built.ok ? { ...built, fixture: merged } : built;
 }
 
 export { validateInput };

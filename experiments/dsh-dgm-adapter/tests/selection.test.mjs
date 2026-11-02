@@ -126,3 +126,36 @@ test('rollback is refused for an elevated selection', () => {
   assert.equal(refused.code, 'DGM_BAD_SELECTION');
   assert.equal(requestRollback(null).code, 'DGM_BAD_SELECTION');
 });
+
+test('selection re-derives with the identities the verdict was built under', async () => {
+  const workItem = WORK_ITEMS[0];
+  const built = await buildRequest(workItem, { tenantId: 'tenant-ops', actorId: 'actor-ops' });
+  assert.equal(built.ok, true);
+  const verdict = await evaluate(workItem, built.request);
+  assert.notEqual(verdict.ok, false);
+
+  // Rebuilding with only `subject` resets the identities to the fixture
+  // defaults, so the digest cannot match. Selection must be told the request
+  // context instead of silently rejecting a genuine verdict.
+  const unbound = await select([verdict], { fixtures: FIXTURES });
+  assert.equal(unbound.code, 'DGM_VERDICT_UNBOUND');
+
+  const selected = await select([verdict], {
+    fixtures: FIXTURES,
+    contexts: { [workItem.id]: { tenantId: 'tenant-ops', actorId: 'actor-ops' } }
+  });
+  assert.equal(selected.ok, true);
+  assert.equal(selected.selection.verification.verified, 1);
+
+  const wrongContext = await select([verdict], {
+    fixtures: FIXTURES,
+    contexts: { [workItem.id]: { tenantId: 'tenant-other', actorId: 'actor-ops' } }
+  });
+  assert.equal(wrongContext.code, 'DGM_VERDICT_UNBOUND');
+
+  const malformed = await select([verdict], {
+    fixtures: FIXTURES,
+    contexts: { [workItem.id]: { tenantId: 7 } }
+  });
+  assert.equal(malformed.code, 'DGM_BAD_INPUT');
+});

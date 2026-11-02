@@ -90,6 +90,11 @@ for (const [name, path, value] of [
   ['escaped JS private endpoint', 'app/app.js', String.raw`const fixture = "local\u0068ost";`],
   ['escaped JS Windows path', 'app/app.js', String.raw`const fixture = "C:\\Users\\fixture";`],
   ['header credential shape', '_headers', '# sk-' + 'SYNTHETIC'.repeat(4)],
+  // Allowlisted ES modules carry the same upload risk as .js and must be
+  // scanned, not silently skipped because of their extension.
+  ['module credential shape', 'app/experiments/dsh-dgm/src/adapter.mjs', '// ghp_' + 'SYNTHETIC'.repeat(4)],
+  ['module private endpoint', 'app/experiments/dsh-dgm/admin-gate.mjs', '// http://127.0.0.1:4327'],
+  ['module escaped private endpoint', 'app/experiments/dsh-dgm/src/checks.mjs', String.raw`const host = "127.0.0.1";`],
 ]) test(`rejects ${name}`, async () => fixture(
   root => edit(root, path, text => text + '\n' + value),
   root => assert.rejects(checkPublic(root), /Private/),

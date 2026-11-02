@@ -138,7 +138,9 @@ export async function checkPublic(root){
   assert.deepEqual(await files(root),publicFiles,'Public directory must match the explicit static allowlist');
   const manifest=[];
   for(const path of publicFiles){const bytes=await readFile(resolve(root,path));assert(bytes.length<10*1024*1024,'Unexpected oversized asset');manifest.push({path,bytes:bytes.length,sha256:sha(bytes)});
-    if(/\.(?:html|css|svg|json|js)$/.test(path) || path === '_headers'){
+    // .mjs is JavaScript too: an allowlisted module must not skip the privacy
+    // and credential scan that the same bytes would receive as .js.
+    if(/\.(?:html|css|svg|json|js|mjs)$/.test(path) || path === '_headers'){
       const text=bytes.toString('utf8');
       checkPrivacy(text);
       if (/\.(?:html|svg)$/.test(path)) checkMarkup(text, path);
