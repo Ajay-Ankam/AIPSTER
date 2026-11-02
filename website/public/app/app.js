@@ -349,14 +349,14 @@ async function refreshStatusStrip(token, gen, failures) {
 
 function resourceCard(r) {
   const s = r.state || {};
-  // Pairing/link state from row fields only. The browser cannot observe an
+  // Link state from row fields only, ordered by evidence strength. The browser cannot observe an
   // install, so there is no "installed" state here — only what the server
   // row proves: needs-link (manual, never paired), linked (paired, never
-  // beaten), reachable (fresh heartbeat, still not inference-ready), stale.
-  const link = !s.authenticated ? 'needs-link — pair this worker to link it'
-    : !r.heartbeatAt ? 'linked — awaiting first heartbeat'
-    : s.online ? 'reachable — heartbeat seen (reachability only, never ready to run)'
-    : 'stale — last beat ' + (r.heartbeatAt || 'unknown') + '; start the worker sender or check its key';
+  // beaten), reachable (fresh heartbeat, still not inference-ready), stale: a heartbeat outranks the pairing flag, so a fresh beat never reads needs-link.
+  const link = s.online ? 'reachable — heartbeat seen (reachability only, never ready to run)'
+    : r.heartbeatAt ? 'stale — last beat ' + (r.heartbeatAt || 'unknown') + '; start the worker sender or check its key'
+    : !s.authenticated ? 'needs-link — pair this worker to link it'
+    : 'linked — awaiting first heartbeat';
   return `<div class="card"><h2>${esc(r.name)}</h2>
     <p class="muted">${esc(r.id)} · ${esc(r.kind)} · origin: ${esc(r.origin)} · owner: ${esc(r.owner && r.owner.name)}</p>
     <p>${esc(r.compute.cpu)} · ${esc(r.compute.gpu)}</p>
