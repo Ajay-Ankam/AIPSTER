@@ -732,3 +732,438 @@ document.getElementById('dgm-create').addEventListener('click', createDgmRun);
 document.getElementById('dgm-pause').addEventListener('click', () => dgmControl('pause'));
 document.getElementById('dgm-resume').addEventListener('click', () => dgmControl('resume'));
 document.getElementById('dgm-cancel').addEventListener('click', () => dgmControl('cancel'));
+
+// ---- DGM Muse proposal (dark slice; the server authorizes and gates every call) ----
+//
+// This panel spends authority, never claims it. It reads the server's Muse
+// status and renders exactly what the server reports: which prerequisites are
+// missing, whether live generation is configured, and the aggregate ledger.
+// Generating is an explicit operator click, one request per click, with a
+// client-held operation key. Nothing is generated on load, polling, refresh,
+// rerender or retry. Uncertain outcomes are inspect/reconcile states: the
+// panel keeps the key, never resubmits with a new one, and never invents a
+// provider result. The fixed fixture table remains the only evaluator; attach
+// merely links a delivered proposal to it after the server verifies delivery.
+
+const MUSE_BASE = '/api/admin/v1/dgm/preview/muse';
+const MUSE_FIXTURE_RUNS = '/api/admin/v1/dgm/preview/runs';
+const MUSE_OP_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+
+let museSeq = 0;          // status request ordering
+let museOpSeq = 0;        // inspect/reconcile request ordering
+let museAuthorized = false;
+let museStatusBody = null;
+let museBusy = false;     // one generation/attach at a time
+let museBlocked = false;  // quarantine state the server reported
+let museCurrent = null;   // result bound to one operation key
+let museAttachKey = null; // key captured when the rendered result was drawn
+
+function museSetState(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function museUsd(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? '$' + value.toFixed(6) : 'unknown';
+}
+
+function museCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? String(value) : 'unknown';
+}
+
+function museFailure(code, status) {
+  // The server's operator codes and HTTP status only: never a raw error body,
+  // provider message or stack trace.
+  if (code) return code + ' (HTTP ' + status + ')';
+  return 'HTTP ' + status;
+}
+
+function museStoreAvailable() {
+  return !!(museStatusBody && museStatusBody.spend && museStatusBody.spend.status !== 'store-not-migrated');
+}
+
+function museLiveConfigured() {
+  return !!(museStatusBody && museStatusBody.provider && museStatusBody.provider.configured === true);
+}
+
+function museLiveBudget() {
+  return !!(museStatusBody && Number(museStatusBody.spendCapUsd) > 0);
+}
+
+function museMode() {
+  const el = document.getElementById('dgm-muse-mode');
+  return el && el.value ? String(el.value) : 'fixture';
+}
+
+function museSyncControls() {
+  const generate = document.getElementById('dgm-muse-generate');
+  const liveOption = document.getElementById('dgm-muse-mode-live');
+  if (liveOption) liveOption.disabled = !museLiveConfigured();
+  if (generate) {
+    generate.disabled = !museAuthorized || museBusy || museBlocked
+      || !museStoreAvailable() || (museMode() === 'live' && !museLiveConfigured());
+  }
+  const ack = document.getElementById('dgm-muse-ack');
+  const reconcile = document.getElementById('dgm-muse-reconcile-submit');
+  if (reconcile) reconcile.disabled = museBusy || !museCurrent || !ack || ack.checked !== true;
+}
+
+function musePrerequisites(body) {
+  const missing = [];
+  if (!Array.isArray(body.modes) || !body.modes.includes('fixture')) missing.push('server does not report a fixture mode');
+  if (!body.spend || body.spend.status === 'store-not-migrated') {
+    missing.push('proposal store not migrated (DGM Muse migrations 0026–0028)');
+  }
+  if (!museLiveConfigured()) {
+    missing.push('live generation disabled (DGM_MUSE_LIVE and the server-side key are not both configured)');
+  }
+  if (!museLiveBudget()) {
+    missing.push('live budget unset (DGM_MUSE_SPEND_CAP_USD is zero or missing)');
+  }
+  missing.push('write grant (admin.engineering.assign) is checked by the server on every generation; this view does not claim it');
+  return missing;
+}
+
+function museRenderStatus(body) {
+  const box = document.getElementById('dgm-muse-status');
+  const provider = body.provider || {};
+  const spend = body.spend || {};
+  const row = (label, value) => '<tr><th>' + esc(label) + '</th><td>' + value + '</td></tr>';
+  const spendRows = spend.status === 'store-not-migrated'
+    ? row('spend ledger', 'unavailable: store not migrated')
+    : spend.status === 'uninitialised'
+      ? row('spend ledger', 'no admission recorded yet (cap ' + esc(museUsd(spend.capUsd)) + ')')
+      : row('spend cap', esc(museUsd(spend.capUsd)))
+        + row('reserved (admission bound)', esc(museUsd(spend.reservedUsd)))
+        + row('used (delivered usage, lower bound)', esc(museUsd(spend.usedUsd)))
+        + row('remaining', esc(museUsd(spend.remainingUsd)))
+        + row('ledger updated', esc(spend.updatedAt || 'unknown'));
+  const missing = musePrerequisites(body).map((m) => '<li>' + esc(m) + '</li>').join('');
+  if (box) {
+    box.innerHTML = '<table>'
+      + row('model', esc(provider.model || 'unknown'))
+      + row('provider configured', museLiveConfigured() ? 'yes (synthetic-live)' : 'no (fixture only)')
+      + row('reported evaluation', esc(body.evaluation || 'unknown'))
+      + row('endpoint', esc(((provider.endpoint || {}).host || 'unknown') + ((provider.endpoint || {}).path || '')))
+      + row('prompt bound', museCount((provider.bounds || {}).promptMaxBytes) + ' bytes')
+      + row('output bound', museCount((provider.bounds || {}).outputMaxTokens) + ' tokens / deadline '
+        + museCount((provider.bounds || {}).deadlineMs) + ' ms')
+      + spendRows
+      + '</table><h3>Missing prerequisites</h3><ul>' + missing + '</ul>'
+      + '<p class="note">A fixture dry run performs no provider call and cannot incur spend. Live mode stays disabled unless the server reports it configured.</p>';
+  }
+  museSetState('dgm-muse-state', 'Loaded ' + unknown(body.observedAt) + '.');
+}
+
+async function loadDgmMuse() {
+  const mySeq = ++museSeq;
+  museSetState('dgm-muse-state', 'Loading…');
+  const box = document.getElementById('dgm-muse-status');
+  if (box) box.textContent = '';
+  try {
+    const { res, body } = await dgmFetch(MUSE_BASE + '/status');
+    if (mySeq !== museSeq) return; // a newer load superseded this response
+    if (!res.ok || !body) {
+      museAuthorized = false;
+      museStatusBody = null;
+      museSetState('dgm-muse-state', 'Unavailable: ' + museFailure(body && body.code, res.status) + '. No generation is offered.');
+      museSyncControls();
+      return;
+    }
+    museAuthorized = true;
+    museStatusBody = body;
+    museRenderStatus(body);
+    // Replace the initial placeholder only; never overwrite a result message.
+    const genState = document.getElementById('dgm-muse-gen-state');
+    if (genState && genState.textContent === 'Load Muse status first.') {
+      museSetState('dgm-muse-gen-state', 'Ready: status loaded. One click sends at most one request.');
+    }
+    museSyncControls();
+  } catch {
+    if (mySeq !== museSeq) return;
+    museAuthorized = false;
+    museStatusBody = null;
+    museSetState('dgm-muse-state', 'Unavailable: request failed. No generation is offered.');
+    if (box) box.textContent = '';
+    museSyncControls();
+  }
+}
+
+function museNewOpKey() {
+  // One key per deliberate generation. Held locally so an uncertain outcome
+  // can be inspected instead of resubmitted under a new key.
+  let suffix;
+  try {
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    suffix = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    suffix = String(Math.random()).slice(2, 18) + String(Date.now()).slice(-4);
+  }
+  return 'ui-' + suffix;
+}
+
+function museRenderResult(entry) {
+  const box = document.getElementById('dgm-muse-result');
+  if (!box) return;
+  museAttachKey = entry.opKey;
+  const r = entry.receipt || {};
+  const usage = r.usage && Number.isSafeInteger(r.usage.input_tokens) && Number.isSafeInteger(r.usage.output_tokens)
+    ? 'input=' + r.usage.input_tokens + ' output=' + r.usage.output_tokens
+    : 'unknown';
+  const input = r.proposalInput && typeof r.proposalInput.fixture === 'string' ? r.proposalInput.fixture : null;
+  const row = (label, value) => '<tr><th>' + esc(label) + '</th><td>' + value + '</td></tr>';
+  let html = '<h3>Operation result</h3><table>'
+    + row('operation key', esc(entry.opKey))
+    + row('state', esc(entry.state || 'delivered'))
+    + row('mode', esc(r.mode || entry.mode || 'unknown'))
+    + row('evaluation', esc(r.evaluation || 'unknown'))
+    + row('model', esc(r.model || 'unknown'))
+    + row('response id', esc(r.responseId || 'not applicable'))
+    + row('usage', esc(usage))
+    + row('elapsed', Number.isFinite(r.elapsedMs) ? esc(String(r.elapsedMs) + ' ms') : 'unknown')
+    + row('spend reserved', esc(museUsd(r.spendUsdReserved)))
+    + row('spend used (reported, lower bound)', esc(museUsd(r.spendUsdUsed)))
+    + row('provider contact', esc(r.providerContact || 'unknown'))
+    + row('acceptance', esc(r.acceptance || 'unknown'))
+    + row('billing', esc(r.billing || 'unknown'))
+    + row('proposal hash', esc(r.proposalHash || 'unknown'))
+    + row('proposal chars', museCount(r.proposalChars))
+    + row('evaluated input', esc(input || 'none (no allowlisted fixture directive)'))
+    + '</table>';
+  if (typeof entry.proposal === 'string') {
+    html += '<h3>Proposal text (' + esc(r.evaluation || entry.mode || 'unknown') + ')</h3>'
+      + '<pre class="proposal">' + esc(entry.proposal) + '</pre>';
+  } else {
+    html += '<p class="note">No proposal text is shown: the server does not store live proposal text, so this result is the receipt only.</p>';
+  }
+  if (input) {
+    html += '<p><button type="button" id="dgm-muse-attach">Attach to bounded fixture evaluation</button></p>';
+  } else {
+    html += '<p class="note">No attach: this delivery carried no usable allowlisted <code>fixture:</code> directive, so there is no evaluation input to consume.</p>';
+  }
+  box.innerHTML = html;
+  const attach = document.getElementById('dgm-muse-attach');
+  if (attach) attach.addEventListener('click', () => attachDgmMuseProposal());
+  museSyncControls();
+}
+
+function museShowReconcile(prefillKey, explanation) {
+  const panel = document.getElementById('dgm-muse-reconcile');
+  if (panel) panel.hidden = false;
+  const keyInput = document.getElementById('dgm-muse-op-key');
+  if (keyInput && prefillKey) keyInput.value = prefillKey;
+  museSetState('dgm-muse-reconcile-state', explanation);
+  museSyncControls();
+}
+
+async function generateDgmMuseProposal() {
+  if (museBusy) return; // duplicate clicks never send a second request
+  if (!museAuthorized || !museStatusBody) {
+    museSetState('dgm-muse-gen-state', 'Load Muse status first.');
+    return;
+  }
+  const promptEl = document.getElementById('dgm-muse-prompt');
+  const prompt = promptEl ? String(promptEl.value || '') : '';
+  const mode = museMode();
+  if (!prompt.trim()) {
+    museSetState('dgm-muse-gen-state', 'Enter a synthetic test prompt first. Nothing was sent.');
+    return;
+  }
+  if (mode === 'live' && !museLiveConfigured()) {
+    museSetState('dgm-muse-gen-state', 'Live generation is not configured on the server. Nothing was sent; request a fixture dry run instead.');
+    return;
+  }
+  if (!museStoreAvailable()) {
+    museSetState('dgm-muse-gen-state', 'The DGM proposal store is not migrated. Nothing was sent.');
+    return;
+  }
+  const opKey = museNewOpKey();
+  const mySeq = ++museOpSeq;
+  museBusy = true;
+  museSyncControls();
+  museSetState('dgm-muse-gen-state', 'Generating one ' + (mode === 'live' ? 'synthetic-live' : 'fixture') + ' proposal…');
+  try {
+    const { res, body } = await dgmFetch(MUSE_BASE + '/proposals', {
+      method: 'POST', body: JSON.stringify({ prompt, mode, opKey })
+    });
+    if (mySeq !== museOpSeq) return;
+    if (res.ok && body && typeof body.proposal === 'string') {
+      museCurrent = { opKey, mode, state: 'delivered', proposal: body.proposal, receipt: body.receipt || null };
+      museBlocked = false;
+      museRenderResult(museCurrent);
+      museSetState('dgm-muse-gen-state', 'Delivered ' + opKey + ' (' + (body.receipt && body.receipt.evaluation ? body.receipt.evaluation : mode) + ').');
+      return;
+    }
+    const code = body && typeof body.code === 'string' ? body.code : '';
+    if (res.ok && body && body.receipt) {
+      // A replay of a settled op: render its receipt, never invent text.
+      const state = typeof body.state === 'string' ? body.state : 'unknown';
+      museCurrent = { opKey, mode, state, proposal: null, receipt: body.receipt };
+      museBlocked = state === 'cancelled';
+      museRenderResult(museCurrent);
+      museSetState('dgm-muse-gen-state', 'Replayed ' + opKey + ' as ' + state + '.');
+      return;
+    }
+    if (code === 'DGM_MUSE_UNCERTAIN') {
+      museBlocked = true;
+      museShowReconcile('', 'Another operation for this tenant is quarantined, so the server admitted nothing. Inspect its operation key and reconcile it explicitly; this panel never resubmits with a new key.');
+      museSetState('dgm-muse-gen-state', 'Quarantined: ' + museFailure(code, res.status) + '. No duplicate was sent.');
+      return;
+    }
+    if (code === 'DGM_MUSE_IN_FLIGHT') {
+      museSetState('dgm-muse-gen-state', 'Another proposal is in flight: ' + museFailure(code, res.status) + '. Wait for it to settle, or inspect it by key.');
+      return;
+    }
+    if (code === 'DGM_MUSE_CANCELLED') {
+      museBlocked = true;
+      museShowReconcile(opKey, 'The operation was cancelled during admission and carries a durable reservation. Inspect it and reconcile explicitly if its provider outcome is unknown.');
+      museSetState('dgm-muse-gen-state', 'Cancelled during admission: ' + museFailure(code, res.status) + '.');
+      return;
+    }
+    museSetState('dgm-muse-gen-state', 'Refused: ' + museFailure(code, res.status) + '. Nothing was delivered.');
+  } catch {
+    if (mySeq !== museOpSeq) return;
+    // The request left the page but no response was read: it may or may not
+    // have been admitted. Keep the key and inspect; never auto-resend.
+    museBlocked = true;
+    museShowReconcile(opKey, 'The request ended before a response was read, so the outcome is unknown. Inspect operation ' + opKey + '; nothing is resubmitted automatically.');
+    museSetState('dgm-muse-gen-state', 'Outcome unknown: the request may have reached the server. Inspect ' + opKey + '.');
+  } finally {
+    if (mySeq === museOpSeq) {
+      museBusy = false;
+      museSyncControls();
+    }
+  }
+}
+
+function museOpKeyFromInput() {
+  const el = document.getElementById('dgm-muse-op-key');
+  return el ? String(el.value || '').trim() : '';
+}
+
+async function inspectDgmMuseOp() {
+  const key = museOpKeyFromInput();
+  if (!MUSE_OP_RE.test(key)) {
+    museSetState('dgm-muse-reconcile-state', 'Enter a valid operation key (1..64 id characters).');
+    return;
+  }
+  const mySeq = ++museOpSeq;
+  museSetState('dgm-muse-reconcile-state', 'Inspecting ' + key + '…');
+  try {
+    const { res, body } = await dgmFetch(MUSE_BASE + '/ops/' + encodeURIComponent(key));
+    if (mySeq !== museOpSeq) return;
+    if (res.status === 404) {
+      // No row exists: the server never admitted this key, so nothing was
+      // reserved and no provider call can be attached to it.
+      museBlocked = false;
+      museSyncControls();
+      museSetState('dgm-muse-reconcile-state', 'No stored operation ' + key + '. The server never admitted it, so no reservation or provider call exists for this key.');
+      return;
+    }
+    if (!res.ok || !body) {
+      museSetState('dgm-muse-reconcile-state', 'Inspect refused: ' + museFailure(body && body.code, res.status) + '.');
+      return;
+    }
+    museCurrent = { opKey: key, state: body.state, proposal: null, receipt: body.receipt || null };
+    museBlocked = body.blocking === true;
+    museRenderResult(museCurrent);
+    museSetState('dgm-muse-reconcile-state', 'State ' + unknown(body.state) + '; unknown outcome '
+      + (body.unknownOutcome === true ? 'yes' : 'no') + '; blocking admission '
+      + (body.blocking === true ? 'yes' : 'no') + '.');
+    const panel = document.getElementById('dgm-muse-reconcile');
+    if (panel) panel.hidden = false;
+    museSyncControls();
+  } catch {
+    if (mySeq !== museOpSeq) return;
+    museSetState('dgm-muse-reconcile-state', 'Inspect failed: request failed.');
+  }
+}
+
+async function reconcileDgmMuseOp() {
+  if (museBusy) return;
+  const key = museOpKeyFromInput();
+  const ack = document.getElementById('dgm-muse-ack');
+  if (!MUSE_OP_RE.test(key)) {
+    museSetState('dgm-muse-reconcile-state', 'Enter a valid operation key first.');
+    return;
+  }
+  if (!ack || ack.checked !== true) {
+    museSetState('dgm-muse-reconcile-state', 'Reconciliation needs the explicit acknowledgement checkbox.');
+    return;
+  }
+  const noteEl = document.getElementById('dgm-muse-note');
+  const note = noteEl ? String(noteEl.value || '').trim() : '';
+  const mySeq = ++museOpSeq;
+  museBusy = true;
+  museSyncControls();
+  museSetState('dgm-muse-reconcile-state', 'Reconciling ' + key + '…');
+  try {
+    const { res, body } = await dgmFetch(MUSE_BASE + '/ops/' + encodeURIComponent(key) + '/reconcile', {
+      method: 'POST', body: JSON.stringify(note ? { acknowledge: true, note } : { acknowledge: true })
+    });
+    if (mySeq !== museOpSeq) return;
+    if (res.ok && body && body.state) {
+      museCurrent = { opKey: key, state: body.state, proposal: null, receipt: body.receipt || null };
+      museBlocked = body.blocking === true;
+      museRenderResult(museCurrent);
+      museSetState('dgm-muse-reconcile-state', 'Reconciled ' + key + ' as ' + body.state + '. The reservation is not refunded.');
+      if (ack) ack.checked = false;
+      return;
+    }
+    museSetState('dgm-muse-reconcile-state', 'Reconcile refused: ' + museFailure(body && body.code, res.status) + '.');
+  } catch {
+    if (mySeq !== museOpSeq) return;
+    museSetState('dgm-muse-reconcile-state', 'Reconcile failed: request failed. Nothing was recorded.');
+  } finally {
+    if (mySeq === museOpSeq) {
+      museBusy = false;
+      museSyncControls();
+    }
+  }
+}
+
+async function attachDgmMuseProposal() {
+  if (museBusy) return;
+  const opKey = museAttachKey; // captured when this result was rendered
+  if (!opKey) return;
+  const entry = museCurrent && museCurrent.opKey === opKey ? museCurrent : null;
+  const input = entry && entry.receipt && entry.receipt.proposalInput
+    && typeof entry.receipt.proposalInput.fixture === 'string' ? entry.receipt.proposalInput.fixture : null;
+  if (!input) {
+    museSetState('dgm-muse-gen-state', 'This delivery carried no allowlisted fixture input, so nothing can be attached.');
+    return;
+  }
+  museBusy = true;
+  museSyncControls();
+  museSetState('dgm-muse-gen-state', 'Attaching ' + opKey + ' to the bounded fixture evaluation…');
+  try {
+    // No direct `fixture`: the server verifies delivery and evaluates the
+    // proposal's own allowlisted directive.
+    const { res, body } = await dgmFetch(MUSE_FIXTURE_RUNS, {
+      method: 'POST', body: JSON.stringify({ proposalOpKey: opKey })
+    });
+    if (res.ok && body) {
+      museSetState('dgm-muse-gen-state', 'Attached ' + opKey + ' as preview run ' + unknown(body.runId)
+        + ' (' + unknown(body.status) + ' / ' + unknown(body.envelopeLabel) + '). The verdict is the fixture table\'s.');
+      const attach = document.getElementById('dgm-muse-attach');
+      if (attach) attach.disabled = true;
+      loadDgmRuns();
+      loadDgmRun(body.runId);
+    } else {
+      museSetState('dgm-muse-gen-state', 'Attach refused: ' + museFailure(body && body.code, res.status) + '.');
+    }
+  } catch {
+    museSetState('dgm-muse-gen-state', 'Attach failed: request failed.');
+  } finally {
+    museBusy = false;
+    museSyncControls();
+  }
+}
+
+document.getElementById('dgm-muse-load').addEventListener('click', loadDgmMuse);
+document.getElementById('dgm-muse-generate').addEventListener('click', generateDgmMuseProposal);
+document.getElementById('dgm-muse-mode').addEventListener('change', museSyncControls);
+document.getElementById('dgm-muse-inspect').addEventListener('click', inspectDgmMuseOp);
+document.getElementById('dgm-muse-reconcile-submit').addEventListener('click', reconcileDgmMuseOp);
+document.getElementById('dgm-muse-ack').addEventListener('change', museSyncControls);
