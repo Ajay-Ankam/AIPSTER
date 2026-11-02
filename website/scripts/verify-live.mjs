@@ -7,7 +7,8 @@ import {publicFiles, sha} from './check.mjs';
 // .mjs modules are JavaScript and are held to exactly the .js media types.
 const JAVASCRIPT_TYPES = ['text/javascript', 'application/javascript'];
 const CONTENT_TYPES = {html: ['text/html'], js: JAVASCRIPT_TYPES, mjs: JAVASCRIPT_TYPES,
-  css: ['text/css'], svg: ['image/svg+xml'], png: ['image/png'], json: ['application/json']};
+  css: ['text/css'], svg: ['image/svg+xml'], png: ['image/png'], json: ['application/json'],
+  mp4: ['video/mp4'], jpg: ['image/jpeg'], vtt: ['text/vtt']};
 function verifyContentType(response, path) {
   const type = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   assert(CONTENT_TYPES[path.split('.').at(-1)]?.includes(type), `Incorrect content type: ${path}`);

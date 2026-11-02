@@ -91,8 +91,12 @@ scaffold qualification and auth-placeholder wording), and those later heads are
 not reviewed here. Its two screenshot assets and
 shot-list path exist in the commit, and the screenshots visually match the
 public landing and sign-in shell. No recorded video link or video asset was
-present; the draft correctly offers a 60–90 second shot list and identifies
-the recording/upload as the owner action. PR #54's public-site asset/build
+present at that head; the draft correctly offers a 60–90 second shot list and
+identifies the recording/upload as the owner action. *Update 2026-11-02:* a
+separate 38-second progress and vision cut is now published on the homepage and
+in the README (PR #77), with captions and a transcript. It is concept footage,
+not proof of working live inference, and it does not replace the still-unrecorded
+60–90 second live-feature walkthrough. PR #54's public-site asset/build
 check passed at this head
 ([run 41225184574](https://github.com/synchronic1/AIPSTER/actions/runs/41225184574)).
 

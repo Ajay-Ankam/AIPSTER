@@ -1,7 +1,11 @@
 # AIPSTER 60–90 second demo shot list
 
-No recorded video exists yet (verified 2026-10-31: no video links on the
-deployed site or in this repository). Record the journey below with an
+No recording of the live product walkthrough exists yet. Verified 2026-10-31:
+no video links on the deployed site or in this repository. On 2026-11-02 the
+separate 38-second **progress and vision cut** was published on the homepage
+and in the README, with captions and a transcript. That cut is concept and
+vision footage — not a recording of live features, and not proof of working
+inference — so it does not satisfy this list. Record the journey below with an
 authorized test identity, upload it, and link the upload from the README demo
 section. Exact missing items, both owner actions: (1) a test identity the
 recorder is authorized to use — either a GitHub test account approved for the
