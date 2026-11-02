@@ -61,18 +61,53 @@ a.btn.secondary, button.btn.secondary { background:transparent; color:var(--acce
 @media (prefers-reduced-motion:reduce){ *{transition:none !important;} }
 .cardtext { white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Consolas,monospace; font-size:.85rem; background:#0b0e12; border:1px solid var(--line); border-radius:.4rem; padding:.75rem; overflow-x:auto; }
 #tab-models a:not(.btn) { color:var(--accent); }
-.topo { display:grid; gap:.6rem; }
-.topo-stage { display:flex; gap:.6rem; align-items:center; border:1px solid var(--line); border-radius:.4rem; padding:.5rem .75rem; background:#0f141b; }
-.topo-kicker { font-size:.7rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); border:1px solid var(--line); border-radius:1rem; padding:.05rem .55rem; }
-.topo-stage p, .topo-node p { margin:.25rem 0; }
-.topo-edge { display:flex; align-items:center; gap:.5rem; color:var(--muted); font-size:.85rem; }
-.topo-edge i { flex:1; border-top:2px dashed var(--muted); }
-.topo-nodes { list-style:none; padding:0; margin:.25rem 0; display:grid; gap:.5rem; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); }
-.topo-node { border:1px solid var(--line); border-radius:.4rem; padding:.5rem .75rem; }
-.topo-return { display:flex; flex-wrap:wrap; gap:.4rem 1.2rem; border-top:2px solid var(--ok); padding-top:.5rem; font-size:.85rem; color:var(--muted); }
+.topo-head{display:flex;justify-content:space-between;gap:1rem;align-items:end;flex-wrap:wrap}
+.eyebrow{font-size:.72rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0 0 .3rem}
+.topo-note{margin:0;color:var(--muted);font-size:.8rem;max-width:22rem}
+.topo-map{display:grid;grid-template-columns:172px 88px 202px 88px minmax(0,1fr);align-items:center;gap:0 .4rem;margin-top:.6rem}
+.topo-stage{display:flex;gap:.6rem;align-items:center;border:1px solid var(--line);border-radius:.4rem;padding:.55rem .7rem;background:#10151d;min-width:0}
+.topo-icon{display:grid;place-items:center;width:1.6rem;height:1.6rem;flex:none;background:#3a2c1c;color:var(--accent);border-radius:.3rem;font-weight:700}
+.topo-stage b{display:block;font-size:.85rem}
+.topo-stage small{display:block;color:var(--muted);font-size:.75rem;margin-top:.1rem}
+.topo-link{position:relative;height:2.6rem;color:var(--muted);font-size:.72rem;text-align:center}
+.topo-link:before{content:"";position:absolute;top:.75rem;left:0;right:0;border-top:2px solid var(--accent)}
+.topo-link:after{content:"›";position:absolute;right:-.1rem;top:-.3rem;color:var(--accent);font-size:1.5rem;line-height:1}
+.topo-link span{position:relative;top:1.2rem;background:var(--panel);padding:0 .3rem;white-space:nowrap}
+.topo-nodes{list-style:none;padding:0;margin:0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.topo-node{border:1px solid var(--line);border-radius:.4rem;padding:.55rem .75rem;min-width:0}
+.topo-node header{display:flex;justify-content:space-between;align-items:center;gap:.5rem}
+.topo-node header>div{display:flex;gap:.45rem;align-items:center;min-width:0}
+.topo-node strong{overflow-wrap:anywhere}
+.topo-dot{width:.55rem;height:.55rem;flex:none;border-radius:50%;background:var(--muted)}
+.topo-node.online .topo-dot{background:var(--ok)}
+.topo-node.stale{border-color:#6b5433}
+.topo-node.stale .topo-dot{background:var(--warn)}
+.topo-node.offline{opacity:.78}
+.topo-node.offline .topo-dot{background:var(--bad)}
+.topo-node header>b{font-size:.7rem;text-transform:uppercase;letter-spacing:.07em}
+.topo-node.online header>b{color:var(--ok)}
+.topo-node.stale header>b{color:var(--warn)}
+.topo-node.offline header>b{color:var(--bad)}
+.topo-host{color:var(--muted);font-size:.78rem;margin:.3rem 0 .5rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.topo-node p{margin:.25rem 0}
+.topo-node .ev{grid-template-columns:1fr 1fr;gap:.35rem .8rem}
+.topo-caps{display:flex;flex-wrap:wrap;gap:.3rem;align-items:center;border-top:1px solid var(--line);margin-top:.55rem;padding-top:.5rem;font-size:.78rem}
+.topo-chip{border:1px solid var(--line);border-radius:.25rem;padding:.05rem .4rem;color:var(--ink)}
+.topo-return{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:.3rem 1.2rem;border-top:2px solid var(--ok);padding-top:.5rem;font-size:.82rem;color:var(--muted)}
+.topo-legend{display:flex;flex-wrap:wrap;gap:.4rem 1rem;border-top:1px solid var(--line);margin-top:.7rem;padding-top:.55rem;font-size:.78rem;color:var(--muted)}
+.topo-legend span{display:flex;gap:.4rem;align-items:center}
+.topo-legend i{width:.9rem;border-top:2px solid var(--accent)}
+.topo-legend i.sw-heartbeat{border-top-style:dashed;border-color:var(--ok)}
+.topo-legend i.sw-result{border-color:var(--muted)}
+.topo-legend i.sw-unsupported{width:.55rem;height:.55rem;border:0;border-radius:.15rem;background:var(--muted)}
 .ev { display:grid; gap:.15rem; margin:.4rem 0; font-size:.85rem; }
 .ev div { display:flex; gap:.5rem; }
 .ev dt { color:var(--muted); min-width:9rem; }
 .ev dd { margin:0; }
 .bench .ev dt { min-width:12rem; }
-@media (max-width:640px){ .topo-nodes{grid-template-columns:1fr;} .ev dt{min-width:7rem;} }
+.bench-axis{display:flex;justify-content:space-between;color:var(--muted);font-size:.75rem;border-bottom:1px solid var(--line);padding-bottom:.25rem;margin:.5rem 0}
+.bench-track{position:relative;border:1px solid var(--line);border-radius:.3rem;min-height:2.2rem;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.bench-hatch{position:absolute;inset:0;background:repeating-linear-gradient(45deg,transparent 0 6px,rgba(154,164,181,.13) 6px 12px)}
+.bench-word{position:relative;color:var(--muted);font-size:.85rem}
+@media (max-width:860px){ .topo-map{grid-template-columns:1fr;gap:.55rem} .topo-link{height:2.7rem} .topo-link:before{top:0;bottom:0;left:50%;right:auto;border-top:0;border-left:2px solid var(--accent)} .topo-link:after{content:"↓";top:.85rem;right:auto;left:calc(50% - .45rem)} .topo-link span{position:absolute;top:.6rem;left:calc(50% + .7rem)} .topo-return{grid-column:auto} .topo-nodes{grid-template-columns:1fr} }
+@media (max-width:640px){ .ev dt{min-width:7rem;} }

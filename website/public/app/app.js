@@ -166,25 +166,29 @@ function fabricFlowNode(r, inv) {
   // without a string heartbeat timestamp drops to unknown.
   const disp = flowRowLiveness(r);
   if (!disp) return null;
-  const pill = disp === 'online' ? 'ok' : disp === 'offline' ? 'bad' : disp === 'stale' ? 'warn' : '';
   const age = r.lastSeenAgeMs === null || r.lastSeenAgeMs === undefined ? 'never' : formatAge(r.lastSeenAgeMs);
   // Strip parity (renderStatus): only a fresh online row carries heartbeat-seen
   // copy; stale rows read not currently reachable, so a relative age never
   // accompanies a live-currency claim except the server's own fresh verdict.
   const hb = disp !== 'online'
-    ? ' · not currently reachable'
+    ? 'not currently reachable'
     : r.usable === false
-      ? ' · ATTENTION: reachable but NOT usable for inference'
-      : ' · heartbeat seen (reachability only · not ready to run)';
+      ? 'ATTENTION: reachable but NOT usable for inference'
+      : 'heartbeat seen (reachability only · not ready to run)';
   const ev = fabricEvidence(inv);
   const evRow = (label, value) => `<div><dt>${esc(label)}</dt><dd>${value === null ? 'not reported' : esc(value)}</dd></div>`;
-  return `<li class="topo-node"><p><strong>${esc(r.name)}</strong> <span class="muted">${esc(r.id)} · ${esc(r.kind)}</span> <span class="pill ${pill}">${esc(disp)}</span></p>`
-    + `<p class="muted">last seen ${esc(age)}${esc(hb)}${r.demoFixture ? ' · DEMO' : ''}</p>`
+  const caps = ev.caps === null
+    ? '<span class="muted">none recorded</span>'
+    : String(ev.caps).split(',').map((c) => c.trim()).filter(Boolean).slice(0, 8).map((c) => `<span class="topo-chip">${esc(c)}</span>`).join('');
+  return `<li class="topo-node ${disp}"><header><div><span class="topo-dot" aria-hidden="true"></span><strong>${esc(r.name)}</strong></div><b>${esc(disp)}</b></header>`
+    + `<p class="topo-host">${esc(r.id)} · ${esc(r.kind)}${r.demoFixture ? ' · DEMO' : ''}</p>`
     + `<dl class="ev">`
     + evRow('CPU', ev.cpu) + evRow('GPU', ev.gpu)
-    + `<div><dt>Capabilities</dt><dd>${ev.caps === null ? 'none recorded' : esc(ev.caps)}</dd></div>`
-    + evRow('Memory', null) + evRow('Runtime', null) + evRow('Resident model', null)
-    + `</dl></li>`;
+    + `<div><dt>Last seen</dt><dd>${esc(age)}</dd></div>`
+    + `</dl>`
+    + `<p class="muted">${esc(hb)}</p>`
+    + `<div class="topo-caps"><span class="muted">Capabilities (declared):</span> ${caps}</div>`
+    + `<p class="muted">Memory · Runtime · Resident model: not reported. Models: not reported.</p></li>`;
 }
 
 // Heartbeat-lane state derives from the row liveness SET, mirroring the
@@ -235,9 +239,6 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   const shared = Number.isSafeInteger(statusData.sharedWithMe) && statusData.sharedWithMe >= 0 ? statusData.sharedWithMe : 'unknown';
   const lane = flowHeartbeatLane(laneRows);
   const laneWord = lane === 'live' ? 'live' : lane === 'stale' ? 'stale only' : lane === 'unknown' ? 'unknown only' : 'none seen';
-  const list = nodes.length
-    ? `<ul class="topo-nodes">${nodes.join('')}</ul>`
-    : '<p class="muted">No resources yet — register or pair one to see it here.</p>';
   const truncated = statusData.itemsTruncated === true || total > nodes.length
     ? `<p class="muted">showing ${nodes.length} of ${total} · older resources omitted from the list; counts cover all resources.</p>`
     : '';
@@ -255,14 +256,18 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
     ? 'snapshot time unknown'
     : `snapshot taken ${snapStamp} (snapshot only — this panel does not update until Overview reloads)`;
   flowEl.innerHTML = `<div class="topo" role="group" aria-label="Fabric flow: the browser session reads the AIPSTER API, which reports worker resources from heartbeats. Request and result lanes are architectural, not live connections.">`
-    + `<p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown · ${shared} shared with me${countsNote}</p>`
-    + `<div class="topo-stage"><span class="topo-kicker" aria-hidden="true">entry</span><div><strong>Browser session</strong><br><span class="muted">signed-in owner · read-only view</span></div></div>`
-    + `<div class="topo-edge arch" aria-hidden="true"><i></i><span>Request (architectural: dispatch is disabled)</span></div>`
-    + `<div class="topo-stage"><span class="topo-kicker" aria-hidden="true">control</span><div><strong>AIPSTER API</strong><br><span class="muted">status · inventory · usage reads</span></div></div>`
-    + `<div class="topo-edge arch" aria-hidden="true"><i></i><span>Request to node (architectural)</span></div>`
-    + list + truncated
+    + `<div class="topo-head"><div><p class="eyebrow">snapshot · read-only</p><p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown · ${shared} shared with me${countsNote}</p></div><p class="topo-note">Heartbeat freshness, not inference readiness.</p></div>`
+    + `<div class="topo-map">`
+    + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true">→</span><div><b>Browser session</b><small>signed-in owner · read-only view</small></div></div>`
+    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request (architectural: dispatch is disabled)</span></div>`
+    + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true">≡</span><div><b>AIPSTER API</b><small>status · inventory · usage reads</small></div></div>`
+    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request to node (architectural)</span></div>`
+    + (nodes.length ? `<ul class="topo-nodes">${nodes.join('')}</ul>` : '<p class="muted">No resources yet — register or pair one to see it here.</p>')
+    + `</div>`
+    + truncated
     + `<div class="topo-return"><span>Heartbeat returns: reachability only (${laneWord})</span><span>Result returns: usage totals only</span></div>`
-    + `<p class="muted">Heartbeat freshness: online means a fresh heartbeat, stale an older one, unknown a flag without heartbeat, offline not flagged. Resident, Cached, Unprovisioned: unsupported in this build.</p>`
+    + `<p class="muted">Heartbeat freshness: online means a fresh heartbeat, stale an older one, unknown a flag without heartbeat, offline not flagged.</p>`
+    + `<footer class="topo-legend"><span><i class="sw-request"></i>Request (architectural)</span><span><i class="sw-heartbeat"></i>Heartbeat</span><span><i class="sw-result"></i>Result (architectural: usage totals only)</span><span><i class="sw-unsupported"></i>Resident / Cached / Unprovisioned (unsupported)</span></footer>`
     + `<p class="muted">${esc(note)}</p>`
     + `<p class="muted">${esc(snapLine)}.</p></div>`;
   // Throughput is always unavailable: usage reports cumulative counts only.
@@ -281,6 +286,8 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   const benchRow = (label, value) => `<div><dt>${esc(label)}</dt><dd>${value}</dd></div>`;
   tpEl.innerHTML = `<div class="bench" role="group" aria-label="Throughput bench: measured rates are unavailable; cumulative usage totals below.">`
     + `<p><span class="pill bad">measured rate: unavailable</span></p>`
+    + `<div class="bench-plot"><div class="bench-axis" aria-hidden="true"><span>0</span><span>tok/s scale unavailable</span></div>`
+    + `<div class="bench-track"><span class="bench-hatch"></span><span class="bench-word">Not measured</span></div></div>`
     + (t
       ? `<dl class="ev">`
         + benchRow('Requests (cumulative)', esc(num(t.requests)))

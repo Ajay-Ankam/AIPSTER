@@ -254,7 +254,7 @@ test('O-4: hostile kind, id, and non-string timestamps never reach markup', asyn
   assert.ok(!flow.includes('evil-kind'), 'hostile-kind row dropped');
   assert.ok(!flow.includes('evil-id'), 'hostile-id row dropped');
   assert.ok(flow.includes('>unknown<'), 'non-string timestamp drops to unknown');
-  assert.ok(elements < 60, `no injected elements (saw ${elements})`);
+  assert.ok(elements < 90, `no injected elements (saw ${elements})`);
 });
 
 test('topology layout names real stages and keeps edges architectural', async () => {
@@ -263,10 +263,17 @@ test('topology layout names real stages and keeps edges architectural', async ()
   assert.ok(flow.includes('Browser session'), flow);
   assert.ok(flow.includes('AIPSTER API'), flow);
   assert.ok(!/mcp/i.test(flow), 'never a falsely live MCP router');
-  assert.ok(flow.includes('topo-edge arch'), flow);
+  assert.ok(flow.includes('topo-map'), flow);
+  assert.ok(flow.includes('topo-link'), flow);
   assert.ok(flow.includes('topo-nodes'), flow);
+  assert.ok(flow.includes('topo-legend'), flow);
   assert.ok(flow.includes('Heartbeat returns'), flow);
   assert.ok(flow.includes('Result returns'), flow);
+  const order = [flow.indexOf('<b>Browser session</b>'), flow.indexOf('<b>AIPSTER API</b>'), flow.indexOf('topo-nodes'), flow.indexOf('topo-legend')];
+  assert.ok(order.every((i) => i >= 0) && order[0] < order[1] && order[1] < order[2] && order[2] < order[3], 'entry, control, nodes, legend read in order');
+  for (const sw of ['sw-request', 'sw-heartbeat', 'sw-result', 'sw-unsupported']) {
+    assert.ok(flow.includes(sw), `legend swatch ${sw} present`);
+  }
   const doc = parseFragment(flow);
   const groups = [];
   const walk = (n) => {
@@ -284,9 +291,20 @@ test('node cards join inventory evidence and mark the rest not reported', async 
   const { flow } = render(context, el, statusPayload([item()]), usagePayload(), inv);
   assert.ok(flow.includes('16-core x86'), flow);
   assert.ok(flow.includes('none recorded'), flow);
-  for (const label of ['>Memory<', '>Runtime<', '>Resident model<']) assert.ok(flow.includes(label), `missing ${label} row`);
+  assert.ok(flow.includes('topo-chip">text<'), 'declared capabilities render as chips');
+  assert.ok(flow.includes('Memory · Runtime · Resident model: not reported. Models: not reported.'), 'unsupported rows stay explicit');
   const unmatched = render(context, el, statusPayload([item({ id: 'r_x', name: 'stray' })]), usagePayload(), inv);
   assert.ok(unmatched.flow.includes('not reported'), 'unmatched rows report no evidence');
+});
+
+test('node cards carry status dots, host lines, and liveness words', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const stale = item({ id: 'r_st', liveness: 'stale', lastSeenAt: iso(NOW - 10 * 60 * 1000), lastSeenAgeMs: 10 * 60 * 1000 });
+  const { flow } = render(context, el, statusPayload([item(), stale]), usagePayload());
+  assert.ok(flow.includes('topo-node online') && flow.includes('topo-node stale'), 'liveness classes on cards');
+  assert.ok(flow.includes('topo-dot'), 'status dots present');
+  assert.ok(flow.includes('r_1 · local'), 'host line names id and kind');
+  assert.ok(flow.includes('<b>online</b>') && flow.includes('<b>stale</b>'), 'header liveness words');
 });
 
 test('hostile inventory free-text renders inert', async () => {
@@ -304,7 +322,9 @@ test('throughput bench marks unavailable with coverage and no bar lengths', asyn
   const { tp } = render(context, el, statusPayload([item()]), usagePayload());
   assert.ok(tp.includes('measured rate: unavailable'), tp);
   assert.ok(!/width\s*:/i.test(tp), 'no invented bar lengths');
-  assert.ok(!/tok\/s/i.test(tp.replace(/tokens\/sec/g, '')), 'no fabricated rates');
+  assert.ok(!/\d[\d,.]*\s*tok\/s/i.test(tp.replace(/tokens\/sec/g, '').replace(/tok\/s scale unavailable/g, '')), 'no fabricated rates');
+  assert.ok(tp.includes('bench-axis') && tp.includes('tok/s scale unavailable'), 'empty axis states its missing scale');
+  assert.ok(tp.includes('bench-hatch') && tp.includes('Not measured'), 'hatched empty track with explicit word');
 });
 
 test('FINDING-B: snapshot states absolute captured-at time, never a frozen age', async () => {
@@ -374,7 +394,8 @@ test('residual: relative ages never accompany a live-currency claim', async () =
 test('topology stylesheet is responsive, static, and reduced-motion safe', async () => {
   const css = await readFile(APP_CSS, 'utf8');
   assert.ok(css.includes('.topo-nodes'), 'topology grid present');
-  assert.ok(/@media\s*\(max-width:640px\)\s*\{[^}]*\.topo-nodes\s*\{\s*grid-template-columns:1fr/.test(css), 'single-column fallback');
+  assert.ok(/@media\s*\(max-width:860px\)\s*\{[^}]*\.topo-map\s*\{\s*grid-template-columns:1fr/.test(css), 'vertical collapse');
+  assert.ok(/\.topo-map\s*\{\s*display:grid;grid-template-columns:172px 88px 202px 88px/.test(css), 'wide horizontal map');
   assert.ok(css.includes('prefers-reduced-motion'), 'reduced-motion rule present');
   const topoRules = css.slice(css.indexOf('.topo'));
   assert.ok(!/animation|transition|@keyframes/i.test(topoRules), 'no motion in topology rules');

@@ -38,6 +38,29 @@ Loading, stale, unavailable, and denied follow existing Overview patterns
 liveness, 401/403 copy). `usable=false` renders as reachable-but-not-usable
 attention, never ready. Missing metrics are `null` (unknown), never zero.
 
+## Visual adaptation (EIF reference, exact source, no pixel originals)
+
+Peter's screenshots (`Screenshot 2026-11-01 141724/141746.png`) are not
+present on JJP; the adaptation below is mapped from the exact EIF source at
+`review/optimizations @3eb46cdd` (`fabric/src/FabricTopology.tsx`,
+`topology.css`, `bench/BenchBodies.tsx`, `bench.css`), never from assumed
+pixels. Gap map, current versus reference:
+
+- Current: vertical stacked section cards, vertical entry/control blocks,
+  text-only edges, single-column node facts, key-value throughput panel.
+- Reference: wide horizontal agent/harness → router/control → node map with
+  deliberate edge rails (line + arrow + label), a return lane, a swatch
+  legend footer, dense node cards (status dot, host line, two-column facts,
+  model chips), and a bench with axis ticks plus measured-fill versus
+  hatched-empty tracks with a "Not measured" word.
+- Adapted, not copied: AIPSTER flat palette and type; no gradients, glow, or
+  motion. The entry reads "Browser session" and the control stage reads
+  "AIPSTER API" — never an authenticated MCP router, which does not exist
+  here. Model chips become declared-capability chips plus an explicit
+  "models not reported" line (no resident/cached states exist here).
+  The bench keeps the axis + hatched-empty-track + "Not measured" pattern
+  with cumulative totals and page coverage; no fills, bars, or rates.
+
 ## Permission boundary
 
 Owner-confined reads (`needAuthz('read')`); heartbeat writes are
