@@ -594,7 +594,7 @@ caption{text-align:left;font-weight:bold;padding:.4rem 0}
 <p>The page has no scripts and loads no external resources, so it renders the same from a local file as from a web host.</p>
 
 <h2>Generator and test source (not included)</h2>
-<p>The recording, rendering and fidelity tooling behind this export is not included in this repository and is not published. This checkout contains only the rendered HTML, so the commands below fail here with <code>MODULE_NOT_FOUND</code>; they identify the absent tooling rather than an available reproduction path.</p>
+<p>The recording, rendering and fidelity tooling behind this export is not included in this repository and is not published. This repository contains only the rendered artifact for this demo, so the commands below fail here because those files are absent (<code>Cannot find module</code> for the plain <code>node</code> invocations, <code>Could not find</code> for <code>node --test</code>); they identify the absent tooling rather than an available reproduction path.</p>
 <pre><code>node demo/dgm-artifact-import/export/render-export.mjs d47d48afd707921cb4242ebc1c18448a782fed7b
 node demo/dgm-artifact-import/demo-adapter.mjs
 node --test demo/dgm-artifact-import/demo-adapter.test.mjs
