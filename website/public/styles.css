@@ -44,7 +44,7 @@
 .sponsor-chip.dark{background:#0b0e12}
 .sponsor-logos img{height:30px;width:auto}
 @media(max-width:760px){.sponsors-line{padding:12px 20px;font-size:12px}.sponsor-logos img{height:26px}}
-/* Hackathon intro video, revision 2026-11-02.1. */
+/* Hackathon intro video, revision 2026-11-02.2. */
 .video-feature{margin:0 0 48px;border:1px solid var(--line);border-radius:14px;background:var(--white);overflow:hidden;box-shadow:0 8px 26px #143b3408}
 .video-feature video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#0b1110}
 .video-feature figcaption{padding:22px 26px 24px;display:grid;gap:12px}
@@ -58,4 +58,11 @@
 /* Inset focus ring: the figure clips overflow, and Chromium focuses the
    video's UA controls rather than the host, so match :focus-within too. */
 .video-feature video:focus-visible,.video-feature video:focus-within{outline:3px solid #bd8d30;outline-offset:-3px}
+/* Top main card: the cut is the first card content under the branding/nav, so
+   it drops its own frame and sits flush inside the application card. */
+.app-card>.video-feature{margin:0;border:0;border-bottom:1px solid var(--line);border-radius:0;box-shadow:none}
+.app-card>.video-feature figcaption{padding:24px 44px 26px}
+.app-card>.video-feature+.app-grid{padding-top:48px}
+@media(max-width:1000px){.app-card>.video-feature figcaption{padding:20px 30px 22px}}
+@media(max-width:760px){.app-card>.video-feature figcaption{padding:16px 20px 18px}.app-card>.video-feature+.app-grid{padding-top:32px}}
 @media(max-width:760px){.video-feature{margin-bottom:30px;border-radius:10px}.video-feature figcaption{padding:16px 16px 18px;gap:10px}.video-feature figcaption>p{font-size:12px}.video-feature details{font-size:11px}}
