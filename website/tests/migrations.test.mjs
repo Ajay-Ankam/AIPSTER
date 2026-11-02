@@ -32,7 +32,12 @@ test('migrations create the auth and app tables', () => {
   assert.ok(names.includes('advisor_ops'), 'missing table advisor_ops (0018)');
   for (const c of ['tenant_id', 'op_key', 'input_digest', 'state', 'receipt_json', 'created_at', 'updated_at']) assert.ok(cols('advisor_ops').includes(c), `advisor_ops.${c}`);
   assert.ok(names.includes('dgm_muse_ops'), 'missing table dgm_muse_ops (0026)');
-  for (const c of ['tenant_id', 'op_key', 'input_digest', 'mode', 'state', 'receipt_json', 'created_at', 'updated_at']) assert.ok(cols('dgm_muse_ops').includes(c), `dgm_muse_ops.${c} (0026/0027)`);
+  for (const c of ['tenant_id', 'op_key', 'input_digest', 'mode', 'state', 'receipt_json', 'created_at', 'updated_at', 'unknown_outcome', 'spend_micros']) assert.ok(cols('dgm_muse_ops').includes(c), `dgm_muse_ops.${c} (0026/0027/0028)`);
+  assert.ok(names.includes('dgm_muse_spend'), 'missing table dgm_muse_spend (0028)');
+  for (const c of ['scope', 'window_key', 'reserved_micros', 'used_micros', 'updated_at']) assert.ok(cols('dgm_muse_spend').includes(c), `dgm_muse_spend.${c}`);
+  // The spend window row is created lazily by the first live admission, so
+  // the migration itself seeds no data and cannot conflict with a copy.
+  assert.equal(Number(sqlite.prepare('SELECT COUNT(*) AS n FROM dgm_muse_spend').get().n), 0, 'dgm_muse_spend starts empty');
   assert.ok(names.includes('routing_ops'), 'missing table routing_ops (0021 provisional)');
   for (const c of ['tenant_id', 'request_id', 'state', 'source', 'ranking_json', 'policy_version', 'created_at', 'updated_at', 'expires_at']) assert.ok(cols('routing_ops').includes(c), `routing_ops.${c}`);
   assert.ok(names.includes('routing_reservations'), 'missing table routing_reservations (0021 provisional)');

@@ -152,12 +152,15 @@ async function createRun(ctx) {
   }
   const checked = checkCreateBody(raw);
   if (isRefusal(checked)) return send(ctx, 400, { error: checked.detail, code: checked.reason });
-  const { fixture, held, label, target, proposalOpKey } = checked.body;
+  const { fixture: requestedFixture, held, label, target, proposalOpKey } = checked.body;
   // Advisory proposal input (verified before any budget is charged): only a
-  // DELIVERED Muse proposal op owned by this operator attaches, and only its
-  // safe receipt identity enters immutable provenance. No prompt, proposal
-  // text, or provider body is copied; the fixture verdict is unchanged.
+  // DELIVERED Muse proposal op owned by this operator attaches, and its
+  // bounded allowlisted `fixture:` directive is the evaluated input. Safe
+  // receipt identity plus the delivery hash/chars enter immutable
+  // provenance; the raw proposal text is never copied and never executed.
   let proposal = null;
+  let evaluatedFixture = requestedFixture;
+  let fixtureSource = 'request';
   if (proposalOpKey !== null && proposalOpKey !== undefined) {
     let op = null;
     try {
@@ -174,6 +177,22 @@ async function createRun(ctx) {
     }
     let receipt = null;
     try { receipt = op.receipt_json ? JSON.parse(op.receipt_json) : null; } catch { receipt = null; }
+    const inputFixture = receipt && receipt.proposalInput && typeof receipt.proposalInput.fixture === 'string'
+      ? receipt.proposalInput.fixture : null;
+    if (inputFixture === null || !FIXTURES.includes(inputFixture)) {
+      return send(ctx, 400, {
+        error: 'The delivered proposal carried no usable allowlisted fixture directive, so there is no evaluation input to consume. Only one unambiguous `fixture: <name>` line over a known fixture can be evaluated; no verdict was produced and nothing was charged.',
+        code: 'DGM_MUSE_INPUT_REQUIRED',
+      });
+    }
+    if (requestedFixture !== null && requestedFixture !== undefined && requestedFixture !== inputFixture) {
+      return send(ctx, 409, {
+        error: `Requested fixture ${JSON.stringify(requestedFixture)} conflicts with the delivered proposal input ${JSON.stringify(inputFixture)}. The proposal's own input is the evaluated one; omit fixture to evaluate it.`,
+        code: 'DGM_MUSE_INPUT_CONFLICT',
+      });
+    }
+    evaluatedFixture = inputFixture;
+    fixtureSource = 'proposal';
     proposal = {
       opKey: proposalOpKey,
       mode: op.mode || (receipt && receipt.mode) || null,
@@ -181,8 +200,14 @@ async function createRun(ctx) {
       model: (receipt && receipt.model) || null,
       responseId: (receipt && receipt.responseId) || null,
       usage: (receipt && receipt.usage) || null,
+      // Content identity, never content: the bounded input plus the delivery
+      // hash/chars prove what was evaluated and by which delivered output.
+      inputFixture,
+      proposalHash: (receipt && receipt.proposalHash) || null,
+      proposalChars: Number.isSafeInteger(receipt && receipt.proposalChars) ? receipt.proposalChars : null,
     };
   }
+  const fixture = evaluatedFixture;
   const verdict = evaluateFixture(fixture);
   const status = creationStatus(verdict.status, held);
   await checkWriteBudget(ctx.db, ctx.actor.user.id);
@@ -192,10 +217,11 @@ async function createRun(ctx) {
   const me = ctx.actor.user.id;
   const traceEvents = [
     ...verdict.events.map((e) => ({ event: e.event, body: { detail: e.detail } })),
-    { event: 'preview.created', body: { detail: `fixture=${fixture} held=${held ? 'true' : 'false'}` } },
-    // Advisory input linkage only: identity + honest evaluation label. The
+    { event: 'preview.created', body: { detail: `fixture=${fixture} fixtureSource=${fixtureSource} held=${held ? 'true' : 'false'}` } },
+    // The evaluated input came from the delivered proposal, not from the
+    // caller: record its identity so the run proves what was consumed. The
     // verdict, gates, and scores remain the fixture table's alone.
-    ...(proposal ? [{ event: 'preview.proposal_attached', body: { detail: `op=${proposal.opKey} evaluation=${proposal.evaluation}` } }] : [])
+    ...(proposal ? [{ event: 'preview.proposal_attached', body: { detail: `op=${proposal.opKey} evaluation=${proposal.evaluation} fixture=${proposal.inputFixture} hash=${proposal.proposalHash || 'unrecorded'}` } }] : [])
   ];
   const telemetryEvents = fixtureTelemetryRows(status);
   const stored = [...traceEvents, ...telemetryEvents];
@@ -210,7 +236,7 @@ async function createRun(ctx) {
       verdict.envelopeLabel, verdict.adviceReason, verdict.budgetFits ? 1 : 0,
       verdict.budgetReason, verdict.settlement,
       JSON.stringify(verdict.gates),
-      JSON.stringify(proposal ? { ...verdict.provenance, proposal } : verdict.provenance), now, now,
+      JSON.stringify(proposal ? { ...verdict.provenance, fixtureSource, proposal: { ...proposal, fixtureSource } } : { ...verdict.provenance, fixtureSource: 'request' }), now, now,
       status, me),
     ...stored.map((r, seq) => eventInsert(ctx.db, id, seq, now, r.event, r.body)),
     auditInsert(ctx.db, now, me, 'dgm.preview.create', id, `fixture=${fixture} status=${status}`)

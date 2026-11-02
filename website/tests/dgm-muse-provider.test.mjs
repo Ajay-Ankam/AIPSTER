@@ -7,12 +7,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { createTestEnv, readJson, sessionCookieHeader, TEST_SECRET } from './d1-shim.mjs';
+import { readFile } from 'node:fs/promises';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { createTestEnv, readJson, sessionCookieHeader, TEST_SECRET, MIGRATION_FILES } from './d1-shim.mjs';
 import {
   DGM_MUSE_MODEL, DGM_MUSE_RESPONSES_URL, DGM_MUSE_PROMPT_MAX_BYTES,
   DGM_MUSE_OUTPUT_MAX_TOKENS, DGM_MUSE_RESPONSE_MAX, DGM_MUSE_DEADLINE_MS,
   museLiveEnabled, museProviderStatus, buildProposeRequest,
-  proposeLive, runFixtureProposal, redactMuseText,
+  proposeLive, runFixtureProposal, redactMuseText, museWorstCaseSpendUsd,
 } from '../src/dgm/muse-provider.mjs';
 import { handleMusePropose, DGM_MUSE_WRITE_PERMISSION } from '../src/dgm/muse-router.mjs';
 
@@ -137,7 +139,8 @@ test('muse provider: known-truncated keeps safe metadata; unknown outcomes carry
     proposeLive({ ...baseArgs(), fetchImpl: async () => new Response(JSON.stringify(wire), { status: 200 }) }),
     (e) => {
       assert.equal(e.code, 'DGM_MUSE_TRUNCATED');
-      assert.deepEqual(Object.keys(e.detail).sort(), ['incompleteReason', 'model', 'responseId', 'status', 'usage']);
+      assert.equal(e.accepted, true, 'a terminal 2xx truncation is an accepted-but-unusable outcome');
+      assert.deepEqual(Object.keys(e.detail).sort(), ['incompleteReason', 'model', 'observedModel', 'responseId', 'status', 'truncated', 'usage']);
       assert.equal(e.detail.status, 'incomplete');
       assert.equal(e.detail.incompleteReason, 'max_output_tokens');
       assert.equal(e.detail.model, DGM_MUSE_MODEL);
@@ -332,6 +335,7 @@ const MUSE_ROUTES = [
   ['POST', `${BASE}/proposals`],
   ['GET', `${BASE}/ops/op_m9`],
   ['POST', `${BASE}/ops/op_m9/cancel`],
+  ['POST', `${BASE}/ops/op_m9/reconcile`],
   ['POST', `${BASE}/ops/op_m9/promote`],
   ['POST', `${BASE}/ops/op_m9/execute`],
   ['GET', `${BASE}/nope`],
@@ -551,7 +555,7 @@ test('muse propose: cancel during provider flight keeps cancellation, discards r
   assert.equal(row.state, 'cancelled', 'operator cancellation is never overwritten as delivered');
 });
 
-test('muse routes: uncertain quarantines new keys until operator cancel closes it', async () => {
+test('muse routes: uncertain quarantines new keys until explicit reconciliation closes it', async () => {
   const t = await createTestEnv(LIVE);
   await grant(t, 'u_alice', 'engineering_reviewer');
   const realFetch = globalThis.fetch;
@@ -584,7 +588,27 @@ test('muse routes: uncertain quarantines new keys until operator cancel closes i
     }));
     assert.equal(cancelled.status, 200);
     assert.equal(cancelled.json.state, 'cancelled');
+    assert.equal(cancelled.json.unknownOutcome, true, 'cancel preserves the durable unknown-outcome mark');
     mode = 'ok';
+    const stillBlocked = await post('q2');
+    assert.equal(stillBlocked.status, 409, 'cancelling locally does not release the quarantine');
+    assert.equal(stillBlocked.json.code, 'DGM_MUSE_UNCERTAIN');
+    assert.match(stillBlocked.json.error, /reconcile/);
+    assert.equal(calls, 1, 'a blocked retry sends no duplicate provider call');
+    const noAck = await readJson(await t.call(`${BASE}/ops/q1/reconcile`, {
+      method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: {},
+    }));
+    assert.equal(noAck.status, 400);
+    assert.equal(noAck.json.code, 'DGM_MUSE_ACK_REQUIRED', 'reconciliation is an explicit acknowledgement');
+    const reconciled = await readJson(await t.call(`${BASE}/ops/q1/reconcile`, {
+      method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { acknowledge: true, note: 'Checked provider console; outcome unknown.' },
+    }));
+    assert.equal(reconciled.status, 200);
+    assert.equal(reconciled.json.state, 'reconciled');
+    assert.equal(reconciled.json.receipt.reconciledFrom, 'cancelled');
+    assert.equal(reconciled.json.receipt.acknowledged, true);
+    assert.equal(reconciled.json.receipt.spendUsdReserved > 0, true, 'reconciliation preserves the reservation');
+    assert.equal(reconciled.json.receipt.reconcileEvidence.providerContact, 'unknown', 'the unknown contact class is preserved');
     const retry = await post('q2');
     assert.equal(retry.status, 200, 'explicit operator reconciliation unblocks a new attempt');
     assert.equal(retry.json.receipt.evaluation, 'synthetic-live');
@@ -798,6 +822,9 @@ test('muse propose F2: failed replay returns the recorded failure, not 200', asy
   assert.equal(replay.body.state, 'failed');
   assert.equal(replay.body.proposal, null);
   assert.equal(replay.body.receipt.error, 'DGM_MUSE_REJECTED');
+  assert.equal(replay.body.receipt.httpStatus, 400, 'the provider answer is preserved beside the API status');
+  assert.equal(replay.body.receipt.acceptance, 'not-accepted');
+  assert.equal(replay.body.receipt.billing, 'not-chargeable');
   assert.equal(replay.body.replay, true);
 });
 
@@ -841,6 +868,9 @@ test('muse routes F3: cancel keeps prior error/acceptance and the op mode, not t
   assert.equal(r.evaluation, 'synthetic-live');
   assert.equal(r.error, 'DGM_MUSE_TIMEOUT', 'prior unknown-outcome evidence preserved');
   assert.equal(r.cancelledFrom, 'uncertain');
+  assert.equal(r.status, 504, 'a recorded failure status is preserved, never replaced by a success-looking 200');
+  assert.equal(r.spendUsdReserved > 0, true, 'the claim-time reservation is preserved');
+  assert.equal(r.acceptance, 'unknown', 'the prior acceptance class is preserved');
   assert.ok(r.cancelledAt, 'reconciliation moment recorded');
   const reread = await readJson(await t.call(`${BASE}/ops/f3a`, { headers: t.as(t.alice) }));
   assert.equal(reread.json.receipt.error, 'DGM_MUSE_TIMEOUT');
@@ -871,9 +901,16 @@ test('muse propose F4: stale reservations fail closed, stale fetches quarantine,
   assert.match(byKey['stale-res'].receipt_json, /no provider call was sent/);
   assert.equal(byKey['stale-fetch'].state, 'uncertain');
   assert.match(byKey['stale-fetch'].receipt_json, /DGM_MUSE_EXPIRED/);
-  // Operator reconciliation (cancel) closes the quarantine; then admission works.
+  // A bare local cancel is NOT reconciliation: the unknown outcome stays
+  // quarantined and admission stays blocked.
   const now = new Date().toISOString();
   await t.DB.prepare("UPDATE dgm_muse_ops SET state = 'cancelled', updated_at = ? WHERE tenant_id = 'u_alice' AND op_key = 'stale-fetch'").bind(now).run();
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'After wedge.', opKey: 'fresh1', mode: 'fixture' }, fetchImpl: okFetch() }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+  // The operator's explicit reconciliation (the same row state the reconcile
+  // route writes) closes the quarantine; then admission works.
+  await t.DB.prepare("UPDATE dgm_muse_ops SET state = 'reconciled', unknown_outcome = 0, updated_at = ? WHERE tenant_id = 'u_alice' AND op_key = 'stale-fetch'").bind(now).run();
   const out = await handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'After wedge.', opKey: 'fresh1', mode: 'fixture' }, fetchImpl: okFetch() });
   assert.equal(out.status, 200);
 });
@@ -910,26 +947,53 @@ test('muse run: preview run attaches a delivered proposal as advisory evidence',
     method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { fixture: 'good', proposalOpKey: 'att1' },
   }));
   assert.equal(run.status, 201);
-  assert.deepEqual(run.json.provenance.proposal, {
+  const attached = run.json.provenance.proposal;
+  assert.deepEqual({
+    opKey: attached.opKey, mode: attached.mode, evaluation: attached.evaluation,
+    model: attached.model, responseId: attached.responseId, usage: attached.usage,
+    inputFixture: attached.inputFixture, fixtureSource: attached.fixtureSource,
+  }, {
     opKey: 'att1', mode: 'fixture', evaluation: 'fixture', model: 'fixture', responseId: null, usage: null,
+    inputFixture: 'good', fixtureSource: 'proposal',
   });
+  assert.match(attached.proposalHash, /^[0-9a-f]{64}$/, 'delivery content hash is recorded');
+  assert.equal(attached.proposalChars, runFixtureProposal('Advisory input.').length, 'delivered char count is recorded');
+  assert.equal(run.json.provenance.fixtureSource, 'proposal', 'the evaluated input came from the proposal');
   assert.ok(run.json.events.some((e) => e.event === 'preview.proposal_attached'), 'linkage event stored');
   assert.equal(run.json.evaluation, 'fixture', 'verdict stays fixture-table');
   const detail = await readJson(await t.call(`${PREVIEW}/runs/${run.json.runId}`, { headers: t.as(t.alice) }));
   assert.deepEqual(detail.json.provenance.proposal.opKey, 'att1', 'provenance is immutable on readback');
 });
 
-test('muse run: unknown, undelivered, foreign and malformed proposal refs are refused', async () => {
+test('muse run: unknown, undelivered, foreign, input-less and malformed proposal refs are refused', async () => {
   const t = await createTestEnv(FLAG);
   await grant(t, 'u_alice', 'engineering_reviewer');
   await grant(t, 'u_bob', 'engineering_reviewer');
   await readJson(await t.call(`${BASE}/proposals`, {
     method: 'POST', headers: { ...t.as(t.bob), ...t.csrf }, body: { prompt: 'Bob input.', opKey: 'bob1' },
   }));
+  const now = new Date().toISOString();
+  const insertOp = (opKey, state, receipt) => t.DB.prepare(
+    'INSERT INTO dgm_muse_ops (tenant_id, op_key, input_digest, mode, state, receipt_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind('u_alice', opKey, `d-${opKey}`, 'live', state, receipt === null ? null : JSON.stringify(receipt), now, now).run();
+  // A recorded provider rejection is settled but NOT delivered.
+  await insertOp('rejected1', 'failed', { error: 'DGM_MUSE_REJECTED', status: 400 });
+  // A delivered output with no usable allowlisted directive has no input to consume.
+  await insertOp('nodirective1', 'delivered', { proposalHash: 'f'.repeat(64), proposalChars: 12, proposalInput: null });
   const unknown = await readJson(await t.call(`${PREVIEW}/runs`, {
     method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { fixture: 'good', proposalOpKey: 'nope' },
   }));
   assert.equal(unknown.status, 404);
+  const undelivered = await readJson(await t.call(`${PREVIEW}/runs`, {
+    method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { fixture: 'good', proposalOpKey: 'rejected1' },
+  }));
+  assert.equal(undelivered.status, 409, 'a failed provider outcome never attaches as delivered');
+  assert.equal(undelivered.json.code, 'DGM_MUSE_NOT_DELIVERED');
+  const inputless = await readJson(await t.call(`${PREVIEW}/runs`, {
+    method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { fixture: 'good', proposalOpKey: 'nodirective1' },
+  }));
+  assert.equal(inputless.status, 400, 'an explicit fixture cannot substitute for proposal content that supplied none');
+  assert.equal(inputless.json.code, 'DGM_MUSE_INPUT_REQUIRED');
   const foreign = await readJson(await t.call(`${PREVIEW}/runs`, {
     method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { fixture: 'good', proposalOpKey: 'bob1' },
   }));
@@ -938,4 +1002,285 @@ test('muse run: unknown, undelivered, foreign and malformed proposal refs are re
     method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { fixture: 'good', proposalOpKey: '../x' },
   }));
   assert.equal(badShape.status, 400);
+  const noneAtAll = await readJson(await t.call(`${PREVIEW}/runs`, {
+    method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { held: false },
+  }));
+  assert.equal(noneAtAll.status, 400, 'a run needs either a fixture or a proposal input');
+  assert.equal(noneAtAll.json.code, 'DGM_BAD_FIXTURE');
+});
+
+test('muse run: delivered proposal content selects the evaluated input and its hash is recorded', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(wireProposal(
+    'Synthetic advisory.\nfixture: bad-advice'
+  )), { status: 200 });
+  let created;
+  try {
+    created = await readJson(await t.call(`${BASE}/proposals`, {
+      method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { prompt: 'Pick an input.', opKey: 'consume1', mode: 'live' },
+    }));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(created.status, 200);
+  assert.equal(created.json.receipt.proposalInput.fixture, 'bad-advice');
+  // No `fixture` in the body: the delivered proposal's directive is the input.
+  const attached = await readJson(await t.call(`${PREVIEW}/runs`, {
+    method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { proposalOpKey: 'consume1' },
+  }));
+  assert.equal(attached.status, 201);
+  assert.equal(attached.json.fixture, 'bad-advice');
+  assert.equal(attached.json.status, 'validation-rejected', 'the proposal-selected input drives the fixed evaluator verdict');
+  assert.equal(attached.json.provenance.fixtureSource, 'proposal');
+  assert.equal(attached.json.provenance.proposal.proposalHash, created.json.receipt.proposalHash);
+  assert.equal(attached.json.provenance.proposal.proposalChars, 'Synthetic advisory.\nfixture: bad-advice'.length);
+  const plain = await readJson(await t.call(`${PREVIEW}/runs`, {
+    method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { fixture: 'bad-advice' },
+  }));
+  assert.equal(plain.status, 201);
+  assert.deepEqual(attached.json.gates, plain.json.gates, 'the same fixed evaluator produced both verdicts');
+  const conflict = await readJson(await t.call(`${PREVIEW}/runs`, {
+    method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { fixture: 'good', proposalOpKey: 'consume1' },
+  }));
+  assert.equal(conflict.status, 409, 'a direct fixture cannot override the delivered input');
+  assert.equal(conflict.json.code, 'DGM_MUSE_INPUT_CONFLICT');
+});
+
+// ---------- fix round 2: accepted 2xx quarantine, durable reservation,
+// aggregate spend, replay ordering, bounded metadata ----------
+
+test('muse routes R2 N1a: accepted-but-unusable 2xx quarantines and stores bounded metadata', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  const trunc = {
+    id: 'r'.repeat(400), model: DGM_MUSE_MODEL, status: 'incomplete',
+    incomplete_details: { reason: 'max_output_tokens' }, output: [],
+    usage: { input_tokens: 80, output_tokens: 512 },
+  };
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; return new Response(JSON.stringify(trunc), { status: 200 }); };
+  let out;
+  try {
+    out = await readJson(await t.call(`${BASE}/proposals`, {
+      method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { prompt: 'Truncate me.', opKey: 'r2t', mode: 'live' },
+    }));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(out.status, 502);
+  assert.equal(out.json.code, 'DGM_MUSE_TRUNCATED');
+  assert.equal(calls, 1);
+  const row = await t.DB.prepare('SELECT state, unknown_outcome, spend_micros, receipt_json FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?').bind('u_alice', 'r2t').first();
+  assert.equal(row.state, 'uncertain', 'a terminal 2xx truncation is not a clean failure');
+  assert.equal(Number(row.unknown_outcome), 1);
+  assert.ok(Number(row.spend_micros) > 0, 'the claim-time reservation is durable in the ledger');
+  const receipt = JSON.parse(row.receipt_json);
+  assert.equal(receipt.accepted, true);
+  assert.equal(receipt.httpStatus, 200);
+  assert.equal(receipt.providerContact, 'sent');
+  assert.equal(receipt.acceptance, 'accepted');
+  assert.equal(receipt.provider.incompleteReason, 'max_output_tokens');
+  assert.equal(receipt.provider.responseId.length, 128, 'provider ids are bounded, never echoed whole');
+  assert.ok(receipt.provider.truncated.includes('responseId'));
+  assert.equal(receipt.spendUsdReserved > 0, true);
+  // A brand-new key must not duplicate a possibly billed generation.
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Another.', opKey: 'r2t-new', mode: 'live' }, fetchImpl: okFetch() }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+});
+
+test('muse routes R2 N1b: wrong-model 2xx quarantines instead of failing clean', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(wireProposal('text', { model: 'muse-spark-1.3' })), { status: 200 });
+  let out;
+  try {
+    out = await readJson(await t.call(`${BASE}/proposals`, {
+      method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { prompt: 'Wrong model.', opKey: 'r2w', mode: 'live' },
+    }));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(out.status, 502);
+  assert.equal(out.json.code, 'DGM_MUSE_WRONG_MODEL');
+  const row = await t.DB.prepare('SELECT state, unknown_outcome, receipt_json FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?').bind('u_alice', 'r2w').first();
+  assert.equal(row.state, 'uncertain');
+  assert.equal(Number(row.unknown_outcome), 1);
+  assert.equal(JSON.parse(row.receipt_json).provider.observedModel, 'muse-spark-1.3');
+});
+
+test('muse routes R2 N2: in-flight cancel keeps the reservation and records the late result', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  const realFetch = globalThis.fetch;
+  let cancelBody = null;
+  globalThis.fetch = async () => {
+    const c = await readJson(await t.call(`${BASE}/ops/r2c/cancel`, {
+      method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: {},
+    }));
+    cancelBody = c;
+    return new Response(JSON.stringify(wireProposal('Too late.', { id: 'resp_late' })), { status: 200 });
+  };
+  let propose;
+  try {
+    propose = await readJson(await t.call(`${BASE}/proposals`, {
+      method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { prompt: 'Race me.', opKey: 'r2c', mode: 'live' },
+    }));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(propose.status, 409, 'a late success never becomes a delivery');
+  assert.equal(cancelBody.status, 200);
+  assert.equal(cancelBody.json.state, 'cancelled');
+  assert.equal(cancelBody.json.unknownOutcome, true, 'cancel during flight keeps the unknown-outcome quarantine');
+  const row = await t.DB.prepare('SELECT state, unknown_outcome, receipt_json FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?').bind('u_alice', 'r2c').first();
+  assert.equal(row.state, 'cancelled');
+  assert.equal(Number(row.unknown_outcome), 1);
+  const receipt = JSON.parse(row.receipt_json);
+  assert.equal(receipt.status, 409, 'the cancelled receipt is not a success-looking 200');
+  assert.equal(receipt.spendUsdReserved > 0, true, 'the reservation survives cancellation');
+  assert.equal(receipt.cancelNote.includes('cannot recall'), true, 'cancelling is not remote cancellation');
+  assert.equal(receipt.lateOutcome.kind, 'delivered-after-cancel');
+  assert.equal(receipt.lateOutcome.acceptance, 'accepted');
+  assert.equal(receipt.lateOutcome.responseId, 'resp_late');
+  // The cancelled+unknown op still blocks a new key until reconciliation.
+  const next = await readJson(await t.call(`${BASE}/proposals`, {
+    method: 'POST', headers: { ...t.as(t.alice), ...t.csrf }, body: { prompt: 'After cancel.', opKey: 'r2c-after', mode: 'live' },
+  }));
+  assert.equal(next.status, 409);
+  assert.equal(next.json.code, 'DGM_MUSE_UNCERTAIN');
+});
+
+test('muse routes R2 N3: aggregate spend cap bounds sequential admissions; cancel never releases it', async () => {
+  const worst = museWorstCaseSpendUsd('Priced call.');
+  const cap = String(Number((worst * 2).toFixed(6)));
+  const t = await createTestEnv({ ...LIVE, DGM_MUSE_SPEND_CAP_USD: cap });
+  let calls = 0;
+  const okCall = async () => {
+    calls += 1;
+    return new Response(JSON.stringify(wireProposal('Priced.')), { status: 200 });
+  };
+  const statuses = [];
+  for (let i = 0; i < 8; i += 1) {
+    try {
+      const r = await handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Priced call.', opKey: `r3-${i}`, mode: 'live' }, fetchImpl: okCall });
+      statuses.push(r.status);
+    } catch (e) {
+      statuses.push(e.code);
+    }
+  }
+  assert.deepEqual(statuses.slice(0, 2), [200, 200], 'two worst-case reservations fit the cap');
+  assert.equal(statuses.slice(2).every((s) => s === 'DGM_MUSE_SPEND_EXCEEDED'), true,
+    'the aggregate, not a per-call threshold, is the bound');
+  assert.equal(calls, 2, 'refused admissions send no provider call');
+  const spend = await t.DB.prepare('SELECT reserved_micros FROM dgm_muse_spend WHERE scope = ? AND window_key = ?').bind('global', 'all-time').first();
+  assert.equal(Number(spend.reserved_micros), Math.round(worst * 2 * 1e6));
+  // Cancelling one admitted op keeps its reservation: the aggregate does not shrink.
+  await t.DB.prepare("UPDATE dgm_muse_ops SET state = 'cancelled', unknown_outcome = 0 WHERE tenant_id = 'u_alice' AND op_key = 'r3-0'").run();
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Priced call.', opKey: 'r3-3', mode: 'live' }, fetchImpl: okCall }),
+    (e) => e.code === 'DGM_MUSE_SPEND_EXCEEDED');
+  assert.equal(calls, 2);
+});
+
+test('muse propose R2 N4: settled replays survive activation and spend configuration changes', async () => {
+  const t = await createTestEnv(LIVE);
+  const first = await handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Replay me.', opKey: 'r4', mode: 'live' }, fetchImpl: okFetch() });
+  assert.equal(first.status, 200);
+  const stripped = { DGM_PREVIEW_ENABLED: '1' };
+  const replay = await handleMusePropose({ db: t.DB, env: stripped, actor: alice(), body: { prompt: 'Replay me.', opKey: 'r4', mode: 'live' }, fetchImpl: okFetch() });
+  assert.equal(replay.status, 200, 'a delivered replay is resolved before current activation config');
+  assert.equal(replay.body.replay, true);
+  assert.equal(replay.body.proposal, null, 'live proposal text is not stored, so the replay returns the receipt only');
+  assert.equal(replay.body.receipt.responseId, 'resp_muse_1');
+});
+
+test('muse propose R2 N7: TTL cleanup never erases an unknown-outcome quarantine', async () => {
+  const t = await createTestEnv(LIVE);
+  const old = new Date(Date.now() - 8 * 24 * 3600e3).toISOString();
+  const insert = (opKey, state, unknown, at) => t.DB.prepare(
+    'INSERT INTO dgm_muse_ops (tenant_id, op_key, input_digest, mode, state, receipt_json, unknown_outcome, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind('u_alice', opKey, `d-${opKey}`, 'live', state, JSON.stringify({ opKey, error: 'DGM_MUSE_TIMEOUT', status: 504 }), unknown, at, at).run();
+  await insert('old-unknown', 'cancelled', 1, old);
+  await insert('old-settled', 'delivered', 0, old);
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'After expiry.', opKey: 'ttl1', mode: 'live' }, fetchImpl: okFetch() }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+  const survivor = await t.DB.prepare("SELECT state, unknown_outcome FROM dgm_muse_ops WHERE tenant_id = 'u_alice' AND op_key = 'old-unknown'").first();
+  assert.ok(survivor, 'expiry is not a replay escape for an unknown provider outcome');
+  assert.equal(Number(survivor.unknown_outcome), 1);
+  // After the explicit operator reconciliation, ordinary settled rows of the
+  // same age are cleaned up as before.
+  await t.DB.prepare("UPDATE dgm_muse_ops SET state = 'reconciled', unknown_outcome = 0 WHERE tenant_id = 'u_alice' AND op_key = 'old-unknown'").run();
+  const out = await handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'After expiry.', opKey: 'ttl1', mode: 'live' }, fetchImpl: okFetch() });
+  assert.equal(out.status, 200);
+  const settled = await t.DB.prepare("SELECT op_key FROM dgm_muse_ops WHERE tenant_id = 'u_alice' AND op_key = 'old-settled'").first();
+  assert.equal(settled, null, 'non-blocking settled rows still expire');
+});
+
+test('muse routes R2 N3: real local D1 serializes concurrent aggregate admissions', async () => {
+  const mf = new Miniflare(convertV4MiniflareOptions({
+    modules: true,
+    script: 'export default {fetch(){return new Response("synthetic")}}',
+    compatibilityDate: '2026-10-01',
+    d1Databases: { DB: 'dgm-muse-concurrent' },
+    outboundService: () => new Response('blocked', { status: 403 }),
+  }));
+  try {
+    const db = await mf.getD1Database('DB');
+    for (const file of MIGRATION_FILES) {
+      const sql = (await readFile(new URL(`../migrations/${file}`, import.meta.url), 'utf8'))
+        .split('\n').filter((line) => !line.trimStart().startsWith('--')).join('\n');
+      for (const stmt of sql.split(';').map((s) => s.replace(/\s+/g, ' ').trim()).filter(Boolean)) await db.exec(stmt);
+    }
+    const worst = museWorstCaseSpendUsd('Concurrent call.');
+    const cap = String(Number((worst * 1.5).toFixed(6)));
+    const env = { ...LIVE, DGM_MUSE_SPEND_CAP_USD: cap };
+    // Three distinct tenants so only the deployment-wide ledger can bound
+    // them (the in-flight rule is per tenant).
+    const now = new Date().toISOString();
+    for (let i = 0; i < 3; i += 1) {
+      await db.prepare('INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt) VALUES (?, ?, ?, 1, ?, ?)')
+        .bind(`u_conc_${i}`, `Conc ${i}`, `conc${i}@synthetic.invalid`, now, now).run();
+    }
+    let calls = 0;
+    const attempt = (i) => handleMusePropose({
+      db, env, actor: { user: { id: `u_conc_${i}` } },
+      body: { prompt: 'Concurrent call.', opKey: `conc-${i}`, mode: 'live' },
+      fetchImpl: async () => { calls += 1; return new Response(JSON.stringify(wireProposal('Concurrent.')), { status: 200 }); },
+    }).then((r) => ({ status: r.status })).catch((e) => ({ code: e.code }));
+    const results = await Promise.all([attempt(0), attempt(1), attempt(2)]);
+    assert.equal(results.filter((r) => r.status === 200).length, 1, 'exactly one concurrent admission fits the cap');
+    assert.equal(results.filter((r) => r.code === 'DGM_MUSE_SPEND_EXCEEDED').length, 2);
+    assert.equal(calls, 1, 'refused concurrent admissions send no provider call');
+    const spend = await db.prepare('SELECT reserved_micros FROM dgm_muse_spend WHERE scope = ? AND window_key = ?').bind('global', 'all-time').first();
+    assert.equal(Number(spend.reserved_micros), Math.round(worst * 1e6), 'the aggregate holds exactly one reservation');
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test('muse provider R2 N6: provider identifiers and model text are bounded and flagged', async () => {
+  const hugeId = 'i'.repeat(300);
+  const out = await proposeLive({
+    ...baseArgs(),
+    fetchImpl: async () => new Response(JSON.stringify(wireProposal('bounded', { id: hugeId })), { status: 200 }),
+  });
+  assert.equal(out.responseId.length, 128);
+  assert.equal(out.responseIdTruncated, true);
+  assert.equal(out.model, DGM_MUSE_MODEL);
+  assert.equal(out.modelTruncated, false);
+  const hugeModel = 'm'.repeat(200);
+  await assert.rejects(
+    proposeLive({ ...baseArgs(), fetchImpl: async () => new Response(JSON.stringify(wireProposal('t', { model: hugeModel })), { status: 200 }) }),
+    (e) => {
+      assert.equal(e.code, 'DGM_MUSE_WRONG_MODEL');
+      assert.equal(e.detail.observedModel.length, 64);
+      assert.ok(e.detail.truncated.includes('observedModel'));
+      return true;
+    });
 });

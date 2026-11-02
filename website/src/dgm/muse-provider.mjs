@@ -18,6 +18,7 @@
 // zero network calls.
 import { httpError } from '../lib/validate.js';
 import { META_PRICES } from '../routing/adapters/meta.mjs';
+import { FIXTURES } from './preview.mjs';
 
 export const DGM_MUSE_MODEL = 'muse-spark-1.3-contributor';
 export const DGM_MUSE_RESPONSES_URL = 'https://api.meta.ai/v1/responses';
@@ -28,10 +29,22 @@ export const DGM_MUSE_RESPONSE_MAX = 64 * 1024;
 export const DGM_MUSE_PROPOSAL_MAX_CHARS = 32 * 1024;
 export const DGM_MUSE_DEADLINE_MS = 60 * 1000;
 export const DGM_MUSE_SCHEMA = 'aipster.dgm.muse/v1';
+// Provider-controlled strings are bounded before they reach any receipt:
+// response ids are opaque and may be arbitrarily long, model/reason strings
+// are echoed only as short redacted slices.
+export const DGM_MUSE_ID_MAX = 128;
+export const DGM_MUSE_META_MAX = 64;
+// The only structure this slice accepts from delivered proposal text is one
+// explicit allowlisted line naming a fixed evaluation input. Nothing else in
+// the text is parsed, executed, or trusted.
+export const DGM_MUSE_INPUT_PREFIX = 'fixture:';
+export const DGM_MUSE_FIXTURE_INPUT_DEFAULT = 'good';
 
 const INSTRUCTIONS = 'You are AIPSTER DGM test support. Draft one small synthetic software-test proposal '
   + 'from the prompt only. This is qualification text, never a production change: propose nothing that '
-  + 'executes code, touches credentials, or leaves this evaluation. Keep the proposal under 2000 characters.';
+  + 'executes code, touches credentials, or leaves this evaluation. Keep the proposal under 2000 characters. '
+  + `End with exactly one line "fixture: <name>" where name is one of ${FIXTURES.join(', ')}; that line `
+  + 'selects one fixed evaluation input and is not code.';
 
 function fail(status, message, code) {
   return httpError(status, message, code);
@@ -89,10 +102,24 @@ export function museSpendCapUsd(env) {
   return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
+/** USD -> integer micro-USD, the unit of the durable aggregate ledger. */
+export function museUsdToMicros(usd) {
+  return Number.isFinite(usd) && usd > 0 ? Math.round(usd * 1e6) : 0;
+}
+
+/** The operator cap in the same integer unit the aggregate admission compares. */
+export function museSpendCapMicros(env) {
+  return museUsdToMicros(museSpendCapUsd(env));
+}
+
 /** Worst-case bounded cost of one generation: estimated input + full output budget. */
 export function museWorstCaseSpendUsd(prompt) {
   const p = META_PRICES.contributor;
   return Number(((estimateMuseInputTokens(prompt) * p.inPer1M + DGM_MUSE_OUTPUT_MAX_TOKENS * p.outPer1M) / 1e6).toFixed(6));
+}
+
+export function museWorstCaseSpendMicros(prompt) {
+  return museUsdToMicros(museWorstCaseSpendUsd(prompt));
 }
 
 /** Actual cost from reported usage; null when usage is unusable (never zero). */
@@ -224,6 +251,81 @@ function acceptedFailure(status, message, code, httpStatus) {
 }
 
 /**
+ * Definitive provider rejection (400/401/403/429/other 4xx): the provider
+ * answered and refused, so no generation was accepted and nothing is
+ * chargeable. The caller still sees a 502 (the upstream is unusable, not the
+ * caller's request), while `httpStatus` preserves what the provider actually
+ * answered — request status and provider status are different facts.
+ */
+function rejectedFailure(httpStatus, message, code, apiStatus = 502) {
+  const err = fail(apiStatus, message, code);
+  err.httpStatus = Number.isSafeInteger(httpStatus) ? httpStatus : null;
+  return err;
+}
+
+/**
+ * Bounded, redacted provider-controlled text. Returns the value and whether
+ * it was cut, so a receipt can say "truncated" instead of silently echoing an
+ * unbounded string.
+ */
+export function boundProviderText(value, max = DGM_MUSE_META_MAX) {
+  if (typeof value !== 'string') return null;
+  const redacted = redactMuseText(value);
+  return redacted.length > max
+    ? { value: redacted.slice(0, max), truncated: true }
+    : { value: redacted, truncated: false };
+}
+
+export function boundProviderId(value) {
+  return boundProviderText(value, DGM_MUSE_ID_MAX);
+}
+
+/**
+ * Safe, bounded failure metadata: primitive values only, with the names of
+ * any fields that had to be cut. Provider text is redacted before it is
+ * stored, and nothing unbounded leaves this module.
+ */
+function detailFor({ status, incompleteReason, model, observedModel, responseId, usage }) {
+  const truncated = [];
+  const put = (key, raw, max) => {
+    const b = boundProviderText(raw, max);
+    if (b === null) return null;
+    if (b.truncated) truncated.push(key);
+    return b.value;
+  };
+  return {
+    status: put('status', status, 32),
+    incompleteReason: put('incompleteReason', incompleteReason, DGM_MUSE_META_MAX),
+    model: put('model', model, DGM_MUSE_META_MAX),
+    observedModel: put('observedModel', observedModel, DGM_MUSE_META_MAX),
+    responseId: put('responseId', responseId, DGM_MUSE_ID_MAX),
+    usage: usage && Number.isSafeInteger(usage.input_tokens) && Number.isSafeInteger(usage.output_tokens)
+      ? { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens } : null,
+    truncated,
+  };
+}
+
+/**
+ * The one accepted structure in delivered proposal text: an explicit
+ * allowlisted `fixture: <name>` line selecting a fixed evaluation input.
+ * Ambiguous or unknown directives yield null (no input), never a guess.
+ * Nothing here executes or evaluates provider text.
+ */
+export function extractProposalFixtureInput(text) {
+  if (typeof text !== 'string' || text.length === 0) return null;
+  let found = null;
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*fixture:\s*([A-Za-z][A-Za-z-]*)\s*$/.exec(line);
+    if (!m) continue;
+    const name = m[1].toLowerCase();
+    if (!FIXTURES.includes(name)) return null;
+    if (found !== null && found !== name) return null;
+    found = name;
+  }
+  return found;
+}
+
+/**
  * One bounded proposal call. Throws typed DGM_MUSE_* failures; never leaks
  * the key, headers, or raw provider body. No retry: callers map lost
  * responses to `uncertain` and require a fresh key to retry.
@@ -260,11 +362,11 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
     }
     throw fail(502, 'DGM provider unreachable.', 'DGM_MUSE_UNREACHABLE');
   }
-  if (response.status === 429) throw fail(503, 'DGM provider is rate limited. No retry was sent.', 'DGM_MUSE_RATE_LIMITED');
+  if (response.status === 429) throw rejectedFailure(429, 'DGM provider is rate limited. No retry was sent.', 'DGM_MUSE_RATE_LIMITED', 503);
   if (response.status === 401 || response.status === 403) {
-    throw fail(502, 'DGM provider rejected credentials.', 'DGM_MUSE_AUTH');
+    throw rejectedFailure(response.status, 'DGM provider rejected credentials.', 'DGM_MUSE_AUTH');
   }
-  if (response.status === 400) throw fail(502, 'DGM provider rejected the request shape.', 'DGM_MUSE_REJECTED');
+  if (response.status === 400) throw rejectedFailure(400, 'DGM provider rejected the request shape.', 'DGM_MUSE_REJECTED');
   if (response.status < 200 || response.status >= 300) {
     // 5xx acceptance is ambiguous (the generation may have run and billed):
     // quarantine rather than record a clean failure. 429/4xx are definitive
@@ -272,7 +374,7 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
     if (response.status >= 500) {
       throw acceptedFailure(502, 'DGM provider errored; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_UPSTREAM', response.status);
     }
-    throw fail(502, 'DGM provider errored.', 'DGM_MUSE_UPSTREAM');
+    throw rejectedFailure(response.status, 'DGM provider errored.', 'DGM_MUSE_UPSTREAM');
   }
   let bodyText;
   try {
@@ -285,9 +387,14 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
     }
     // The deadline can fire while the body is still streaming, and the
     // stream itself can reset mid-body: both mean an accepted call with no
-    // usable output, never a malformed rejection.
+    // usable output, never a malformed rejection. A deadline AFTER observed
+    // 2xx headers is distinct from a deadline before any response: the
+    // request reached the provider and may have consumed generation.
     if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
-      throw fail(504, 'DGM provider body read timed out.', 'DGM_MUSE_TIMEOUT');
+      const err = fail(504, 'DGM provider body read timed out.', 'DGM_MUSE_TIMEOUT');
+      err.accepted = true;
+      err.httpStatus = response.status;
+      throw err;
     }
     throw acceptedFailure(502, 'DGM provider response body unreadable; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_UNREADABLE', response.status);
   }
@@ -306,39 +413,49 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
     throw acceptedFailure(502, 'DGM provider returned malformed output; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_MALFORMED', response.status);
   }
   if (wire.status === 'incomplete' || wire.incomplete_details) {
-    // Terminal known-truncated (HTTP 2xx with an incomplete marker): keep
-    // exactly the safe metadata — terminal status, incomplete reason, model,
-    // request ID, usage — never raw body, reasoning, or key. Unknown
-    // outcomes (timeout/unreachable) carry no detail, so the two cases stay
-    // distinguishable downstream.
-    const err = fail(502, 'DGM provider response was truncated; nothing delivered.', 'DGM_MUSE_TRUNCATED');
-    err.detail = {
-      status: typeof wire.status === 'string' ? wire.status : null,
-      incompleteReason: wire.incomplete_details && typeof wire.incomplete_details.reason === 'string'
-        ? wire.incomplete_details.reason : null,
-      model: typeof wire.model === 'string' ? wire.model : null,
-      responseId: typeof wire.id === 'string' ? wire.id : null,
+    // Terminal known-truncated (HTTP 2xx with an incomplete marker): the
+    // exchange was accepted by the provider, so this is NOT a clean
+    // unaccepted failure — a new key must not duplicate a possibly
+    // chargeable generation. Keep exactly the safe metadata — terminal
+    // status, incomplete reason, model, request ID, usage — bounded and
+    // redacted, never raw body, reasoning, or key. Unknown transport
+    // outcomes carry no detail, so the two cases stay distinguishable.
+    const err = acceptedFailure(502, 'DGM provider response was truncated; nothing delivered and no duplicate was sent.', 'DGM_MUSE_TRUNCATED', response.status);
+    err.detail = detailFor({
+      status: wire.status,
+      incompleteReason: wire.incomplete_details && wire.incomplete_details.reason,
+      model: wire.model,
+      responseId: wire.id,
       usage: usageOf(wire),
-    };
+    });
     throw err;
   }
   if (typeof wire.model === 'string' && wire.model !== DGM_MUSE_MODEL) {
     // Provider-controlled text reaches the caller only redacted and sliced;
-    // unbounded provider metadata is never reflected verbatim.
-    const observed = redactMuseText(JSON.stringify(wire.model)).slice(0, 64);
-    throw fail(502, `DGM provider answered with an unexpected model (${observed}); expected the pinned model.`, 'DGM_MUSE_WRONG_MODEL');
+    // unbounded provider metadata is never reflected verbatim. A 2xx naming
+    // another model was still accepted at the transport layer, so it
+    // quarantines like every other unusable 2xx body.
+    const observed = boundProviderText(wire.model, DGM_MUSE_META_MAX);
+    const err = acceptedFailure(502, `DGM provider answered with an unexpected model (${JSON.stringify(observed.value)}); expected the pinned model.`, 'DGM_MUSE_WRONG_MODEL', response.status);
+    err.detail = detailFor({ observedModel: wire.model, responseId: wire.id, usage: usageOf(wire) });
+    throw err;
   }
   const text = extractText(wire);
   if (typeof text !== 'string' || text.length === 0 || text.length > DGM_MUSE_PROPOSAL_MAX_CHARS) {
     throw acceptedFailure(502, 'DGM provider returned no usable proposal text; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_MALFORMED', response.status);
   }
+  const responseId = boundProviderId(wire.id);
+  const model = typeof wire.model === 'string' && wire.model !== ''
+    ? boundProviderText(wire.model, DGM_MUSE_META_MAX) : null;
   return {
     proposal: text,
     usage: usageOf(wire),
-    responseId: typeof wire.id === 'string' ? wire.id : null,
     // Observed identity only: a missing wire.model records null, never a
-    // fabricated fallback to the pinned model.
-    model: typeof wire.model === 'string' && wire.model !== '' ? wire.model : null,
+    // fabricated fallback to the pinned model. Both fields are bounded.
+    responseId: responseId ? responseId.value : null,
+    responseIdTruncated: responseId ? responseId.truncated : false,
+    model: model ? model.value : null,
+    modelTruncated: model ? model.truncated : false,
   };
 }
 
@@ -362,5 +479,6 @@ export function runFixtureProposal(prompt) {
   const clean = redactMuseText(String(prompt || '').trim().slice(0, 400));
   return `Fixture DGM test proposal (no live provider call). Synthetic task noted (${clean.length} chars shown: ${clean.slice(0, 120)}). `
     + 'Suggested: one deterministic unit check with fixed input, one boundary input, one malformed-input refusal. '
-    + 'No code was executed and no production state changed.';
+    + 'No code was executed and no production state changed.\n'
+    + `${DGM_MUSE_INPUT_PREFIX} ${DGM_MUSE_FIXTURE_INPUT_DEFAULT}`;
 }
