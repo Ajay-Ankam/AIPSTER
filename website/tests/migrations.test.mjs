@@ -31,6 +31,8 @@ test('migrations create the auth and app tables', () => {
   assert.ok(cols('resources').includes('node_id'), 'resources.node_id (0015 pairing identity)');
   assert.ok(names.includes('advisor_ops'), 'missing table advisor_ops (0018)');
   for (const c of ['tenant_id', 'op_key', 'input_digest', 'state', 'receipt_json', 'created_at', 'updated_at']) assert.ok(cols('advisor_ops').includes(c), `advisor_ops.${c}`);
+  assert.ok(names.includes('dgm_muse_ops'), 'missing table dgm_muse_ops (0026)');
+  for (const c of ['tenant_id', 'op_key', 'input_digest', 'state', 'receipt_json', 'created_at', 'updated_at']) assert.ok(cols('dgm_muse_ops').includes(c), `dgm_muse_ops.${c}`);
   assert.ok(names.includes('routing_ops'), 'missing table routing_ops (0021 provisional)');
   for (const c of ['tenant_id', 'request_id', 'state', 'source', 'ranking_json', 'policy_version', 'created_at', 'updated_at', 'expires_at']) assert.ok(cols('routing_ops').includes(c), `routing_ops.${c}`);
   assert.ok(names.includes('routing_reservations'), 'missing table routing_reservations (0021 provisional)');

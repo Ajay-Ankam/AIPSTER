@@ -22,6 +22,7 @@ import {
   fixtureTelemetryRows, transitionOutcomeRow, buildTelemetryView,
   latencySummary, tokensSummary, BASELINE_SCORE_PPM
 } from './preview.mjs';
+import { handleDgmMuse } from './muse-router.mjs';
 
 export const DGM_PREVIEW_PERMISSION = 'admin.dgm.preview';
 
@@ -338,6 +339,10 @@ export async function handleDgmPreview(ctx) {
   {
     const m = new RegExp(`^${PREFIX}/runs/${ID}/(promote|execute|reserve|final-audit|advise-live)$`).exec(path);
     if (m && method === 'POST') return disabledAction(ctx, m[2]);
+  }
+  // DGM Muse provider slice (bounded proposals, same flag + permission).
+  if (path === `${PREFIX}/muse/status` || path.startsWith(`${PREFIX}/muse/`)) {
+    return handleDgmMuse(ctx);
   }
   // Unknown preview paths deny before revealing routing, like the admin 404.
   const gate = await ctx.requireAdmin(DGM_PREVIEW_PERMISSION);
