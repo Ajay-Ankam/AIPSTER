@@ -486,6 +486,97 @@ async function settleDelivered(db, tenant, opKey, receipt, usedMicros) {
 }
 
 /**
+ * Recovery after a local settlement-batch failure that follows an ACCEPTED
+ * provider response. This path must never use the provider rejection
+ * classifier: the call left the process and may be chargeable. Distinguish a
+ * committed delivery (the batch applied but its promise failed), an operator
+ * settlement (cancel/reconcile), and an unresolved `fetching` row, which is
+ * quarantined with the accepted evidence and its worst-case reservation.
+ */
+async function settlementAfterAcceptance({ db, tenant, key, out, receipt, spendReserved, spendUsed, proposalHash }) {
+  let current = null;
+  try {
+    current = await lookupOp(db, tenant, key);
+  } catch {
+    current = null;
+  }
+  const stored = current ? parseReceipt(current.receipt_json) : null;
+
+  if (current && current.state === 'delivered') {
+    // The batch committed; only the caller lost its acknowledgement. The
+    // delivery and reported usage are durable, so return identity, not a
+    // fabricated failure and not a provider retry.
+    return {
+      status: 200,
+      body: { proposal: out.proposal, receipt: stored || receipt, replay: false },
+    };
+  }
+  if (current && (current.state === 'cancelled' || current.state === 'reconciled')) {
+    // The operator's settled state wins the fence. Keep it, and record the
+    // late accepted evidence without rewriting state or clearing its flag.
+    try {
+      await recordLateEvidence(db, tenant, key, {
+        kind: 'delivered-after-settlement-failure',
+        providerContact: 'sent',
+        acceptance: 'accepted',
+        billing: 'possibly-chargeable',
+        responseId: out.responseId,
+        model: out.model,
+        usage: out.usage,
+        spendUsdReserved: spendReserved,
+        spendUsdUsed: spendUsed,
+        proposalHash,
+        proposalChars: out.proposal.length,
+        elapsedMs: receipt.elapsedMs,
+      });
+    } catch {
+      // The settled cancellation/reconciliation and its flag stand.
+    }
+    return {
+      status: 409,
+      body: {
+        proposal: null,
+        receipt: stored || receipt,
+        replay: false,
+        note: 'Cancelled or reconciled while local settlement was unresolved. The provider call was already sent and accepted; that evidence is recorded where possible, no proposal was delivered, and no automatic retry will occur.',
+      },
+    };
+  }
+
+  // `fetching` (or an unknown local state): quarantine the accepted call and
+  // retain the worst-case reservation. A row already `uncertain` keeps its
+  // existing quarantine; the CAS below simply does not apply.
+  const uncertainReceipt = {
+    ...receipt,
+    chargeNote: 'The provider accepted this call, but local settlement did not complete. The worst-case reservation is retained and the outcome is quarantined; no automatic retry. Reconcile explicitly with the stored evidence.',
+  };
+  let marked = { ok: false };
+  try {
+    marked = await markOp(db, tenant, key, ['fetching', 'failed', 'reserved'], 'uncertain', uncertainReceipt, { unknownOutcome: 1 });
+  } catch {
+    // Leave the row in `fetching`: that also blocks a new admission and the
+    // sweep will quarantine it. No provider retry exists either way.
+  }
+  if (!marked.ok) {
+    // A concurrent settlement may have committed between the failure and the
+    // quarantine attempt. Never report a durable delivery as a failure.
+    let after = null;
+    try {
+      after = await lookupOp(db, tenant, key);
+    } catch {
+      after = null;
+    }
+    if (after && after.state === 'delivered') {
+      return {
+        status: 200,
+        body: { proposal: out.proposal, receipt: parseReceipt(after.receipt_json) || receipt, replay: false },
+      };
+    }
+  }
+  throw httpError(409, 'The provider accepted the call but local settlement failed; the outcome is quarantined and no automatic retry will occur. Inspect the stored evidence and reconcile explicitly.', 'DGM_MUSE_UNCERTAIN');
+}
+
+/**
  * A late success/error after an operator cancel (or a reconciliation) is
  * real evidence: the call left the process. Record it under `lateOutcome`
  * inside the existing receipt without changing the settled state — a
@@ -659,47 +750,9 @@ async function proposeOnce({ db, env, actor, prompt, opKey, mode = 'fixture', fe
     }
     return { status: 200, body: { proposal, receipt, replay: false } };
   }
+  let out;
   try {
-    const out = await proposeLive({ fetchImpl, apiKey: env.DGM_MUSE_API_KEY, prompt });
-    const spendUsed = museUsageSpendUsd(out.usage);
-    const proposalHash = await sha256Hex('dgm-muse-delivery/v1', out.proposal);
-    const receipt = receiptFor({
-      key, live, out, elapsedMs: Date.now() - t0, replay: false,
-      spendReserved, spendUsed, proposalHash, proposalChars: out.proposal.length,
-      proposalInput: extractProposalFixtureInput(out.proposal),
-    });
-    const settled = await settleDelivered(db, tenant, key, receipt, museUsdToMicros(spendUsed || 0));
-    if (!settled.ok) {
-      // Local cancellation cannot recall an already-sent provider call: the
-      // call counts as accepted, the response is discarded, and the ledger
-      // keeps the operator's cancellation. Never overwritten as delivered —
-      // but the late result is durable evidence, not a lost response.
-      await recordLateEvidence(db, tenant, key, {
-        kind: 'delivered-after-cancel',
-        providerContact: 'sent',
-        acceptance: 'accepted',
-        billing: 'possibly-chargeable',
-        responseId: out.responseId,
-        model: out.model,
-        usage: out.usage,
-        spendUsdReserved: spendReserved,
-        spendUsdUsed: spendUsed,
-        proposalHash,
-        proposalChars: out.proposal.length,
-        elapsedMs: Date.now() - t0,
-      });
-      const current = await lookupOp(db, tenant, key);
-      return {
-        status: 409,
-        body: {
-          proposal: null,
-          receipt: parseReceipt(current && current.receipt_json),
-          replay: false,
-          note: 'Cancelled or reconciled during provider flight. The provider call was already sent and its late result is recorded as evidence; no proposal was delivered and the settled cancellation stands.',
-        },
-      };
-    }
-    return { status: 200, body: { proposal: out.proposal, receipt, replay: false } };
+    out = await proposeLive({ fetchImpl, apiKey: env.DGM_MUSE_API_KEY, prompt });
   } catch (e) {
     // Unknown outcomes quarantine: lost responses AND accepted-but-unusable
     // provider output (the call was sent, so a new key must not duplicate
@@ -741,6 +794,66 @@ async function proposeOnce({ db, env, actor, prompt, opKey, mode = 'fixture', fe
     }
     throw e;
   }
+
+  // The provider ACCEPTED the response. From here on, a local failure is not
+  // a provider rejection: it must keep the accepted / possibly-chargeable
+  // evidence and quarantine instead of claiming `not-chargeable`.
+  const spendUsed = museUsageSpendUsd(out.usage);
+  const proposalHash = await sha256Hex('dgm-muse-delivery/v1', out.proposal);
+  const receipt = receiptFor({
+    key, live, out, elapsedMs: Date.now() - t0, replay: false,
+    spendReserved, spendUsed, proposalHash, proposalChars: out.proposal.length,
+    proposalInput: extractProposalFixtureInput(out.proposal),
+  });
+  let settled;
+  try {
+    settled = await settleDelivered(db, tenant, key, receipt, museUsdToMicros(spendUsed || 0));
+  } catch {
+    // The batch outcome is locally unknown: it may have committed or not.
+    // Re-read and preserve identity; never classify this as a rejection.
+    return settlementAfterAcceptance({ db, tenant, key, out, receipt, spendReserved, spendUsed, proposalHash });
+  }
+  if (!settled.ok) {
+    // Local cancellation cannot recall an already-sent provider call: the
+    // call counts as accepted, the response is discarded, and the ledger
+    // keeps the operator's cancellation. Never overwritten as delivered —
+    // but the late result is durable evidence, not a lost response.
+    try {
+      await recordLateEvidence(db, tenant, key, {
+        kind: 'delivered-after-cancel',
+        providerContact: 'sent',
+        acceptance: 'accepted',
+        billing: 'possibly-chargeable',
+        responseId: out.responseId,
+        model: out.model,
+        usage: out.usage,
+        spendUsdReserved: spendReserved,
+        spendUsdUsed: spendUsed,
+        proposalHash,
+        proposalChars: out.proposal.length,
+        elapsedMs: Date.now() - t0,
+      });
+    } catch {
+      // The settled cancellation and its unknown-outcome flag stand; a local
+      // evidence-write failure must not become a provider classification.
+    }
+    let current = null;
+    try {
+      current = await lookupOp(db, tenant, key);
+    } catch {
+      current = null;
+    }
+    return {
+      status: 409,
+      body: {
+        proposal: null,
+        receipt: parseReceipt(current && current.receipt_json),
+        replay: false,
+        note: 'Cancelled or reconciled during provider flight. The provider call was already sent and its late result is recorded as evidence; no proposal was delivered and the settled cancellation stands.',
+      },
+    };
+  }
+  return { status: 200, body: { proposal: out.proposal, receipt, replay: false } };
 }
 
 /**
@@ -904,75 +1017,84 @@ async function cancelRoute(ctx, opKey) {
   // may have been sent keeps its unknown-outcome quarantine until an
   // explicit operator reconciliation. The receipt never invents status 200.
   let current = null;
+  const readCurrent = () => first(ctx.db, 'SELECT state, receipt_json, mode, unknown_outcome FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', ctx.actor.user.id, opKey);
   try {
-    current = await first(ctx.db, 'SELECT state, receipt_json, mode, unknown_outcome FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', ctx.actor.user.id, opKey);
+    current = await readCurrent();
   } catch (e) {
     if (storageMissing(e)) return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
     throw e;
   }
   if (!current) return send(ctx, 404, { error: 'DGM proposal operation not found.', code: 'DGM_MUSE_UNKNOWN_OP' });
-  if (current.state !== 'reserved' && current.state !== 'fetching' && current.state !== 'uncertain') {
-    return send(ctx, 409, { error: `Proposal already settled as ${JSON.stringify(current.state)}; cancellation is a no-op.`, code: 'DGM_MUSE_STATE' });
-  }
-  const prior = parseReceipt(current.receipt_json, {}) || {};
-  const now = nowIso();
-  const mode = current.mode || prior.mode || null;
-  // Evidence, not the column default, decides whether this cancellation may
-  // have left a provider call in flight. A fixture op never contacts the
-  // provider, so its cancellation is provably unsent even from `fetching`;
-  // an unknown mode stays conservative. `rowMayHaveBeenSent` covers migrated
-  // rows whose flag defaulted to 0 but whose receipt still records contact.
-  const mayHaveBeenSent = rowMayHaveBeenSent(current)
-    || current.state === 'uncertain'
-    || (current.state === 'fetching' && mode !== 'fixture');
-  const merged = {
-    ...prior,
-    opKey,
-    state: 'cancelled',
-    cancelledFrom: current.state,
-    cancelledAt: now,
-    error: prior.error || 'DGM_MUSE_CANCELLED',
-    // Preserve a recorded failure status; otherwise a cancellation is a
-    // conflict/abort shape, never a success-looking 200.
-    status: Number.isSafeInteger(prior.status) && prior.status >= 400 && prior.status <= 599 ? prior.status : 409,
-    mode,
-    evaluation: evaluationForMode(mode, prior.evaluation || null),
-    providerContact: prior.providerContact || (mayHaveBeenSent ? 'sent' : 'none'),
-    acceptance: prior.acceptance || (mayHaveBeenSent ? 'unknown' : 'not-sent'),
-    billing: prior.billing || (mayHaveBeenSent ? 'unknown' : 'not-chargeable'),
-    spendUsdReserved: Number.isFinite(prior.spendUsdReserved) ? prior.spendUsdReserved : 0,
-    spendUsdUsed: Number.isFinite(prior.spendUsdUsed) ? prior.spendUsdUsed : null,
-    chargeNote: prior.chargeNote || (mayHaveBeenSent
-      ? 'The call may have been sent; its cost is not established by cancellation and the reservation is retained.'
-      : 'No provider call was sent; no charge can have occurred.'),
-    cancelNote: mayHaveBeenSent
-      ? 'Local cancellation only: it cannot recall a sent generation or prove that no billing occurred. The unknown outcome stays quarantined until an explicit operator reconciliation.'
-      : 'Cancelled before provider contact; this op cannot have incurred a provider charge.',
-  };
-  let marked;
-  try {
-    // The durable flag is written from the evidence above, never left at the
-    // migrated default. A provably-unsent cancellation stores 0 so it stays
-    // usable; a possibly-sent one stores 1 so no new key is admitted.
-    marked = await markOp(ctx.db, ctx.actor.user.id, opKey, ['reserved', 'fetching', 'uncertain'], 'cancelled', merged, {
-      unknownOutcome: mayHaveBeenSent ? 1 : 0,
-    });
-  } catch (e) {
-    if (storageMissing(e)) return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
-    throw e;
-  }
-  if (!marked.ok) {
-    let row = null;
+  // A cancellation is a state-fenced CAS: the receipt is derived from the
+  // exact row state observed, and the update may only rewrite that state. If
+  // the op advances between the read and the update (notably a live
+  // `reserved` -> `fetching` transition that may already have sent a call),
+  // re-read and reclassify conservatively. A stale reservation receipt must
+  // never replace newer contact/acceptance/billing evidence or clear its
+  // unknown-outcome quarantine.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (current.state !== 'reserved' && current.state !== 'fetching' && current.state !== 'uncertain') {
+      return send(ctx, 409, { error: `Proposal already settled as ${JSON.stringify(current.state)}; cancellation is a no-op.`, code: 'DGM_MUSE_STATE' });
+    }
+    const prior = parseReceipt(current.receipt_json, {}) || {};
+    const now = nowIso();
+    const mode = current.mode || prior.mode || null;
+    // Evidence, not the column default, decides whether this cancellation may
+    // have left a provider call in flight. A fixture op never contacts the
+    // provider, so its cancellation is provably unsent even from `fetching`;
+    // an unknown mode stays conservative. `rowMayHaveBeenSent` covers migrated
+    // rows whose flag defaulted to 0 but whose receipt still records contact.
+    const mayHaveBeenSent = rowMayHaveBeenSent(current)
+      || current.state === 'uncertain'
+      || (current.state === 'fetching' && mode !== 'fixture');
+    const merged = {
+      ...prior,
+      opKey,
+      state: 'cancelled',
+      cancelledFrom: current.state,
+      cancelledAt: now,
+      error: prior.error || 'DGM_MUSE_CANCELLED',
+      // Preserve a recorded failure status; otherwise a cancellation is a
+      // conflict/abort shape, never a success-looking 200.
+      status: Number.isSafeInteger(prior.status) && prior.status >= 400 && prior.status <= 599 ? prior.status : 409,
+      mode,
+      evaluation: evaluationForMode(mode, prior.evaluation || null),
+      providerContact: prior.providerContact || (mayHaveBeenSent ? 'sent' : 'none'),
+      acceptance: prior.acceptance || (mayHaveBeenSent ? 'unknown' : 'not-sent'),
+      billing: prior.billing || (mayHaveBeenSent ? 'unknown' : 'not-chargeable'),
+      spendUsdReserved: Number.isFinite(prior.spendUsdReserved) ? prior.spendUsdReserved : 0,
+      spendUsdUsed: Number.isFinite(prior.spendUsdUsed) ? prior.spendUsdUsed : null,
+      chargeNote: prior.chargeNote || (mayHaveBeenSent
+        ? 'The call may have been sent; its cost is not established by cancellation and the reservation is retained.'
+        : 'No provider call was sent; no charge can have occurred.'),
+      cancelNote: mayHaveBeenSent
+        ? 'Local cancellation only: it cannot recall a sent generation or prove that no billing occurred. The unknown outcome stays quarantined until an explicit operator reconciliation.'
+        : 'Cancelled before provider contact; this op cannot have incurred a provider charge.',
+    };
+    let marked;
     try {
-      row = await first(ctx.db, 'SELECT state FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', ctx.actor.user.id, opKey);
+      // The durable flag is written from the evidence above, never left at the
+      // migrated default. A provably-unsent cancellation stores 0 so it stays
+      // usable; a possibly-sent one stores 1 so no new key is admitted.
+      marked = await markOp(ctx.db, ctx.actor.user.id, opKey, [current.state], 'cancelled', merged, {
+        unknownOutcome: mayHaveBeenSent ? 1 : 0,
+      });
     } catch (e) {
       if (storageMissing(e)) return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
       throw e;
     }
-    if (!row) return send(ctx, 404, { error: 'DGM proposal operation not found.', code: 'DGM_MUSE_UNKNOWN_OP' });
-    return send(ctx, 409, { error: `Proposal already settled as ${JSON.stringify(row.state)}; cancellation is a no-op.`, code: 'DGM_MUSE_STATE' });
+    if (marked.ok) return opRoute(ctx, opKey);
+    // Lost the CAS: the row advanced between the read and the update. Re-read
+    // it and derive fresh evidence; never write through the newer state.
+    try {
+      current = await readCurrent();
+    } catch (e) {
+      if (storageMissing(e)) return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
+      throw e;
+    }
+    if (!current) return send(ctx, 404, { error: 'DGM proposal operation not found.', code: 'DGM_MUSE_UNKNOWN_OP' });
   }
-  return opRoute(ctx, opKey);
+  return send(ctx, 409, { error: 'Proposal state changed while cancellation was being applied; inspect it and retry.', code: 'DGM_MUSE_STATE' });
 }
 
 /**
