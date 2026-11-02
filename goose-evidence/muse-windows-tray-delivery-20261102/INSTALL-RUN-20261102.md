@@ -29,19 +29,30 @@ is executed; JJP install additionally requires the rollout procedure in
   re-qualify from the merge commit, then wire that exact verified artifact.
 - CI trigger-scope inspection (2026-11-02, read-only): the workflow runs on
   `pull_request` touching `local-worker/**`, `LICENSE`, or itself, plus
-  parameterless `workflow_dispatch`. A push + CI run on this docs-only tray
-  branch CANNOT yield a qualified downloadable artifact, for two independent
-  reasons: (1) this branch changes only `goose-evidence/*.md`, which matches
-  none of the PR paths-filter entries, so no run triggers; (2) the workflow
+  parameterless `workflow_dispatch`. Before the workflow change below, a push
+  + CI run on the docs-only tray branch could not yield a qualified
+  downloadable artifact, for two independent reasons: (1) the branch changed
+  only `goose-evidence/*.md`, matching none of the PR paths-filter entries;
+  (2) the workflow
   uploads ONLY `dist/shots/*.png` (14-day retention) — the Setup exe,
   `manifest.json`, and `SHA256SUMS` are built and full-profile-qualified on
   the runner (`build.py` then `qualify.py`, no `--app-dir`) but never
   uploaded, so every artifact is ephemeral by design ("publishes no
   release"). Closing this path needs a reviewed workflow change adding an
-  installer-artifact upload plus push/PR/dispatch authorization — neither is
-  in-lane. The documented release path stands: release-owner hand build from
-  the merged commit with the same pinned script, independent review, hand
-  upload.
+  installer-artifact upload plus push/PR/dispatch authorization — the upload
+  part is now implemented (status note at end of §1, review requested,
+  unpushed). The documented release path stands: release-owner hand build
+  from the merged commit with the same pinned script, independent review,
+  hand upload.
+- Workflow change implemented 2026-11-02 on this branch (unpushed, review
+  requested): `worker-installer-build.yml` gains a `windows-installer-qualified`
+  upload (Setup exe + manifest + SHA256SUMS, 14-day retention,
+  `if-no-files-found: error`, same pinned upload-artifact v5 SHA,
+  success-only so only qualified runs publish it). Targeted validation 16/16
+  PASS (YAML validity, trigger paths incl. self, pinned action, bounded
+  retention, exact upload paths, pre-screenshots capture, no release step, no
+  secret references, review-evidence header). Awaiting independent review
+  verdict before push/PR/CI run; full proof is the CI run itself.
 - Trust path only: download from the AIPSTER GitHub release page and verify
   the SHA-256 against `SHA256SUMS` / the dashboard checksum. Builds are
   **unsigned**: Windows SmartScreen shows "Unknown publisher". Do not disable
