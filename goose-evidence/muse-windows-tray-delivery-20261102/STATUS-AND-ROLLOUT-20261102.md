@@ -26,9 +26,11 @@ Live worker, sender chain, enrollment `r_9c27cd5f`, port 8090: untouched. Nothin
 
 ## 2. Revised JJP rollout procedure (approval-gated; NONE executed)
 
-Precondition: a qualified published artifact (rebuilt from merge commit,
-re-qualified, SHA256 wired) exists. The Temp screenshot payload is never a
-rollback source: it is unqualified, superseded, and has the wrong entrypoint.
+Precondition: a reviewed, qualified LOCAL artifact (rebuilt from merge
+commit, re-qualified, SHA-256 recorded) exists. Publication stays separate
+and unauthorized, and must not gate local qualification. The Temp screenshot
+payload is never a rollback source: it is unqualified, superseded, and has
+the wrong entrypoint.
 
 1. Verify destination, and never trust `/D=` alone. The registered
    `HKCU\Software\AIPSTER-Worker\InstallDir` is the Temp screenshot directory
@@ -36,15 +38,19 @@ rollback source: it is unqualified, superseded, and has the wrong entrypoint.
    whenever the flag value equals the NSIS default — an explicit `/D=` set to
    the default is indistinguishable from none (reviewer proved A/B). So,
    approval-gated, do one of: (a) clear/replace the stale `InstallDir` value
-   before installing; (b) install attended and verify the Directory page
-   shows the stable destination (`$LOCALAPPDATA\Programs\AIPSTER-Worker`,
-   currently absent: verified); or (c) install to a distinct verified
-   destination. Pre-flight abort: if the resolved install dir is not the
-   expected stable one, stop before any file write.
-2. Take a bounded secret-free pre-change snapshot (owner-held, outside every
-   repo, never `api-token.txt`): file copies of the reconciled `config.toml`,
-   `pairing.json`, and worker `state` file, recorded by name/size/SHA-256 in
-   the rollout receipt with token material excluded by construction. This
+   before installing; (b) install attended and SET the Directory page to
+   the stable destination (`$LOCALAPPDATA\Programs\AIPSTER-Worker`,
+   currently absent: verified) — verify-alone may leave the old Temp
+   destination; or (c) install to a distinct verified destination.
+   Pre-flight abort: if the resolved install dir is not the expected stable
+   one, stop before any file write.
+2. Take a bounded PRIVATE-BY-DEFAULT pre-change snapshot, itself
+   approval-gated (it creates and holds the private copies): owner-only
+   copies of the reconciled `config.toml`, `pairing.json`, and worker `state`
+   file, held outside every repo in bounded owner-only storage. Only
+   name/size/SHA-256 enter the rollout receipt; contents never enter evidence
+   or the repo, and `api-token.txt` is never copied. No secret-free-by-filename
+   assumption: treat every copied file as private regardless of name. This
    complements installer preservation rather than replacing it: it guards the
    F1 wrong-directory case, where the installer preserves the right data only
    if it actually targets the right directory. Copies are destroyed after the
@@ -60,12 +66,13 @@ rollback source: it is unqualified, superseded, and has the wrong entrypoint.
    new tray recognizes an external sender (`already running in another
    process`, no duplicate beats) but overlapping loops must end by decision,
    not by kill sweep.
-5. Stop the old worker through its own approved stop path (the old payload has
-   NO `aipster-tray.exe`, so no old-tray-Quit exists; `taskkill` and
-   unknown-process stops are forbidden). The installer then runs: it refuses
-   over any still-running worker (exit 2 silent), which is the expected
-   conflict signal, not a failure to override.
-6. Install, then post-check before declaring success: registry `InstallDir`,
+5. Stop-only: stop the old worker through its own approved stop path (the old
+   payload has NO `aipster-tray.exe`, so no old-tray-Quit exists; `taskkill`
+   and unknown-process stops are forbidden). No install happens in this step.
+6. Install-only (the single install description): run the installer against
+   the step-1 verified destination; it refuses over any still-running worker
+   (exit 2 silent), which is the expected conflict signal, not a failure to
+   override. Then post-check before declaring success: registry `InstallDir`,
    uninstall `InstallLocation`, and both shortcuts resolve to
    `<dest>\aipster-tray.exe` (never Temp); data dir contents (config, token,
    pairing, state, logs) intact against the step-2 snapshot names/hashes.
@@ -75,7 +82,8 @@ rollback source: it is unqualified, superseded, and has the wrong entrypoint.
    evidence/logs/backups. Preservation rides the installer's default (data
    dir untouched; `/REMOVEDATA` never passed), with the step-2 snapshot as
    the backstop. If token compromise is suspected, rotate via the supported
-   path (delete `api-token.txt`, restart) after approval. With no qualified
+   path (delete `api-token.txt`, restart) after approval — never automatic.
+   With no qualified
    prior installer, rollback is uninstall (data preserved by default) back to
    a clean uninstalled state — NOT reinstalling the Temp payload. A
    prior-version rollback becomes possible only once a qualified prior
