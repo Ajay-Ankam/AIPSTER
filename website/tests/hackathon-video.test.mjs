@@ -124,6 +124,37 @@ test('player focus ring is drawn inside the clipping figure', async () => {
   assert.match(css, /\.video-feature video:focus-visible,\.video-feature video:focus-within\{outline:3px solid #bd8d30;outline-offset:-3px\}/);
 });
 
+test('the cut is the top main card, not a lower progress section', async () => {
+  const html = await readFile(resolve(PUBLIC, 'index.html'), 'utf8');
+  const at = needle => {
+    const index = html.indexOf(needle);
+    assert.notEqual(index, -1, `missing ${needle}`);
+    return index;
+  };
+  const card = at('<section class="app-card wrap"');
+  const figure = at('id="hackathon-video"');
+  const grid = at('<div class="app-grid">');
+  const overview = at('<section id="overview"');
+  const progress = at('<section id="progress"');
+  const mainEnd = at('</main>');
+
+  // The player is the first card content under the branding and navigation.
+  assert.ok(figure > card, 'player sits inside the top application card');
+  assert.ok(figure < grid, 'player precedes the hero copy band');
+  assert.ok(figure < overview, 'player precedes the vision section');
+  assert.ok(progress > figure, 'the progress section comes after the player');
+
+  // Moving it must not duplicate the player or its caption machinery.
+  assert.equal((html.match(/<video\b/g) || []).length, 1, 'exactly one player');
+  assert.equal((html.match(/id="hackathon-video"/g) || []).length, 1, 'one anchor');
+  assert.equal((html.match(/id="video-summary"/g) || []).length, 1, 'one summary');
+  const progressHtml = html.slice(progress, mainEnd);
+  assert.equal((progressHtml.match(/<video\b|id="hackathon-video"/g) || []).length, 0, 'progress section holds no player');
+
+  const css = await readFile(resolve(PUBLIC, 'styles.css'), 'utf8');
+  assert.match(css, /\.app-card>\.video-feature\{[^}]*border:0[^}]*border-radius:0/);
+});
+
 test('served media headers declare video, caption and poster types', async () => {
   const headers = await readFile(resolve(PUBLIC, '_headers'), 'utf8');
   assert.match(headers, /\/assets\/aipster-intro-mix\.mp4\s+Content-Type: video\/mp4/);
