@@ -1574,3 +1574,31 @@ test('muse routes R4 N-R3-1b: fixture fetch evidence is unsent, but retained sen
     (e) => e.code === 'DGM_MUSE_UNCERTAIN');
   assert.equal(calls, 0);
 });
+
+test('muse routes R4 N-R3-2a: a nested contact field is a named quarantine, not a state-conflict 500', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  // A shape this code never writes, but the SQL LIKE sees the nested field.
+  // The JS reader now applies the same text patterns, so both agree.
+  await seedMuseRow(t, { key: 'r4-nested', state: 'cancelled', unknown: 0, receipt: { lateOutcome: { providerContact: 'sent' } } });
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'R4 nested.', opKey: 'r4-nested-next', mode: 'fixture' }, fetchImpl: okFetch() }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+  const ledger = await t.DB.prepare('SELECT reserved_micros FROM dgm_muse_spend WHERE scope = ? AND window_key = ?').bind('global', 'all-time').first();
+  assert.equal(Number(ledger ? ledger.reserved_micros : 0), 0, 'a refused admission reserves nothing');
+});
+
+test('muse routes R4 N-R3-2b: a spaced accepted marker still blocks in both encodings', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  await seedMuseRow(t, { key: 'r4-spaced', state: 'cancelled', unknown: 0, receipt: {} });
+  // Hand-written spacing: the parsed JS check saw this before, while the SQL
+  // LIKE did not. Both encodings now treat it as contact evidence.
+  await t.DB.prepare("UPDATE dgm_muse_ops SET receipt_json = ? WHERE tenant_id = 'u_alice' AND op_key = 'r4-spaced'")
+    .bind('{"opKey":"r4-spaced","mode":"live","accepted": true}').run();
+  const read = await readJson(await t.call(`${BASE}/ops/r4-spaced`, { headers: t.as(t.alice) }));
+  assert.equal(read.json.blocking, true);
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'R4 spaced.', opKey: 'r4-spaced-next', mode: 'fixture' }, fetchImpl: okFetch() }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+});
