@@ -750,7 +750,9 @@ const MUSE_FIXTURE_RUNS = '/api/admin/v1/dgm/preview/runs';
 const MUSE_OP_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 let museSeq = 0;          // status request ordering
-let museOpSeq = 0;        // inspect/reconcile request ordering
+let museOpSeq = 0;        // inspect request ordering only (reads)
+let museReceiptSeq = 0;   // a settled generation/reconcile receipt (writes)
+let museLastReceiptKey = '';
 let museAuthorized = false;
 let museStatusBody = null;
 let museBusy = false;     // one generation/attach at a time
@@ -948,6 +950,14 @@ function museRenderResult(entry) {
   museSyncControls();
 }
 
+function museMarkReceiptSettled(key) {
+  // A write outcome (delivered, replay, quarantine, cancellation or unknown)
+  // outranks an inspection that was already in flight: that inspection must not
+  // repaint over the receipt or its admission state.
+  museReceiptSeq += 1;
+  museLastReceiptKey = key;
+}
+
 function museClearResult() {
   // Entering an uncertain state invalidates the on-screen result: it belongs to
   // a different operation and must not be attachable while reconciliation is
@@ -989,7 +999,6 @@ async function generateDgmMuseProposal() {
     return;
   }
   const opKey = museNewOpKey();
-  const mySeq = ++museOpSeq;
   museBusy = true;
   museSyncControls();
   museSetState('dgm-muse-gen-state', 'Generating one ' + (mode === 'live' ? 'synthetic-live' : 'fixture') + ' proposal…');
@@ -997,8 +1006,8 @@ async function generateDgmMuseProposal() {
     const { res, body } = await dgmFetch(MUSE_BASE + '/proposals', {
       method: 'POST', body: JSON.stringify({ prompt, mode, opKey })
     });
-    if (mySeq !== museOpSeq) return;
     if (res.ok && body && typeof body.proposal === 'string') {
+      museMarkReceiptSettled(opKey);
       museCurrent = { opKey, mode, state: 'delivered', proposal: body.proposal, receipt: body.receipt || null };
       museBlocked = false;
       museRenderResult(museCurrent);
@@ -1009,6 +1018,7 @@ async function generateDgmMuseProposal() {
     if (res.ok && body && body.receipt) {
       // A replay of a settled op: render its receipt, never invent text.
       const state = typeof body.state === 'string' ? body.state : 'unknown';
+      museMarkReceiptSettled(opKey);
       museCurrent = { opKey, mode, state, proposal: null, receipt: body.receipt };
       museBlocked = state === 'cancelled';
       museRenderResult(museCurrent);
@@ -1017,36 +1027,38 @@ async function generateDgmMuseProposal() {
     }
     if (code === 'DGM_MUSE_UNCERTAIN') {
       museBlocked = true;
+      museMarkReceiptSettled(opKey);
       museClearResult();
       museShowReconcile('', 'Another operation for this tenant is quarantined, so the server admitted nothing. Inspect its operation key and reconcile it explicitly; this panel never resubmits with a new key.');
-      museSetState('dgm-muse-gen-state', 'Quarantined: ' + museFailure(code, res.status) + '. No duplicate was sent.');
+      museSetState('dgm-muse-gen-state', 'Quarantined: ' + museFailure(code, res.status) + '. Attempted ' + opKey + ' was not admitted; no duplicate was sent.');
       return;
     }
     if (code === 'DGM_MUSE_IN_FLIGHT') {
-      museSetState('dgm-muse-gen-state', 'Another proposal is in flight: ' + museFailure(code, res.status) + '. Wait for it to settle, or inspect it by key.');
+      museSetState('dgm-muse-gen-state', 'Another proposal is in flight: ' + museFailure(code, res.status) + '. Attempted ' + opKey + ' was not admitted; wait for it to settle, or inspect it by key.');
       return;
     }
     if (code === 'DGM_MUSE_CANCELLED') {
       museBlocked = true;
+      museMarkReceiptSettled(opKey);
       museClearResult();
       museShowReconcile(opKey, 'The operation was cancelled during admission and carries a durable reservation. Inspect it and reconcile explicitly if its provider outcome is unknown.');
-      museSetState('dgm-muse-gen-state', 'Cancelled during admission: ' + museFailure(code, res.status) + '.');
+      museSetState('dgm-muse-gen-state', 'Cancelled during admission: ' + museFailure(code, res.status) + ' (attempted ' + opKey + ').');
       return;
     }
-    museSetState('dgm-muse-gen-state', 'Refused: ' + museFailure(code, res.status) + '. Nothing was delivered.');
+    museSetState('dgm-muse-gen-state', 'Refused: ' + museFailure(code, res.status) + '. Nothing was delivered (attempted ' + opKey + ').');
   } catch {
-    if (mySeq !== museOpSeq) return;
     // The request left the page but no response was read: it may or may not
     // have been admitted. Keep the key and inspect; never auto-resend.
     museBlocked = true;
+    museMarkReceiptSettled(opKey);
     museClearResult();
     museShowReconcile(opKey, 'The request ended before a response was read, so the outcome is unknown. Inspect operation ' + opKey + '; nothing is resubmitted automatically.');
     museSetState('dgm-muse-gen-state', 'Outcome unknown: the request may have reached the server. Inspect ' + opKey + '.');
   } finally {
-    if (mySeq === museOpSeq) {
-      museBusy = false;
-      museSyncControls();
-    }
+    // No read (inspection) or other path may own this reset: a generation that
+    // settled always releases the panel, so its receipt/key stay reachable.
+    museBusy = false;
+    museSyncControls();
   }
 }
 
@@ -1062,10 +1074,19 @@ async function inspectDgmMuseOp() {
     return;
   }
   const mySeq = ++museOpSeq;
+  const receiptAtStart = museReceiptSeq;
   museSetState('dgm-muse-reconcile-state', 'Inspecting ' + key + '…');
   try {
     const { res, body } = await dgmFetch(MUSE_BASE + '/ops/' + encodeURIComponent(key));
     if (mySeq !== museOpSeq) return;
+    if (receiptAtStart !== museReceiptSeq) {
+      // A generation or reconcile settled while this inspection was in flight.
+      // Its receipt and admission state are newer than this read and stay on
+      // screen; the operator can inspect this key again deliberately.
+      museSetState('dgm-muse-reconcile-state', 'Operation ' + museLastReceiptKey + ' settled while ' + key
+        + ' was being inspected; its outcome stays on screen. Inspect ' + key + ' again to act on it.');
+      return;
+    }
     if (res.status === 404) {
       // No row exists: the server never admitted this key, so nothing was
       // reserved and no provider call can be attached to it.
@@ -1107,7 +1128,6 @@ async function reconcileDgmMuseOp() {
   }
   const noteEl = document.getElementById('dgm-muse-note');
   const note = noteEl ? String(noteEl.value || '').trim() : '';
-  const mySeq = ++museOpSeq;
   museBusy = true;
   museSyncControls();
   museSetState('dgm-muse-reconcile-state', 'Reconciling ' + key + '…');
@@ -1115,8 +1135,8 @@ async function reconcileDgmMuseOp() {
     const { res, body } = await dgmFetch(MUSE_BASE + '/ops/' + encodeURIComponent(key) + '/reconcile', {
       method: 'POST', body: JSON.stringify(note ? { acknowledge: true, note } : { acknowledge: true })
     });
-    if (mySeq !== museOpSeq) return;
     if (res.ok && body && body.state) {
+      museMarkReceiptSettled(key);
       museCurrent = { opKey: key, state: body.state, proposal: null, receipt: body.receipt || null };
       museBlocked = body.blocking === true;
       museRenderResult(museCurrent);
@@ -1126,13 +1146,11 @@ async function reconcileDgmMuseOp() {
     }
     museSetState('dgm-muse-reconcile-state', 'Reconcile refused: ' + museFailure(body && body.code, res.status) + '.');
   } catch {
-    if (mySeq !== museOpSeq) return;
     museSetState('dgm-muse-reconcile-state', 'Reconcile failed: request failed. Nothing was recorded.');
   } finally {
-    if (mySeq === museOpSeq) {
-      museBusy = false;
-      museSyncControls();
-    }
+    // Owned by this write only; an inspection can never suppress this reset.
+    museBusy = false;
+    museSyncControls();
   }
 }
 

@@ -296,6 +296,8 @@ test('muse ui: uncertain outcome is inspected and reconciled, never resubmitted'
   ui.el('dgm-muse-generate').click();
   await settled(() => /Quarantined/.test(ui.el('dgm-muse-gen-state').textContent), 'quarantine');
   assert.match(ui.el('dgm-muse-gen-state').textContent, /DGM_MUSE_UNCERTAIN \(HTTP 409\)/);
+  const attempted = JSON.parse(ui.calls.filter((c) => c.path === `${MUSE}/proposals`).at(-1).init.body).opKey;
+  assert.ok(ui.el('dgm-muse-gen-state').textContent.includes(attempted), 'the attempted operation key is revealed even when admission is refused');
   assert.equal(ui.el('dgm-muse-generate').disabled, true, 'a quarantined tenant cannot generate again');
   assert.equal(ui.el('dgm-muse-reconcile').hidden, false, 'inspect/reconcile is offered');
   assert.equal(ui.el('dgm-muse-result').innerHTML, '', 'the previous result is no longer presented as current');
@@ -445,4 +447,170 @@ test('muse ui: shell carries the panel, labels it, and keeps controls native', (
   assert.ok(shell.includes('Nothing executes, promotes or reserves.'));
   assert.ok(shell.includes('never resubmitted'));
   assert.equal((shell.match(/<script/g) || []).length, 1);
+});
+
+// F-1 regression: an inspection is a read and must not own or supersede a
+// generation's busy state. Both resolution orders are exercised after the panel
+// has been through a real quarantine/inspect/reconcile cycle, because that is
+// where an operator can see the reconcile controls while generating.
+
+function interleavingRoutes(genGate, inspectGate) {
+  let proposals = 0;
+  return {
+    [`${MUSE}/proposals`]: () => {
+      proposals += 1;
+      if (proposals === 1) {
+        return Response.json({ error: 'Tenant has unresolved quarantined DGM proposal(s) (old1).', code: 'DGM_MUSE_UNCERTAIN' }, { status: 409 });
+      }
+      if (proposals === 2) return genGate.promise;
+      return Response.json(delivered({ opKey: 'ui-third', proposal: 'Deliberate third delivery.\nfixture: good' }));
+    },
+    [`${MUSE}/ops/old1`]: () => Response.json({
+      opKey: 'old1', state: 'uncertain', unknownOutcome: true, blocking: true,
+      receipt: { opKey: 'old1', mode: 'live', evaluation: 'synthetic-live', providerContact: 'sent', acceptance: 'unknown', billing: 'unknown', spendUsdReserved: 0.0001 }
+    }),
+    [`${MUSE}/ops/old1/reconcile`]: () => Response.json({
+      opKey: 'old1', state: 'reconciled', unknownOutcome: false, blocking: false,
+      receipt: { opKey: 'old1', mode: 'live', evaluation: 'synthetic-live', providerContact: 'sent', acceptance: 'unknown', billing: 'unknown' }
+    }),
+    [`${MUSE}/ops/other1`]: () => inspectGate.promise
+  };
+}
+
+async function primeQuarantineCycle(ui) {
+  ui.el('dgm-muse-load').click();
+  await settled(() => /Loaded/.test(ui.el('dgm-muse-state').textContent), 'status');
+  ui.el('dgm-muse-prompt').value = 'Synthetic interleaving test.';
+  ui.el('dgm-muse-generate').click();
+  await settled(() => /Quarantined/.test(ui.el('dgm-muse-gen-state').textContent), 'quarantine');
+  ui.el('dgm-muse-op-key').value = 'old1';
+  ui.el('dgm-muse-inspect').click();
+  await settled(() => /blocking admission yes/.test(ui.el('dgm-muse-reconcile-state').textContent), 'inspect old1');
+  ui.el('dgm-muse-ack').checked = true;
+  ui.el('dgm-muse-ack').listeners.change();
+  ui.el('dgm-muse-reconcile-submit').click();
+  await settled(() => /Reconciled/.test(ui.el('dgm-muse-reconcile-state').textContent), 'reconcile old1');
+  assert.equal(ui.el('dgm-muse-generate').disabled, false, 'precondition: the panel is open again');
+  assert.equal(ui.el('dgm-muse-reconcile').hidden, false, 'precondition: reconcile controls stay visible');
+}
+
+async function startDeliberateGeneration(ui) {
+  const before = ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length;
+  ui.el('dgm-muse-generate').click();
+  await settled(() => ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length === before + 1, 'generation request');
+  const posts = ui.calls.filter((c) => c.path === `${MUSE}/proposals`);
+  return { count: posts.length, key: JSON.parse(posts[posts.length - 1].init.body).opKey };
+}
+
+const uncertainInspect = () => Response.json({
+  opKey: 'other1', state: 'uncertain', unknownOutcome: true, blocking: true,
+  receipt: { opKey: 'other1', mode: 'live', evaluation: 'synthetic-live', providerContact: 'sent', acceptance: 'unknown', billing: 'unknown' }
+});
+
+test('muse ui: inspection during generation never wedges the panel (generation resolves first)', async () => {
+  const genGate = deferred();
+  const inspectGate = deferred();
+  const ui = harness({
+    '/api/admin/v1/status': grant,
+    [`${MUSE}/status`]: () => Response.json(statusBody()),
+    ...interleavingRoutes(genGate, inspectGate)
+  });
+  await primeQuarantineCycle(ui);
+  const gen = await startDeliberateGeneration(ui);
+  assert.equal(gen.count, 2);
+
+  ui.el('dgm-muse-op-key').value = 'other1';
+  ui.el('dgm-muse-inspect').click();
+  genGate.resolve(Response.json(delivered({ opKey: gen.key, proposal: 'Delivered while inspecting.\nfixture: good' })));
+  await settled(() => /Delivered/.test(ui.el('dgm-muse-gen-state').textContent), 'generation settle');
+  inspectGate.resolve(uncertainInspect());
+  await settled(() => /other1/.test(ui.el('dgm-muse-reconcile-state').textContent), 'inspection settle');
+
+  assert.equal(ui.el('dgm-muse-generate').disabled, false, 'generation busy state settled');
+  assert.ok(ui.el('dgm-muse-gen-state').textContent.includes(gen.key), 'the delivered operation key is revealed');
+  assert.ok(ui.el('dgm-muse-result').innerHTML.includes(gen.key), 'the delivered receipt is not discarded by the inspection');
+  assert.ok(ui.el('dgm-muse-result').innerHTML.includes('Delivered while inspecting.'), 'delivered receipt content survives');
+  assert.equal(ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length, 2, 'no automatic resubmission');
+  const third = await startDeliberateGeneration(ui);
+  await settled(() => /Delivered/.test(ui.el('dgm-muse-gen-state').textContent), 'third delivery');
+  assert.equal(third.count, 3, 'only the subsequent deliberate action sends another proposal');
+  assert.equal(third.key === gen.key, false, 'the next deliberate action uses its own key');
+});
+
+test('muse ui: inspection during generation never wedges the panel (inspection resolves first)', async () => {
+  const genGate = deferred();
+  const inspectGate = deferred();
+  const ui = harness({
+    '/api/admin/v1/status': grant,
+    [`${MUSE}/status`]: () => Response.json(statusBody()),
+    ...interleavingRoutes(genGate, inspectGate)
+  });
+  await primeQuarantineCycle(ui);
+  const gen = await startDeliberateGeneration(ui);
+
+  ui.el('dgm-muse-op-key').value = 'other1';
+  ui.el('dgm-muse-inspect').click();
+  inspectGate.resolve(uncertainInspect());
+  await settled(() => /State uncertain/.test(ui.el('dgm-muse-reconcile-state').textContent), 'inspection settle');
+  genGate.resolve(Response.json(delivered({ opKey: gen.key, proposal: 'Delivered after inspection.\nfixture: good' })));
+  await settled(() => /Delivered/.test(ui.el('dgm-muse-gen-state').textContent), 'generation settle');
+
+  assert.equal(ui.el('dgm-muse-generate').disabled, false, 'generation busy state settled');
+  assert.ok(ui.el('dgm-muse-gen-state').textContent.includes(gen.key), 'the delivered operation key is revealed');
+  assert.ok(ui.el('dgm-muse-result').innerHTML.includes(gen.key), 'the generation receipt is on screen');
+  assert.ok(ui.el('dgm-muse-result').innerHTML.includes('Delivered after inspection.'), 'the generation receipt is not lost');
+  assert.equal(ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length, 2, 'no automatic resubmission');
+  const third = await startDeliberateGeneration(ui);
+  assert.equal(third.count, 3, 'only the subsequent deliberate action sends another proposal');
+});
+
+test('muse ui: inspection during reconcile never wedges the panel', async () => {
+  const inspectGate = deferred();
+  const reconcileGate = deferred();
+  let proposals = 0;
+  const ui = harness({
+    '/api/admin/v1/status': grant,
+    [`${MUSE}/status`]: () => Response.json(statusBody()),
+    [`${MUSE}/proposals`]: () => {
+      proposals += 1;
+      if (proposals === 1) {
+        return Response.json({ error: 'Tenant has unresolved quarantined DGM proposal(s) (old1).', code: 'DGM_MUSE_UNCERTAIN' }, { status: 409 });
+      }
+      return Response.json(delivered({ opKey: 'ui-after-reconcile', proposal: 'After reconcile.\nfixture: good' }));
+    },
+    [`${MUSE}/ops/old1`]: () => Response.json({
+      opKey: 'old1', state: 'uncertain', unknownOutcome: true, blocking: true,
+      receipt: { opKey: 'old1', mode: 'live', evaluation: 'synthetic-live', providerContact: 'sent', acceptance: 'unknown', billing: 'unknown' }
+    }),
+    [`${MUSE}/ops/old1/reconcile`]: () => reconcileGate.promise,
+    [`${MUSE}/ops/other1`]: () => inspectGate.promise
+  });
+  ui.el('dgm-muse-load').click();
+  await settled(() => /Loaded/.test(ui.el('dgm-muse-state').textContent), 'status');
+  ui.el('dgm-muse-prompt').value = 'Synthetic reconcile interleaving.';
+  ui.el('dgm-muse-generate').click();
+  await settled(() => /Quarantined/.test(ui.el('dgm-muse-gen-state').textContent), 'quarantine');
+  ui.el('dgm-muse-op-key').value = 'old1';
+  ui.el('dgm-muse-inspect').click();
+  await settled(() => /blocking admission yes/.test(ui.el('dgm-muse-reconcile-state').textContent), 'inspect old1');
+  ui.el('dgm-muse-ack').checked = true;
+  ui.el('dgm-muse-ack').listeners.change();
+  ui.el('dgm-muse-reconcile-submit').click();
+  await settled(() => /Reconciling old1/.test(ui.el('dgm-muse-reconcile-state').textContent), 'reconcile in flight');
+
+  ui.el('dgm-muse-op-key').value = 'other1';
+  ui.el('dgm-muse-inspect').click();
+  inspectGate.resolve(uncertainInspect());
+  await settled(() => /State uncertain/.test(ui.el('dgm-muse-reconcile-state').textContent), 'inspection settle');
+  reconcileGate.resolve(Response.json({
+    opKey: 'old1', state: 'reconciled', unknownOutcome: false, blocking: false,
+    receipt: { opKey: 'old1', mode: 'live', evaluation: 'synthetic-live', providerContact: 'sent', acceptance: 'unknown', billing: 'unknown' }
+  }));
+  await settled(() => /Reconciled old1/.test(ui.el('dgm-muse-reconcile-state').textContent), 'reconcile settle');
+
+  assert.equal(ui.el('dgm-muse-generate').disabled, false, 'reconcile busy state settled');
+  const before = ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length;
+  ui.el('dgm-muse-generate').click();
+  await settled(() => ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length === before + 1, 'next deliberate generation');
+  assert.equal(before, 1, 'no automatic resubmission during the interleaving');
 });
