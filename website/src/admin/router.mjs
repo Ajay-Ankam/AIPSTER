@@ -17,6 +17,10 @@ import { all, first, pageQuery } from '../lib/store.js';
 import { pagination } from '../lib/validate.js';
 import { parseStatusRow, resourceLiveness, STALE_AFTER_MS } from '../lib/status.mjs';
 import { handleDgmPreview } from '../dgm/router.mjs';
+import { readAudit } from './audit-read.mjs';
+import { ADMIN_METRICS, coverageSnapshot } from './coverage.mjs';
+import { readHealth } from './health.mjs';
+import { readSessions, readUsers } from './directory.mjs';
 
 // PRD Section 5 roles. Unknown role values authorize nothing.
 export const ADMIN_ROLES = [
@@ -56,13 +60,9 @@ const ROLE_PERMISSIONS = {
 // requires an explicit acknowledge permission; role assignment is
 // Milestone 4 work, so every acknowledgement fails closed until then.
 
-// PRD Section 10 metric names: the only accepted `metric` values.
-export const ADMIN_METRICS = [
-  'incoming_requests', 'admitted_work', 'queue_depth', 'queue_wait_ms', 'throughput_rps',
-  'throughput_tokens_per_s', 'latency_end_to_end_ms', 'time_to_first_byte_ms',
-  'time_to_first_token_ms', 'token_usage_input', 'token_usage_output', 'error_rate',
-  'retry_rate', 'hardware_utilization', 'usable_capacity', 'cost'
-];
+// Metric allowlist lives in ./coverage.mjs (single source with the VIS07
+// coverage table); re-exported here for the metrics endpoint.
+export { ADMIN_METRICS };
 
 // Fixed aligned windows only; no arbitrary ranges (PRD PRIV05).
 export const ADMIN_WINDOWS = ['15m'];
@@ -311,11 +311,30 @@ export async function handleAdmin(ctx) {
     return send(ctx, out.status, out.body);
   }
   if (path === '/api/admin/v1/access/users' && method === 'GET') {
-    return read(ctx, 'admin.access.read', unavailableList('admin.access.users.v1', 'not_implemented'));
+    // Gate first: the directory projects stored identity rows, so the
+    // caller must already hold a live access grant before any query runs.
+    // The projection is column-allowlisted in ./directory.mjs; tokens,
+    // hashes, credentials, IPs, and user agents are never selected.
+    const gate = await requireAdmin(ctx, 'admin.access.read');
+    if (gate.status) return send(ctx, gate.status, gate.body);
+    const q = pagination(ctx.url);
+    return send(ctx, 200, await readUsers(ctx.db, q));
+  }
+  if (path === '/api/admin/v1/access/sessions' && method === 'GET') {
+    // Same gate as the directory: safe session references only (no token,
+    // IP, or user-agent columns selected), presence honestly unknown.
+    const gate = await requireAdmin(ctx, 'admin.access.read');
+    if (gate.status) return send(ctx, gate.status, gate.body);
+    const q = pagination(ctx.url);
+    return send(ctx, 200, await readSessions(ctx.db, q));
   }
   if (path === '/api/admin/v1/operations/health' && method === 'GET') {
-    return read(ctx, 'admin.operations.read', unavailable('admin.operations.health.v1', 'not_implemented',
-      { control_plane: null, collectors: null, compatibility: null }));
+    // Gate first: health probes read the database, so they run only for a
+    // live operations grant. Checks are read-only and report distinct
+    // disabled / pending / uninstrumented states, never healthy charts.
+    const gate = await requireAdmin(ctx, 'admin.operations.read');
+    if (gate.status) return send(ctx, gate.status, gate.body);
+    return send(ctx, 200, await readHealth(ctx.db, ctx.env));
   }
   if (path === '/api/admin/v1/operations/alerts' && method === 'GET') {
     return read(ctx, 'admin.operations.read', unavailableList('admin.operations.alerts.v1', 'not_implemented'));
@@ -330,10 +349,23 @@ export async function handleAdmin(ctx) {
     return read(ctx, 'admin.engineering.read', unavailableList('admin.engineering.assignments.v1', 'not_implemented'));
   }
   if (path === '/api/admin/v1/audit' && method === 'GET') {
-    return read(ctx, 'admin.audit.read', unavailableList('admin.audit.v1', 'not_implemented'));
+    // Gate first: the audit projection reads stored evidence, so the caller
+    // must already hold a live admin.audit.read grant before any query runs.
+    // (read() takes its body eagerly, so it cannot be used here.) The
+    // projection itself is column-allowlisted in ./audit-read.mjs; actor,
+    // target and detail never leave the database.
+    const gate = await requireAdmin(ctx, 'admin.audit.read');
+    if (gate.status) return send(ctx, gate.status, gate.body);
+    const q = pagination(ctx.url);
+    return send(ctx, 200, await readAudit(ctx.db, q));
   }
   if (path === '/api/admin/v1/coverage' && method === 'GET') {
-    return read(ctx, 'admin.coverage.read', unavailableList('admin.coverage.v1', 'not_implemented'));
+    // Gate first: the coverage table is computed per request, so it cannot
+    // be passed to read() eagerly. The table itself is static truthful
+    // state (no collectors yet); only authorization gates it.
+    const gate = await requireAdmin(ctx, 'admin.coverage.read');
+    if (gate.status) return send(ctx, gate.status, gate.body);
+    return send(ctx, 200, await coverageSnapshot(ctx.db));
   }
   // ---- mutations: authorized shape enforced, then 501, never a state change ----
   {
