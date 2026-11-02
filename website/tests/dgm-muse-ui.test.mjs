@@ -266,10 +266,15 @@ test('muse ui: a superseded status response never overwrites the newer one', asy
 });
 
 test('muse ui: uncertain outcome is inspected and reconciled, never resubmitted', async () => {
+  let attempts = 0;
   const ui = harness({
     '/api/admin/v1/status': grant,
     [`${MUSE}/status`]: () => Response.json(statusBody()),
-    [`${MUSE}/proposals`]: () => Response.json({ error: 'Tenant has unresolved quarantined DGM proposal(s) (old1).', code: 'DGM_MUSE_UNCERTAIN' }, { status: 409 }),
+    [`${MUSE}/proposals`]: () => {
+      attempts += 1;
+      if (attempts === 1) return Response.json(delivered({ opKey: 'ui-first' }));
+      return Response.json({ error: 'Tenant has unresolved quarantined DGM proposal(s) (old1).', code: 'DGM_MUSE_UNCERTAIN' }, { status: 409 });
+    },
     [`${MUSE}/ops/old1`]: () => Response.json({
       opKey: 'old1', state: 'uncertain', unknownOutcome: true, blocking: true,
       receipt: { opKey: 'old1', mode: 'live', evaluation: 'synthetic-live', providerContact: 'sent', acceptance: 'unknown', billing: 'unknown', spendUsdReserved: 0.0001, error: 'DGM_MUSE_UNREACHABLE' }
@@ -282,23 +287,30 @@ test('muse ui: uncertain outcome is inspected and reconciled, never resubmitted'
   ui.el('dgm-muse-load').click();
   await settled(() => /Loaded/.test(ui.el('dgm-muse-state').textContent), 'status');
   ui.el('dgm-muse-prompt').value = 'Synthetic test.';
+  // A prior delivery leaves a result and attach button on screen; entering the
+  // quarantine must invalidate them so nothing from the old op can be attached
+  // or reconciled without inspecting the quarantined key first.
+  ui.el('dgm-muse-generate').click();
+  await settled(() => /Delivered/.test(ui.el('dgm-muse-gen-state').textContent), 'prior delivery');
+  assert.ok(ui.el('dgm-muse-result').innerHTML.includes('Synthetic advisory'));
   ui.el('dgm-muse-generate').click();
   await settled(() => /Quarantined/.test(ui.el('dgm-muse-gen-state').textContent), 'quarantine');
   assert.match(ui.el('dgm-muse-gen-state').textContent, /DGM_MUSE_UNCERTAIN \(HTTP 409\)/);
   assert.equal(ui.el('dgm-muse-generate').disabled, true, 'a quarantined tenant cannot generate again');
   assert.equal(ui.el('dgm-muse-reconcile').hidden, false, 'inspect/reconcile is offered');
-  assert.equal(ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length, 1, 'no automatic resubmit');
+  assert.equal(ui.el('dgm-muse-result').innerHTML, '', 'the previous result is no longer presented as current');
+  assert.equal(ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length, 2, 'exactly the two clicked attempts');
 
+  ui.el('dgm-muse-ack').checked = true;
+  ui.el('dgm-muse-ack').listeners.change();
+  assert.equal(ui.el('dgm-muse-reconcile-submit').disabled, true, 'acknowledgement alone cannot reconcile without inspecting');
   ui.el('dgm-muse-op-key').value = 'old1';
   ui.el('dgm-muse-inspect').click();
   await settled(() => /blocking admission yes/.test(ui.el('dgm-muse-reconcile-state').textContent), 'inspect');
   assert.match(ui.el('dgm-muse-reconcile-state').textContent, /unknown outcome yes/);
   assert.ok(ui.el('dgm-muse-result').innerHTML.includes('uncertain'));
   assert.ok(ui.el('dgm-muse-result').innerHTML.includes('sent'));
-  assert.equal(ui.el('dgm-muse-reconcile-submit').disabled, true, 'reconcile needs explicit acknowledgement');
-  ui.el('dgm-muse-ack').checked = true;
-  ui.el('dgm-muse-ack').listeners.change();
-  assert.equal(ui.el('dgm-muse-reconcile-submit').disabled, false);
+  assert.equal(ui.el('dgm-muse-reconcile-submit').disabled, false, 'inspection plus acknowledgement enables reconcile');
   ui.el('dgm-muse-reconcile-submit').click();
   await settled(() => /Reconciled/.test(ui.el('dgm-muse-reconcile-state').textContent), 'reconcile');
   const post = ui.calls.find((c) => c.path === `${MUSE}/ops/old1/reconcile`);
@@ -306,7 +318,7 @@ test('muse ui: uncertain outcome is inspected and reconciled, never resubmitted'
   assert.equal(post.init.headers['X-Aipster-CSRF'], '1');
   assert.deepEqual(JSON.parse(post.init.body), { acknowledge: true });
   assert.equal(ui.el('dgm-muse-generate').disabled, false, 'an explicit reconciliation releases the panel');
-  assert.equal(ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length, 1, 'still exactly one generation attempt');
+  assert.equal(ui.calls.filter((c) => c.path === `${MUSE}/proposals`).length, 2, 'still exactly the clicked attempts');
 });
 
 test('muse ui: a transport failure keeps the key for inspection and sends nothing else', async () => {

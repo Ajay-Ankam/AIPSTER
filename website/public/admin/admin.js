@@ -948,6 +948,16 @@ function museRenderResult(entry) {
   museSyncControls();
 }
 
+function museClearResult() {
+  // Entering an uncertain state invalidates the on-screen result: it belongs to
+  // a different operation and must not be attachable while reconciliation is
+  // pending. The receipt remains available through Inspect.
+  museCurrent = null;
+  museAttachKey = null;
+  const box = document.getElementById('dgm-muse-result');
+  if (box) box.innerHTML = '';
+}
+
 function museShowReconcile(prefillKey, explanation) {
   const panel = document.getElementById('dgm-muse-reconcile');
   if (panel) panel.hidden = false;
@@ -1007,6 +1017,7 @@ async function generateDgmMuseProposal() {
     }
     if (code === 'DGM_MUSE_UNCERTAIN') {
       museBlocked = true;
+      museClearResult();
       museShowReconcile('', 'Another operation for this tenant is quarantined, so the server admitted nothing. Inspect its operation key and reconcile it explicitly; this panel never resubmits with a new key.');
       museSetState('dgm-muse-gen-state', 'Quarantined: ' + museFailure(code, res.status) + '. No duplicate was sent.');
       return;
@@ -1017,6 +1028,7 @@ async function generateDgmMuseProposal() {
     }
     if (code === 'DGM_MUSE_CANCELLED') {
       museBlocked = true;
+      museClearResult();
       museShowReconcile(opKey, 'The operation was cancelled during admission and carries a durable reservation. Inspect it and reconcile explicitly if its provider outcome is unknown.');
       museSetState('dgm-muse-gen-state', 'Cancelled during admission: ' + museFailure(code, res.status) + '.');
       return;
@@ -1027,6 +1039,7 @@ async function generateDgmMuseProposal() {
     // The request left the page but no response was read: it may or may not
     // have been admitted. Keep the key and inspect; never auto-resend.
     museBlocked = true;
+    museClearResult();
     museShowReconcile(opKey, 'The request ended before a response was read, so the outcome is unknown. Inspect operation ' + opKey + '; nothing is resubmitted automatically.');
     museSetState('dgm-muse-gen-state', 'Outcome unknown: the request may have reached the server. Inspect ' + opKey + '.');
   } finally {
