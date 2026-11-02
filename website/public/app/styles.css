@@ -11,6 +11,8 @@ a.wordmark { display:inline-block; line-height:0; }
 main { max-width:1000px; margin:0 auto; padding:1rem; }
 .card { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin-bottom:1rem; }
 .grid { display:grid; gap:.75rem; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); }
+.grid > * { min-width:0; }
+.card h2 { overflow-wrap:anywhere; }
 .tabs { display:flex; flex-wrap:wrap; gap:.4rem; margin-bottom:1rem; }
 .tabs button { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:.4rem; padding:.5rem .8rem; cursor:pointer; }
 .tabs button[aria-selected="true"] { border-color:var(--accent); color:var(--accent); }
