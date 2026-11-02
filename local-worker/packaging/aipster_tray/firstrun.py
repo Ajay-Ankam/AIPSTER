@@ -112,6 +112,37 @@ def first_run_ready(loaded):
     return classify_runtime_selection(loaded)["status"] == READY
 
 
+MOCK_DEMO_ENV = "AIPSTER_WORKER_MOCK_DEMO"
+
+
+def mock_demo_elected():
+    """Operator-explicit test/demo election for the mock engine.
+
+    Read live from the environment so lab/qualify harnesses elect it per
+    launch. Silent auto-start never elects it: only an explicit =="1"
+    counts, and it only ever applies to a mock-only selection.
+    """
+    return os.environ.get(MOCK_DEMO_ENV) == "1"
+
+
+def explicit_demo_ready(loaded):
+    """True only for an explicitly elected mock-demo selection (never silent)."""
+    return bool(mock_demo_elected()
+                and classify_runtime_selection(loaded)["mock_only"])
+
+
+def runtime_note(loaded):
+    """State detail for a loaded config: '' when ready, test/demo when the
+    mock engine was explicitly elected, else the setup-required line."""
+    result = classify_runtime_selection(loaded)
+    if result["status"] == READY:
+        return ""
+    if result["mock_only"] and mock_demo_elected():
+        return (f"test/demo: mock engine explicitly elected via "
+                f"{MOCK_DEMO_ENV}=1 (not operational)")
+    return f"setup required: {result['reason']}"
+
+
 def bundle_dir():
     """Directory holding the frozen exes (or the source tree in dev)."""
     if getattr(sys, "frozen", False):
