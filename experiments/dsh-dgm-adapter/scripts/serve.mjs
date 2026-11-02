@@ -37,20 +37,21 @@ const TYPES = new Map(Object.entries({
 }));
 
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url || '/', `http://127.0.0.1:${port}`);
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405, { allow: 'GET, HEAD' }).end('method not allowed');
+  let pathname;
+  try {
+    // A request target that is not origin-form (`//`, `///`, `http://[`) makes
+    // the URL constructor throw, and a truncated percent escape makes decoding
+    // throw. Both are malformed requests. This listener is async, so a throw
+    // would surface as an unhandled rejection and could end the demo process
+    // instead of answering, so refuse them here with one 400.
+    pathname = decodeURIComponent(new URL(req.url || '/', `http://127.0.0.1:${port}`).pathname);
+  } catch {
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('bad request');
     return;
   }
 
-  let pathname;
-  try {
-    pathname = decodeURIComponent(url.pathname);
-  } catch {
-    // A truncated or invalid percent escape is a malformed request. Refuse it
-    // here: this listener is async, so a throw would surface as an unhandled
-    // rejection and could end the demo process instead of answering.
-    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('bad request');
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { allow: 'GET, HEAD' }).end('method not allowed');
     return;
   }
   const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
