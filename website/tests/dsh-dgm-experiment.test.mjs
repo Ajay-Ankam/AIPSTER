@@ -15,9 +15,10 @@ import { resolve, relative } from 'node:path';
 import {
   decideAdminAccess,
   ACCESS_STATES,
+  ADMIN_GRANT_SCOPE,
+  ADMIN_ROLES,
   ADMIN_STATUS_ENDPOINT,
-  ADMIN_STATUS_SCHEMA,
-  ADMIN_GRANT_SCOPE
+  ADMIN_STATUS_SCHEMA
 } from '../public/app/experiments/dsh-dgm/admin-gate.mjs';
 import { publicFiles } from '../scripts/check.mjs';
 
@@ -71,6 +72,14 @@ const forbidden = () => ({
   status: 403,
   payload: { error: 'Administration is not authorized for this caller.', code: 'ADMIN_FORBIDDEN' }
 });
+
+// A documented envelope with one field absent, as a transport would deliver
+// it: deleting the key rather than leaving an `undefined` value.
+const without = (key) => {
+  const payload = statusBody();
+  delete payload[key];
+  return { status: 200, payload };
+};
 
 test('the site copies are byte-identical to the reviewed experiment', async () => {
   for (const rel of REVIEWED_COPIES) {
@@ -156,6 +165,11 @@ test('the gate contract matches the admin router route and envelope', async () =
   assert.ok(router.includes("requireAdmin(ctx, 'admin.status')"));
   assert.ok(router.includes(`schema_version: '${ADMIN_STATUS_SCHEMA}'`));
   assert.ok(router.includes(`export const ADMIN_SCOPE = '${ADMIN_GRANT_SCOPE}'`));
+  // The client refuses a role the server would not have issued. The list is
+  // read out of the router source so a role added or removed there fails here.
+  const listed = [...router.match(/export const ADMIN_ROLES = \[([\s\S]*?)\];/)[1].matchAll(/'([^']+)'/g)]
+    .map((match) => match[1]);
+  assert.deepEqual(ADMIN_ROLES, listed);
 });
 
 const CASES = [
@@ -176,7 +190,29 @@ const CASES = [
   ['a 200 array payload', { status: 200, payload: [statusBody()] }, ACCESS_STATES.UNAVAILABLE, false],
   ['a 200 status envelope with no grant', { status: 200, payload: statusBody({ grant: null }) }, ACCESS_STATES.DENIED, false],
   ['a grant with a non-string role', { status: 200, payload: statusBody({ grant: { role: 7, scope: 'platform' } }) }, ACCESS_STATES.DENIED, false],
-  ['a grant with an unrecognized scope', { status: 200, payload: statusBody({ grant: { role: 'operations_observer', scope: 'fabric:one' } }) }, ACCESS_STATES.DENIED, false]
+  ['a grant with an unrecognized scope', { status: 200, payload: statusBody({ grant: { role: 'operations_observer', scope: 'fabric:one' } }) }, ACCESS_STATES.DENIED, false],
+  // The server refuses unknown roles (ADMIN_ROLES has no catch-all), a grant
+  // that lapsed before the response was observed, and a non-canonical or
+  // unparseable expiry. The view gate must refuse them too.
+  ['a grant for an unrecognized role', { status: 200, payload: statusBody({ grant: { role: 'root', scope: 'platform', expires_at: null } }) }, ACCESS_STATES.DENIED, false],
+  ['a grant for a role-shaped unknown value', { status: 200, payload: statusBody({ grant: { role: 'operations_observer ', scope: 'platform', expires_at: null } }) }, ACCESS_STATES.DENIED, false],
+  ['a grant expired before the observation', { status: 200, payload: statusBody({ grant: { role: 'operations_observer', scope: 'platform', expires_at: '2026-11-01T00:00:00.000Z' } }) }, ACCESS_STATES.DENIED, false],
+  ['a grant expiring exactly at the observation', { status: 200, payload: statusBody({ grant: { role: 'operations_observer', scope: 'platform', expires_at: '2026-11-02T07:00:00.000Z' } }) }, ACCESS_STATES.DENIED, false],
+  ['a malformed grant expiry', { status: 200, payload: statusBody({ grant: { role: 'operations_observer', scope: 'platform', expires_at: 'soon' } }) }, ACCESS_STATES.DENIED, false],
+  ['a grant expiry that matches the shape but names no instant', { status: 200, payload: statusBody({ grant: { role: 'operations_observer', scope: 'platform', expires_at: '2026-13-01T00:00:00.000Z' } }) }, ACCESS_STATES.DENIED, false],
+  ['a grant missing its expiry field', { status: 200, payload: statusBody({ grant: { role: 'operations_observer', scope: 'platform' } }) }, ACCESS_STATES.UNAVAILABLE, false],
+  ['a grant with a live expiry', { status: 200, payload: statusBody({ grant: { role: 'operations_observer', scope: 'platform', expires_at: '2026-11-03T00:00:00.000Z' } }) }, ACCESS_STATES.AUTHORIZED, true],
+  // Promise: a malformed 200 refuses. A documented envelope missing a field,
+  // or naming a different admin/elevation/mutation state, is not the route's
+  // answer and leaves the page closed.
+  ['a 200 with the admin state missing', without('admin'), ACCESS_STATES.UNAVAILABLE, false],
+  ['a 200 with the elevation field missing', without('elevation'), ACCESS_STATES.UNAVAILABLE, false],
+  ['a 200 with the mutation state missing', without('mutations'), ACCESS_STATES.UNAVAILABLE, false],
+  ['a 200 with the observation time missing', without('observed_at'), ACCESS_STATES.UNAVAILABLE, false],
+  ['a 200 whose admin state is not the scaffold', { status: 200, payload: statusBody({ admin: 'live' }) }, ACCESS_STATES.UNAVAILABLE, false],
+  ['a 200 whose elevation is implemented', { status: 200, payload: statusBody({ elevation: 'implemented' }) }, ACCESS_STATES.UNAVAILABLE, false],
+  ['a 200 whose mutations are enabled', { status: 200, payload: statusBody({ mutations: 'enabled' }) }, ACCESS_STATES.UNAVAILABLE, false],
+  ['a 200 whose observation time is unparseable', { status: 200, payload: statusBody({ observed_at: 'yesterday' }) }, ACCESS_STATES.UNAVAILABLE, false]
 ];
 
 for (const [name, input, state, load] of CASES) {

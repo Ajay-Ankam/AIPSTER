@@ -24,6 +24,36 @@ export const ADMIN_STATUS_ENDPOINT = '/api/admin/v1/status';
 export const ADMIN_STATUS_SCHEMA = 'admin.status.v1';
 export const ADMIN_GRANT_SCOPE = 'platform';
 
+// PRD Section 5 roles, exactly the set src/admin/router.mjs recognizes. An
+// unknown role authorizes nothing on the server, so it must not reveal the
+// view here either. A test keeps this list equal to the router's.
+export const ADMIN_ROLES = Object.freeze([
+  'operations_observer',
+  'access_administrator',
+  'security_reviewer',
+  'support_triager',
+  'engineering_reviewer',
+  'role_grant_authority'
+]);
+
+// Mirrors the router's grantIsLive: canonical UTC only (YYYY-MM-DDTHH:MM:SS
+// [.sss]Z) naming a real instant, and strictly after the observation time.
+const CANONICAL_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+
+function instantOf(value) {
+  if (typeof value !== 'string' || !CANONICAL_UTC.test(value)) return NaN;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return NaN;
+  const roundTrip = new Date(ms).toISOString();
+  return roundTrip === value || roundTrip === value.replace('Z', '.000Z') ? ms : NaN;
+}
+
+function grantIsLive(expiresAt, observedAt) {
+  if (expiresAt === null) return true;
+  const expires = instantOf(expiresAt);
+  return Number.isFinite(expires) && expires > observedAt;
+}
+
 export const ACCESS_STATES = Object.freeze({
   AUTHORIZED: 'authorized',
   ANONYMOUS: 'anonymous',
@@ -70,10 +100,24 @@ export function decideAdminAccess(input) {
   // other route, or a future shape, leaves the page closed.
   if (payload.schema_version !== ADMIN_STATUS_SCHEMA) return refuse(ACCESS_STATES.UNAVAILABLE);
 
+  // The documented envelope, field for field. A 200 missing any of these, or
+  // naming another admin/elevation/mutation state, is not this route's answer,
+  // so the check did not complete. `observed_at` must be a real instant: it is
+  // the reference for grant expiry.
+  const observedAt = instantOf(payload.observed_at);
+  if (payload.admin !== 'scaffold' || payload.elevation !== 'not_implemented'
+    || payload.mutations !== 'disabled' || !Number.isFinite(observedAt)) {
+    return refuse(ACCESS_STATES.UNAVAILABLE);
+  }
+
   const grant = payload.grant;
   if (!grant || typeof grant !== 'object' || Array.isArray(grant)) return refuse(ACCESS_STATES.DENIED);
-  if (typeof grant.role !== 'string' || grant.role.trim() === '') return refuse(ACCESS_STATES.DENIED);
+  // Only roles the server can hold under `platform`, and only a grant that is
+  // still live at the observation time, may reveal the view.
+  if (typeof grant.role !== 'string' || !ADMIN_ROLES.includes(grant.role)) return refuse(ACCESS_STATES.DENIED);
   if (grant.scope !== ADMIN_GRANT_SCOPE) return refuse(ACCESS_STATES.DENIED);
+  if (!Object.hasOwn(grant, 'expires_at')) return refuse(ACCESS_STATES.UNAVAILABLE);
+  if (!grantIsLive(grant.expires_at, observedAt)) return refuse(ACCESS_STATES.DENIED);
 
   return {
     state: ACCESS_STATES.AUTHORIZED,

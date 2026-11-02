@@ -10,6 +10,7 @@ import {
   projectTicket,
   validateInput
 } from '../src/adapter.mjs';
+import { evaluate } from '../src/evaluate.mjs';
 import { REQUEST_SCHEMA, WORK_ITEM_SCHEMA, AUTHORITY, EVALUATION_KIND } from '../src/contract.mjs';
 import { WORK_ITEMS, findWorkItem } from '../fixtures/work-items.mjs';
 import { digestOf, verifySeal } from '../src/canonical.mjs';
@@ -154,4 +155,27 @@ test('the Muse harness proposal shape maps without importing their module', asyn
 test('fixture schema is the experiment-scoped identifier', () => {
   assert.equal(item.schema, WORK_ITEM_SCHEMA);
   assert.equal(WORK_ITEMS.length, 7);
+});
+
+test('the harness wrapper returns the effective fixture it sealed', async () => {
+  const proposal = {
+    problem: 'A different problem.',
+    change: 'A different change.',
+    verification: 'A different check.'
+  };
+  const built = await fromHarnessProposal(proposal, { workItem: item });
+  assert.equal(built.ok, true);
+  // The request binds a merged fixture, not the object that was passed in.
+  // Callers must evaluate and select with the fixture the seal actually names.
+  assert.equal(built.fixture.proposal.problem, proposal.problem);
+  assert.notEqual(built.fixture, item);
+
+  const againstSupplied = await evaluate(item, built.request);
+  assert.equal(againstSupplied.code, 'DGM_IDENTITY_MISMATCH',
+    'the supplied item does not reproduce the sealed request');
+
+  const verdict = await evaluate(built.fixture, built.request);
+  assert.notEqual(verdict.ok, false);
+  assert.equal(verdict.provenance.fixture_sha256, built.request.snapshot.fixture_sha256);
+  assert.equal(verdict.provenance.fixture_id, item.id);
 });

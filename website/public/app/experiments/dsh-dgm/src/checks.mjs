@@ -184,7 +184,10 @@ export function evaluateCriterion(artifact, criterion) {
   if (!criterion || typeof criterion !== 'object' || typeof criterion.op !== 'string') {
     return { id: String(criterion && criterion.id), statement: '', passed: false, detail: 'malformed criterion', path: '' };
   }
-  const op = OPS[criterion.op];
+  // Own properties only: `OPS[name]` also resolves Object.prototype members.
+  // `constructor` would return the criterion itself, so a criterion carrying
+  // `passed: true` could certify itself; `__proto__` is not even callable.
+  const op = Object.hasOwn(OPS, criterion.op) ? OPS[criterion.op] : undefined;
   if (!op) {
     return {
       id: criterion.id,

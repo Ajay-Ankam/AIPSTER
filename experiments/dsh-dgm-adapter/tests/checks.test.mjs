@@ -113,3 +113,18 @@ test('the op table is stable and exported', () => {
   assert.ok(OPS_SUPPORTED.includes('noSecretMaterial'));
   assert.equal(new Set(OPS_SUPPORTED).size, OPS_SUPPORTED.length);
 });
+
+test('dispatch reaches only operators the module owns', () => {
+  // OPS is a plain object, so `OPS[name]` also resolves Object.prototype
+  // members. `constructor` returns the criterion itself, whose own
+  // `passed: true` would then be read as the result; `__proto__` is not even
+  // callable. Only own properties may dispatch, and everything else refuses.
+  for (const op of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+    const result = evaluateCriterion(artifact, { id: 'X', op, passed: true });
+    assert.equal(result.passed, false, `${op} must not dispatch`);
+    assert.match(result.detail, /unsupported criterion op/);
+  }
+  const run = evaluateCriteria(artifact, [{ id: 'X', op: 'constructor', passed: true }]);
+  assert.equal(run.passed, false);
+  assert.deepEqual(run.failed.map((check) => check.id), ['X']);
+});

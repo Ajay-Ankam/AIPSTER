@@ -43,7 +43,16 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  const pathname = decodeURIComponent(url.pathname);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    // A truncated or invalid percent escape is a malformed request. Refuse it
+    // here: this listener is async, so a throw would surface as an unhandled
+    // rejection and could end the demo process instead of answering.
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('bad request');
+    return;
+  }
   const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const target = normalize(join(root, relative));
 

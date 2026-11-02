@@ -76,8 +76,8 @@ function coherenceFailure(verdict) {
  * request and the same verdict digest from the fixture — which is a statement
  * about reproducibility, not about who wrote the record.
  */
-async function derivationFailure(verdict, fixture) {
-  const rebuilt = await buildRequest(fixture, { subject: verdict.subject });
+async function derivationFailure(verdict, fixture, context) {
+  const rebuilt = await buildRequest(fixture, { subject: verdict.subject, ...context });
   if (isRefusal(rebuilt)) return `the fixture cannot rebuild the request (${rebuilt.code})`;
   if (rebuilt.request.request_sha256 !== verdict.request_sha256) {
     return 'the verdict binds a request this fixture does not produce';
@@ -91,6 +91,35 @@ async function derivationFailure(verdict, fixture) {
 }
 
 /**
+ * Identity context for re-derivation.
+ *
+ * A request seals the `tenantId`/`actorId` the caller supplied, but the
+ * verdict does not carry them back. Selection therefore accepts the same
+ * context the request was built with, keyed by fixture id. Without an entry
+ * the fixture defaults apply, which only reproduces requests built with them.
+ * Unknown keys are refused: selection must not become an authority channel.
+ */
+function contextFor(contexts, fixtureId) {
+  if (contexts === null || contexts === undefined) return { ok: true, context: {} };
+  const entry = contexts instanceof Map ? contexts.get(fixtureId) : contexts[fixtureId];
+  if (entry === undefined) return { ok: true, context: {} };
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return refusal('DGM_BAD_INPUT', `the context for ${JSON.stringify(fixtureId)} must be an object`);
+  }
+  for (const key of Object.keys(entry)) {
+    if (key !== 'tenantId' && key !== 'actorId') {
+      return refusal('DGM_BAD_INPUT', `a request context must not set ${JSON.stringify(key)}`);
+    }
+  }
+  for (const key of ['tenantId', 'actorId']) {
+    if (Object.hasOwn(entry, key) && (typeof entry[key] !== 'string' || entry[key].trim() === '')) {
+      return refusal('DGM_BAD_INPUT', `a request context ${key} must be a non-empty string`);
+    }
+  }
+  return { ok: true, context: { tenantId: entry.tenantId, actorId: entry.actorId } };
+}
+
+/**
  * Select at most one candidate from a bounded set of verdicts.
  *
  * Ordering is deterministic and total: highest candidate score, then lowest
@@ -99,6 +128,7 @@ async function derivationFailure(verdict, fixture) {
  */
 export async function select(verdicts, {
   fixtures = null,
+  contexts = null,
   baselineRevision = 'rev-2026-11-02-a',
   maxCandidates = MAX_CANDIDATES
 } = {}) {
@@ -113,6 +143,10 @@ export async function select(verdicts, {
   }
   if (!Array.isArray(fixtures) || fixtures.length === 0) {
     return refusal('DGM_UNVERIFIED_SELECTION', 'selection requires the fixtures that produced these verdicts');
+  }
+  if (contexts !== null && contexts !== undefined
+    && (typeof contexts !== 'object' || Array.isArray(contexts))) {
+    return refusal('DGM_BAD_INPUT', 'contexts must map fixture ids to the identities their requests were built with');
   }
   const fixtureById = new Map(fixtures.map((fixture) => [fixture && fixture.id, fixture]));
 
@@ -145,7 +179,9 @@ export async function select(verdicts, {
     if (!fixture) {
       return refusal('DGM_VERDICT_UNBOUND', `no fixture named ${verdict.provenance ? verdict.provenance.fixture_id : 'unknown'} was supplied`);
     }
-    const unbound = await derivationFailure(verdict, fixture);
+    const identity = contextFor(contexts, fixture.id);
+    if (!identity.ok) return identity;
+    const unbound = await derivationFailure(verdict, fixture, identity.context);
     if (unbound) {
       return refusal('DGM_VERDICT_UNBOUND', unbound);
     }
