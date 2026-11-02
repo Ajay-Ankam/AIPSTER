@@ -11,14 +11,14 @@
 // - there is no MCP router / placement plane here; request/result edges are
 //   architectural labels only, never live connections.
 // - worker cards carry liveness from GET /api/status (heartbeat freshness,
-//   STALE_AFTER_MS) plus declared compute free-text from inventory cards;
-//   measured CPU/GPU/memory/runtime/resident-model fields are unsupported.
+//   STALE_AFTER_MS); declared compute free-text is joined downstream by the
+//   client renderer from inventory cards, never emitted here. Measured
+//   CPU/GPU/memory/runtime/resident-model fields are unsupported.
 // - throughput is always unavailable: GET /api/usage reports cumulative
 //   requests/tokens/costs only, never tokens/sec. Missing metrics are
 //   unavailable, never zero.
-// - this module emits data only, never markup. The DOM wiring (deferred to
-//   the designated integrator: app.js/index.html/styles.css are a shared
-//   lane) must render every string through the existing esc() helper.
+// - this module emits data only, never markup. Its client mirror in
+//   public/app/app.js renders every string through the existing esc() helper.
 import { STALE_AFTER_MS } from './status.mjs';
 
 const isCount = (v) => Number.isSafeInteger(v) && v >= 0;

@@ -342,6 +342,35 @@ test('FINDING-A: heartbeat lane follows the liveness set in the renderer', async
   assert.equal(laneOf([]), 'none seen');
 });
 
+test('residual: malformed rows drop before the lane and never throw', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const bad = item({ id: 'bad id', name: 'bad' });
+  const solo = render(context, el, statusPayload([bad]), usagePayload());
+  assert.ok(!solo.flow.includes('bad</strong>'), 'malformed-but-online row renders nothing');
+  assert.ok(solo.flow.includes('(none seen)'), 'lane agrees with the module: none');
+  const junk = render(context, el, statusPayload([null, 'junk', 42, item()], { summary: { total: 4, online: 1, stale: 0, offline: 0, unknown: 0 }, total: 4 }), usagePayload());
+  assert.ok(junk.flow.includes('lab</strong>'), 'valid rows still render beside junk');
+  assert.ok(junk.flow.includes('(live)'), 'lane follows the rendered rows');
+});
+
+test('residual: relative ages never accompany a live-currency claim', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const on = item({ id: 'r_on' });
+  const stale = item({ id: 'r_st', liveness: 'stale', lastSeenAt: iso(NOW - 10 * 60 * 1000), lastSeenAgeMs: 10 * 60 * 1000 });
+  const unusable = item({ id: 'r_nu', usable: false });
+  const unknown = item({ id: 'r_un', liveness: 'unknown', lastSeenAt: null, lastSeenAgeMs: null });
+  const { flow } = render(context, el, statusPayload([on, stale, unusable, unknown]), usagePayload());
+  const onlinePills = flow.match(/>online</g) || [];
+  // Both online pills sit on server-fresh rows (the usable=false one carries
+  // an explicit not-usable attention note, never a ready claim).
+  assert.equal(onlinePills.length, 2, 'online pills only on server-fresh rows');
+  assert.ok(flow.includes('>stale<'), 'stale pill present');
+  const seenCopy = flow.match(/heartbeat seen \(reachability only/g) || [];
+  assert.equal(seenCopy.length, 1, 'only the fresh online row carries heartbeat-seen copy');
+  assert.ok(flow.includes('ATTENTION: reachable but NOT usable for inference'), 'unusable attention kept');
+  assert.ok(flow.includes('never'), 'rows without heartbeats show never, not an age');
+});
+
 test('topology stylesheet is responsive, static, and reduced-motion safe', async () => {
   const css = await readFile(APP_CSS, 'utf8');
   assert.ok(css.includes('.topo-nodes'), 'topology grid present');

@@ -203,3 +203,13 @@ test('FINDING-A: heartbeat lane follows the liveness set in the view-model', () 
   assert.equal(laneOf([off]).state, 'none');
   assert.equal(laneOf([]).state, 'none');
 });
+
+test('residual: malformed rows drop before the lane in the view-model', () => {
+  const bad = { id: 'bad id', name: 'bad', kind: 'local', liveness: 'online', lastSeenAt: iso(NOW - 1000), lastSeenAgeMs: 1000, usable: true, demoFixture: false };
+  const out = buildFabricFlow({ status: statusOf([bad]), usage: null, nowMs: NOW });
+  assert.deepEqual(out.nodes, []);
+  assert.equal(out.edges.heartbeat.state, 'none');
+  const mixed = buildFabricFlow({ status: statusOf([bad, null, 42]), usage: null, nowMs: NOW });
+  assert.deepEqual(mixed.nodes, []);
+  assert.equal(mixed.edges.heartbeat.state, 'none');
+});

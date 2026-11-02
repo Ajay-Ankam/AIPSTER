@@ -43,6 +43,7 @@ attention, never ready. Missing metrics are `null` (unknown), never zero.
 Owner-confined reads (`needAuthz('read')`); heartbeat writes are
 heartbeat-scoped-key-only and bound to one resource; demo telemetry stays
 fixture-labeled; no grants, credentials, dispatch, or control APIs are added.
-The DOM wiring (`app.js` / `index.html` / `styles.css`, shared with the W2
-lane) is deferred to the designated integrator. The view-model module emits
-data only; the wiring must render every string through `esc()`.
+The DOM wiring lives in the three integrator-owned shared files recorded in
+docs/fabric-dashboard-integrator-claim.md (sole-writer designation; W2's
+branch preserved untouched). The view-model module emits data only; the
+wiring renders every string through `esc()`.

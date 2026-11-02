@@ -138,6 +138,7 @@ function renderStatus(el, data) {
 const FABRIC_LIVENESS = ['online', 'stale', 'offline', 'unknown'];
 const FABRIC_KINDS = ['local', 'cluster', 'provider'];
 function flowRowLiveness(r) {
+  if (!r || typeof r !== 'object') return null;
   if (!FABRIC_LIVENESS.includes(r.liveness)) return null;
   const seen = (r.liveness === 'online' || r.liveness === 'stale') && typeof r.lastSeenAt === 'string';
   return seen ? r.liveness : (r.liveness === 'offline' ? 'offline' : 'unknown');
@@ -165,10 +166,12 @@ function fabricFlowNode(r, inv) {
   // without a string heartbeat timestamp drops to unknown.
   const disp = flowRowLiveness(r);
   if (!disp) return null;
-  const seen = disp === 'online' || disp === 'stale';
   const pill = disp === 'online' ? 'ok' : disp === 'offline' ? 'bad' : disp === 'stale' ? 'warn' : '';
   const age = r.lastSeenAgeMs === null || r.lastSeenAgeMs === undefined ? 'never' : formatAge(r.lastSeenAgeMs);
-  const hb = !seen
+  // Strip parity (renderStatus): only a fresh online row carries heartbeat-seen
+  // copy; stale rows read not currently reachable, so a relative age never
+  // accompanies a live-currency claim except the server's own fresh verdict.
+  const hb = disp !== 'online'
     ? ' · not currently reachable'
     : r.usable === false
       ? ' · ATTENTION: reachable but NOT usable for inference'
@@ -207,7 +210,15 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   }
   const nodes = [];
   const lookup = invMap && typeof invMap.get === 'function' ? invMap : null;
-  for (const raw of rows) { const n = fabricFlowNode(raw, lookup ? lookup.get(raw.id) : null); if (n) nodes.push(n); }
+  // Lane-input parity with the view-model: the heartbeat lane sees exactly
+  // the rows that render (the module drops malformed rows before its lane),
+  // and non-object rows are skipped, never dereferenced.
+  const laneRows = [];
+  for (const raw of rows) {
+    const key = raw && typeof raw === 'object' ? raw.id : undefined;
+    const n = fabricFlowNode(raw, lookup ? lookup.get(key) : null);
+    if (n) { nodes.push(n); laneRows.push(raw); }
+  }
   // Counts prefer the server aggregate over all owned rows; otherwise derive
   // from the listed page. Totals that are absent stay unknown, never zero.
   const s = statusData.summary;
@@ -222,7 +233,7 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   const total = Number.isSafeInteger(statusData.total) && statusData.total >= 0 ? statusData.total : nodes.length;
   // Absent-vs-zero: a missing shared count renders unknown, never zero.
   const shared = Number.isSafeInteger(statusData.sharedWithMe) && statusData.sharedWithMe >= 0 ? statusData.sharedWithMe : 'unknown';
-  const lane = flowHeartbeatLane(rows);
+  const lane = flowHeartbeatLane(laneRows);
   const laneWord = lane === 'live' ? 'live' : lane === 'stale' ? 'stale only' : lane === 'unknown' ? 'unknown only' : 'none seen';
   const list = nodes.length
     ? `<ul class="topo-nodes">${nodes.join('')}</ul>`
