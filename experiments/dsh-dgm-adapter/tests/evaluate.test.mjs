@@ -139,6 +139,9 @@ test('event sequence is ordered and terminal', async () => {
   assert.equal(verdict.events.at(-1).event, `evaluation.${verdict.status}`);
 });
 
-test('evaluate rejects missing arguments loudly', async () => {
-  await assert.rejects(() => evaluate(null, null), /requires both arguments/);
+test('evaluate refuses missing arguments instead of throwing', async () => {
+  const result = await evaluate(null, null);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'DGM_BAD_INPUT');
+  assert.equal((await evaluate(findWorkItem('sm-106'), null)).code, 'DGM_BAD_INPUT');
 });

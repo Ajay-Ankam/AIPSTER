@@ -33,7 +33,7 @@
       </ul>
       <dl class="meta">
         <div><dt>Adapter</dt><dd id="meta-module">aipster.dsh-dgm.adapter</dd></div>
-        <div><dt>Version</dt><dd id="meta-version">1.0.0</dd></div>
+        <div><dt>Version</dt><dd id="meta-version">1.1.0</dd></div>
         <div><dt>Upstream base</dt><dd><code>6337fc8</code></dd></div>
         <div><dt>Authority</dt><dd>shadow_only</dd></div>
       </dl>
@@ -80,15 +80,20 @@
 
     <section class="results" id="results" hidden>
       <section class="panel" aria-labelledby="metrics-title">
-        <h2 id="metrics-title" class="panel__title">Policy comparison</h2>
+        <h2 id="metrics-title" class="panel__title">Gate comparison</h2>
         <p class="panel__note" id="metrics-note"></p>
+        <p class="panel__note">
+          The reference column is a <strong>synthetic no-gate policy</strong>, not upstream's behaviour:
+          upstream reviews the resulting pull request by hand, and that human review is excluded here.
+          No model ran, so nothing below measures dsh-superagent, DeepSeek Harness or model quality.
+        </p>
         <div class="table-wrap">
           <table class="table">
-            <caption class="visually-hidden">Baseline parse-only policy compared with the DGM gate policy</caption>
+            <caption class="visually-hidden">Synthetic no-gate reference policy compared with the DGM gate policy</caption>
             <thead>
               <tr>
                 <th scope="col">Metric</th>
-                <th scope="col">Upstream parse-only</th>
+                <th scope="col">Synthetic no-gate reference</th>
                 <th scope="col">DGM gate</th>
               </tr>
             </thead>
@@ -135,6 +140,8 @@
         <li>Fixtures are authored and small: seven work items, fourteen artifacts, eight predicates.</li>
         <li>Pass rates are fixture-relative. A different contract would produce different numbers.</li>
         <li>Fewer work units is not an improvement; it is a smaller predicate set.</li>
+        <li>The comparison column excludes upstream's human pull-request review, so it is a no-gate reference point, never an upstream or model measurement.</li>
+        <li>Seals are unkeyed SHA-256: they prove a record was not altered, not who produced it. Selection re-derives a verdict from its fixture instead of trusting its seal.</li>
         <li>The adapter reads no repository, token, webhook, account or live ticket.</li>
         <li>Nothing here is production-ready, and nothing here is connected to a running system.</li>
       </ul>
@@ -143,7 +150,7 @@
 
   <footer class="footer">
     <div class="wrap footer__inner">
-      <p>AIPSTER · experimental adapter · <span id="footer-version">v1.0.0</span></p>
+      <p>AIPSTER · experimental adapter · <span id="footer-version">v1.1.0</span></p>
       <p class="footer__note">Synthetic fixtures only. Shadow authority. Nothing is applied.</p>
     </div>
   </footer>

@@ -6,9 +6,89 @@
 // to a repository, a configuration store or an upstream ticket.
 
 import { digestOf, idFromDigest, seal, verifySeal } from './canonical.mjs';
-import { AUTHORITY, SELECTED, SELECTION_SCHEMA, refusal } from './contract.mjs';
+import { buildRequest } from './adapter.mjs';
+import { evaluate } from './evaluate.mjs';
+import {
+  AUTHORITY,
+  GATES,
+  RECEIPT_SCHEMA,
+  SELECTED,
+  SELECTION_SCHEMA,
+  isRefusal,
+  refusal
+} from './contract.mjs';
 
 export const MAX_CANDIDATES = 8;
+
+/**
+ * Internal coherence: a verdict must agree with its own receipt and gates.
+ *
+ * This is what stops a fabricated verdict whose seal is valid — the seals are
+ * unkeyed, so "it verifies" means "nobody mistyped it", not "somebody vouched
+ * for it". A relabelled `rejected` verdict still carries a receipt that says
+ * `rejected`, gates that failed, and a repair count that does not match.
+ */
+function coherenceFailure(verdict) {
+  const receipt = verdict.receipt;
+  if (receipt.schema !== RECEIPT_SCHEMA) return 'the receipt schema is not recognised';
+  if (receipt.status !== verdict.status) return 'the receipt status does not match the verdict status';
+  if (receipt.code !== verdict.code) return 'the receipt code does not match the verdict code';
+  if (receipt.request_sha256 !== verdict.request_sha256) return 'the receipt binds a different request';
+  if (receipt.run_id !== verdict.run_id) return 'the receipt names a different run';
+  if (receipt.subject !== verdict.subject) return 'the receipt names a different subject';
+  if (receipt.applied !== false) return 'the receipt claims application';
+  if (!verdict.provenance || receipt.subject_sha256 !== verdict.provenance.subject_sha256) {
+    return 'the receipt subject digest does not match the provenance';
+  }
+  if (receipt.reference_sha256 !== verdict.provenance.reference_sha256) {
+    return 'the receipt reference digest does not match the provenance';
+  }
+  if (receipt.subject_ppm !== verdict.scores.subject_ppm) return 'the receipt score does not match the verdict score';
+  if (receipt.reference_ppm !== verdict.scores.reference_ppm) return 'the receipt reference score does not match';
+  if (receipt.work_units !== verdict.work_units) return 'the receipt work units do not match the verdict';
+  if (receipt.repair_items !== verdict.repair_brief.length) return 'the receipt repair count does not match the repair brief';
+
+  if (!Array.isArray(verdict.gates) || verdict.gates.length !== GATES.length) return 'the verdict does not report every gate';
+  if (!verdict.gates.every((entry, index) => entry.name === GATES[index] && typeof entry.passed === 'boolean')) {
+    return 'the gate list is not the contract gate list';
+  }
+  const allPassed = verdict.gates.every((entry) => entry.passed);
+  if (allPassed !== (verdict.status === SELECTED)) return 'the gate results do not explain the verdict status';
+  if (verdict.status === SELECTED) {
+    if (verdict.repair_brief.length !== 0) return 'a selected verdict carries repair items';
+    if (verdict.checks.subject.length > 0 && verdict.scores.subject_ppm !== 1_000_000) {
+      return 'a selected verdict does not pass every subject check';
+    }
+  }
+
+  const predicates = verdict.checks.subject.length + verdict.checks.reference.length;
+  if (predicates === 0 ? verdict.work_units !== 0 : verdict.work_units < predicates) {
+    return 'the work units cannot account for the checks that were run';
+  }
+  return null;
+}
+
+/**
+ * Re-derive a verdict from its fixture.
+ *
+ * Selection without this would trust a record's own claim about itself. With
+ * it, a verdict can only be selected if the adapter can rebuild the same
+ * request and the same verdict digest from the fixture — which is a statement
+ * about reproducibility, not about who wrote the record.
+ */
+async function derivationFailure(verdict, fixture) {
+  const rebuilt = await buildRequest(fixture, { subject: verdict.subject });
+  if (isRefusal(rebuilt)) return `the fixture cannot rebuild the request (${rebuilt.code})`;
+  if (rebuilt.request.request_sha256 !== verdict.request_sha256) {
+    return 'the verdict binds a request this fixture does not produce';
+  }
+  const replayed = await evaluate(fixture, rebuilt.request);
+  if (isRefusal(replayed)) return `the replay refused with ${replayed.code}`;
+  if (replayed.verdict_sha256 !== verdict.verdict_sha256) {
+    return 'the verdict does not reproduce from its fixture';
+  }
+  return null;
+}
 
 /**
  * Select at most one candidate from a bounded set of verdicts.
@@ -18,6 +98,7 @@ export const MAX_CANDIDATES = 8;
  * that two equal-scoring candidates cannot produce an order-dependent result.
  */
 export async function select(verdicts, {
+  fixtures = null,
   baselineRevision = 'rev-2026-11-02-a',
   maxCandidates = MAX_CANDIDATES
 } = {}) {
@@ -30,8 +111,15 @@ export async function select(verdicts, {
   if (verdicts.length > maxCandidates) {
     return refusal('DGM_SELECTION_UNBOUNDED', `${verdicts.length} candidates exceed the bound of ${maxCandidates}`);
   }
+  if (!Array.isArray(fixtures) || fixtures.length === 0) {
+    return refusal('DGM_UNVERIFIED_SELECTION', 'selection requires the fixtures that produced these verdicts');
+  }
+  const fixtureById = new Map(fixtures.map((fixture) => [fixture && fixture.id, fixture]));
 
   for (const verdict of verdicts) {
+    if (!verdict || typeof verdict !== 'object' || Array.isArray(verdict)) {
+      return refusal('DGM_VERDICT_TAMPERED', 'a verdict is not an object');
+    }
     const checked = await verifySeal(verdict, 'verdict_sha256');
     if (!checked.ok) {
       return refusal('DGM_VERDICT_TAMPERED', `a verdict digest ${checked.reason}`);
@@ -45,6 +133,21 @@ export async function select(verdicts, {
     const receipt = await verifySeal(verdict.receipt, 'receipt_sha256');
     if (!receipt.ok) {
       return refusal('DGM_RECEIPT_TAMPERED', `a receipt digest ${receipt.reason}`);
+    }
+    if (verdict.receipt.status !== verdict.status) {
+      return refusal('DGM_RECEIPT_STATUS_MISMATCH', `a receipt says ${verdict.receipt.status} while its verdict says ${verdict.status}`);
+    }
+    const incoherent = coherenceFailure(verdict);
+    if (incoherent) {
+      return refusal('DGM_VERDICT_INCOHERENT', incoherent);
+    }
+    const fixture = verdict.provenance ? fixtureById.get(verdict.provenance.fixture_id) : null;
+    if (!fixture) {
+      return refusal('DGM_VERDICT_UNBOUND', `no fixture named ${verdict.provenance ? verdict.provenance.fixture_id : 'unknown'} was supplied`);
+    }
+    const unbound = await derivationFailure(verdict, fixture);
+    if (unbound) {
+      return refusal('DGM_VERDICT_UNBOUND', unbound);
     }
   }
 
@@ -75,6 +178,11 @@ export async function select(verdicts, {
     authority: AUTHORITY,
     applied: false,
     bound: { candidates: verdicts.length, max_candidates: maxCandidates, within_bound: true },
+    verification: {
+      derivation: 'every verdict was rebuilt from its fixture and reproduced its digest',
+      verified: verdicts.length,
+      seals: 'unkeyed SHA-256: integrity and determinism only, not authentication'
+    },
     considered: verdicts.map((verdict) => ({
       run_id: verdict.run_id,
       verdict_sha256: verdict.verdict_sha256,
@@ -133,8 +241,17 @@ export async function verifySelection(selection) {
  * adapter never restores revisions, it only names the restoration.
  */
 export function requestRollback(selection, { reason = 'operator request' } = {}) {
-  if (!selection || selection.applied !== false) {
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection) || selection.applied !== false) {
     return refusal('DGM_BAD_SELECTION', 'a verified, unapplied selection is required');
+  }
+  const plan = selection.rollback;
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)
+    || typeof plan.action !== 'string'
+    || typeof plan.revision !== 'string'
+    || typeof plan.from !== 'string'
+    || typeof plan.to !== 'string'
+    || plan.applied !== false) {
+    return refusal('DGM_BAD_SELECTION', 'the selection carries no unapplied rollback plan');
   }
   return {
     ok: true,

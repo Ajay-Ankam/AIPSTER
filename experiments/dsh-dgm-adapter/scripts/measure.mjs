@@ -39,14 +39,15 @@ if (asJson) {
   const outFile = join(outDir, 'measurement.json');
   await writeFile(outFile, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 
-  const parse = report.metrics['upstream-parse-only'];
+  const parse = report.metrics['synthetic-no-gate'];
   const gate = report.metrics['dgm-gate'];
   const pct = (value) => (value === null ? 'n/a' : `${(value / 10_000).toFixed(1)}%`);
 
   console.log('DSH x DGM fixture sweep (synthetic fixtures, no model)');
   console.log(`  fixtures ${report.fixtures}  artifacts ${report.artifacts}  predicates/artifact ${report.rows[0]?.gate_policy?.subject_predicates ?? 'n/a'}`);
+  console.log('  reference column: synthetic NO-GATE policy (parse-only); upstream human PR review EXCLUDED.');
   console.log('');
-  console.log('  metric                     upstream-parse-only      dgm-gate');
+  console.log('  metric                     synthetic-no-gate        dgm-gate');
   console.log(`  defect admission           ${pct(parse.defect_admission_ppm).padEnd(22)}  ${pct(gate.defect_admission_ppm)}`);
   console.log(`  false rejection            ${pct(parse.false_rejection_ppm).padEnd(22)}  ${pct(gate.false_rejection_ppm)}`);
   console.log(`  criteria coverage          ${pct(parse.criteria_coverage_ppm).padEnd(22)}  ${pct(gate.criteria_coverage_ppm)}`);
@@ -65,4 +66,5 @@ if (asJson) {
   console.log(`  written                    ${outFile}`);
   console.log('');
   console.log('  Fixture-relative. No model ran. Fewer steps is not improvement.');
+  console.log('  Not a measurement of dsh-superagent, DeepSeek Harness or any model.');
 }

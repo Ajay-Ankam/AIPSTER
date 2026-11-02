@@ -47,7 +47,7 @@ test('a selected verdict still cannot be applied through any exported call', asy
   const verdict = await evaluate(WORK_ITEMS[0], built.request);
   assert.equal(verdict.status, 'selected');
 
-  const selection = await select([verdict]);
+  const selection = await select([verdict], { fixtures: WORK_ITEMS });
   assert.equal(selection.ok, true);
   assert.equal(selection.selection.applied, false);
   assert.equal(selection.selection.rollback.applied, false);
@@ -57,7 +57,14 @@ test('a selected verdict still cannot be applied through any exported call', asy
   assert.equal(verdict.applied, false);
 });
 
-test('the adapter source has no network, storage, process or clock side effects', async () => {
+// SPELLING GUARD ONLY. This scans source text for eight literal spellings. It
+// does not constrain capability: `globalThis['fetch'](...)`, `new Date()`,
+// `crypto.getRandomValues(...)`, `await import('node:fs')`, `(0, eval)(...)`,
+// `new Function(...)` and `document.write(...)` all pass it, as the independent
+// review of eeda53f demonstrated. The capability claim is tested at runtime, in
+// `no-effect.test.mjs`, by denying the globals in a child process and running
+// the whole sweep. Do not cite this test as containment.
+test('the adapter source spells no obvious network, storage, process or clock call', async () => {
   const files = await readdir(join(root, 'src'));
   const forbidden = [
     /\bfetch\s*\(/,

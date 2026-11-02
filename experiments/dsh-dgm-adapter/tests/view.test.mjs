@@ -6,6 +6,8 @@ import { evaluate } from '../src/evaluate.mjs';
 import { runMeasurement } from '../src/measure.mjs';
 import { findWorkItem } from '../fixtures/work-items.mjs';
 import {
+  BASELINE_CAVEAT,
+  BASELINE_LABEL,
   checkRows,
   fixtureRows,
   formatPpm,
@@ -40,6 +42,9 @@ test('metrics and fixture rows mirror the report', async () => {
   assert.equal(rows[0].label, 'Defect admission');
   assert.equal(rows[0].baseline, '100.0%');
   assert.equal(rows[0].gate, '0.0%');
+  assert.match(rows[0].hint, /parse-only/i, 'the baseline hint must name the policy');
+  assert.equal(BASELINE_LABEL, 'Synthetic no-gate reference');
+  assert.match(BASELINE_CAVEAT, /human pull-request review is excluded/i);
 
   const fixtures = fixtureRows(report);
   assert.equal(fixtures.length, 7);

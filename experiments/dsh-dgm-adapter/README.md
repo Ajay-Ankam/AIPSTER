@@ -10,6 +10,10 @@ This directory is the whole experiment. It has no dependencies, no build step,
 no network calls and no connection to AIPSTER's worker, admin surface, DGM
 preview route or to DeepSeek Harness.
 
+Module `aipster.dsh-dgm.adapter` v1.1.0. Every refusal is a typed
+`{ok: false, code, detail}` drawn from `REFUSAL_CODES` in `src/contract.mjs`;
+no exported call throws on malformed input.
+
 ## What this is not
 
 - Not production code, and not wired into anything.
@@ -38,7 +42,7 @@ assumes GDM = DGM. See the evidence `ARCHITECTURE-FIT.md`.
 Node 20 or newer. No install step.
 
 ```bash
-node --test "tests/*.test.mjs"     # 59 deterministic tests
+node --test "tests/*.test.mjs"     # 72 deterministic tests
 node scripts/measure.mjs           # sweep -> artifacts/measurement.json
 node scripts/measure.mjs --json    # print the report
 node scripts/serve.mjs             # http://127.0.0.1:8099/?experiment=on
@@ -73,36 +77,48 @@ tests/*.test.mjs           deterministic test suite
 1. `buildRequest(workItem, { subject })` projects the ticket, checks eligibility
    (ended ticket, missing/weak mandate, blocked/failed/not-ready report) and
    seals a request binding the fixture, both artifacts and the criteria by
-   SHA-256. A refusal is returned instead of a request when the input cannot
-   support an evaluation.
-2. `evaluate(workItem, request)` verifies the request seal, recomputes every
-   identity, and refuses with `DGM_IDENTITY_MISMATCH` if the artifact changed
-   after sealing. It then runs every acceptance predicate on the subject and the
-   reference artifact.
+   SHA-256. The constraint thresholds are derived from the fixture's own budget
+   (`fixtureConstraints`), never from the caller. A refusal is returned instead
+   of a request when the input cannot support an evaluation.
+2. `evaluate(workItem, request)` validates the request shape and verifies its
+   seal, recomputes every identity, and refuses with `DGM_IDENTITY_MISMATCH` if
+   the artifact changed after sealing. It also compares the request's constraint
+   copy against the fixture budget and refuses with `DGM_CONSTRAINTS_UNBOUND` if
+   they disagree — a re-sealed looser request is refused, not evaluated. It then
+   runs every acceptance predicate on the subject and the reference artifact.
+   Malformed input returns a typed refusal; `evaluate` never throws.
 3. Six gates decide: `target_bound`, `mandate_valid`, `artifact_well_formed`,
    `criteria_met`, `envelope_fits`, `archive_settled`. Status is one of
    `selected`, `rejected`, `unavailable`, `failed` — each with a code and a
    plain-language detail.
 4. A sealed receipt is produced and verified; `archive_settled` reflects that
    verification. The verdict is then sealed (`verdict_sha256`).
-5. `select(verdicts)` ranks passing verdicts deterministically, refuses an
-   unbounded or tampered set, and attaches a rollback plan naming the revision
-   it would restore. `requestRollback` produces a request with `executed: false`.
+5. `select(verdicts, { fixtures })` ranks passing verdicts deterministically and
+   refuses an unbounded or tampered set. Before ranking it checks each verdict
+   against its own receipt (`DGM_RECEIPT_STATUS_MISMATCH`, `DGM_VERDICT_INCOHERENT`)
+   and rebuilds it from the named fixture, refusing with `DGM_VERDICT_UNBOUND` if
+   the digest does not reproduce. It attaches a rollback plan naming the revision
+   it would restore; `requestRollback` produces a request with `executed: false`.
 
-Every record carries `applied: false`, `authority: "shadow_only"` and the eight
-honesty limitations.
+Every record carries `applied: false`, `authority: "shadow_only"` and the ten
+honesty limitations. Seals are unkeyed SHA-256 over canonical JSON: they prove
+integrity and determinism, not authorship or permission — anyone who can run
+this code can re-seal a changed record. That is why selection re-derives verdicts
+from the fixtures instead of trusting a seal.
 
 ## Measurement
 
 Two policies over the same 14 artifacts (seven fixtures × baseline and repaired
 candidate):
 
-- **upstream-parse-only** — the status quo: an artifact that parses is admissible.
+- **Synthetic no-gate reference** — a parse-only policy: an artifact that parses
+  passes, and an upstream **human pull-request review is excluded** from this
+  comparison. It is a lower bound, not the real upstream process.
 - **dgm-gate** — every predicate, identity check, envelope and receipt.
 
 Current sweep (regenerate with `node scripts/measure.mjs`):
 
-| Metric | parse-only | DGM gate |
+| Metric | synthetic no-gate reference | DGM gate |
 |---|---|---|
 | Defect admission | 100.0% | 0.0% |
 | False rejection | 0.0% | 0.0% |
@@ -113,18 +129,27 @@ Current sweep (regenerate with `node scripts/measure.mjs`):
 The gate's failed-check identifiers match the authored labels exactly on 6/6
 defective artifacts, leave 8/8 clean artifacts untouched, and every verdict
 replays to the same digest. Latency is reported but **excluded from the report
-digest**.
+digest**. The report digest for the current inputs is recorded in
+`artifacts/measurement.json` and in the evidence directory.
+
+No model ran. Nothing here measures `dsh-superagent`, DeepSeek Harness or any
+model, and no number here should be read as an improvement claim.
 
 Limitations, stated on every verdict and in the UI: seven authored fixtures,
 eight predicates, no model, policy comparison only, a lower work-unit count is
-not improvement, and no number here generalises beyond these fixtures.
+not improvement, the no-gate reference omits human review, seals are not
+authentication, and no number here generalises beyond these fixtures.
 
 ## Safety posture
 
 - Owned entirely by this directory. No shared module, route, flag, migration,
   permission, worker or admin file is touched.
-- No network, storage, filesystem write, clock or randomness in `src/` (a test
-  asserts this).
+- The delivered code path is exercised in a child process whose network,
+  storage, notification, clock and randomness globals are denied before import;
+  the probe reports no denied capability was reached and no file changed. A
+  source-spelling scan also runs, but it is a **spelling guard only**: it does
+  not constrain capability (`globalThis['fetch'](...)`, `new Date(...)`,
+  `await import('node:fs')` all pass it), and it is not cited as containment.
 - No live GitHub, webhook, org, account, credential or model access. Fixture text
   is untrusted display data and is rendered as text.
 - Secret-shaped material is detected and never echoed; e.g. the token-shaped

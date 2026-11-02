@@ -18,10 +18,12 @@ async function candidateVerdicts() {
   return verdicts;
 }
 
+const FIXTURES = WORK_ITEMS;
+
 test('selection is bounded, sealed, unapplied and stable across runs', async () => {
   const verdicts = await candidateVerdicts();
-  const first = await select(verdicts);
-  const second = await select(verdicts);
+  const first = await select(verdicts, { fixtures: FIXTURES });
+  const second = await select(verdicts, { fixtures: FIXTURES });
 
   assert.equal(first.ok, true);
   const selection = first.selection;
@@ -42,7 +44,7 @@ test('selection is bounded, sealed, unapplied and stable across runs', async () 
 
 test('the rollback plan names a revision and is never executed', async () => {
   const verdicts = await candidateVerdicts();
-  const { selection } = await select(verdicts, { baselineRevision: 'rev-test-1' });
+  const { selection } = await select(verdicts, { fixtures: FIXTURES, baselineRevision: 'rev-test-1' });
   assert.equal(selection.rollback.action, 'restore-previous-revision');
   assert.equal(selection.rollback.revision, 'rev-test-1');
   assert.equal(selection.rollback.applied, false);
@@ -63,7 +65,7 @@ test('a rejected-only set selects nothing but still records the outcome', async 
     const built = await buildRequest(workItem, { subject: 'baseline' });
     baselineVerdicts.push(await evaluate(workItem, built.request));
   }
-  const { selection } = await select(baselineVerdicts);
+  const { selection } = await select(baselineVerdicts, { fixtures: FIXTURES });
   assert.equal(selection.selected, null);
   assert.equal(selection.rejected.length, baselineVerdicts.length);
   assert.match(selection.note, /nothing was applied/);
@@ -75,22 +77,22 @@ test('selection refuses an empty, oversized or tampered input', async () => {
   assert.equal((await select('nope')).code, 'DGM_BAD_INPUT');
 
   const verdicts = await candidateVerdicts();
-  const oversized = await select(verdicts, { maxCandidates: 2 });
+  const oversized = await select(verdicts, { fixtures: FIXTURES, maxCandidates: 2 });
   assert.equal(oversized.code, 'DGM_SELECTION_UNBOUNDED');
 
   const tampered = { ...verdicts[0], work_units: 999 };
-  assert.equal((await select([tampered])).code, 'DGM_VERDICT_TAMPERED');
+  assert.equal((await select([tampered], { fixtures: FIXTURES })).code, 'DGM_VERDICT_TAMPERED');
 
   // Correctly re-sealed but claiming authority it must never have.
   const elevated = await seal({ ...verdicts[0], applied: true }, 'verdict_sha256');
-  assert.equal((await select([elevated])).code, 'DGM_AUTHORITY_VIOLATION');
+  assert.equal((await select([elevated], { fixtures: FIXTURES })).code, 'DGM_AUTHORITY_VIOLATION');
 
   // Correctly re-sealed, but its archive receipt no longer verifies.
   const badReceipt = await seal({
     ...verdicts[0],
     receipt: { ...verdicts[0].receipt, receipt_sha256: 'f'.repeat(64) }
   }, 'verdict_sha256');
-  assert.equal((await select([badReceipt])).code, 'DGM_RECEIPT_TAMPERED');
+  assert.equal((await select([badReceipt], { fixtures: FIXTURES })).code, 'DGM_RECEIPT_TAMPERED');
 });
 
 test('a verdict without a receipt cannot be selected', async () => {
@@ -101,14 +103,14 @@ test('a verdict without a receipt cannot be selected', async () => {
 
   // The refusal is honestly unsealed-free but also receipt-free, so selection
   // must reject it on the receipt rule rather than silently ranking it.
-  const refused = await select([refusedVerdict, ...verdicts]);
+  const refused = await select([refusedVerdict, ...verdicts], { fixtures: FIXTURES });
   assert.equal(refused.ok, false);
   assert.equal(refused.code, 'DGM_NO_RECEIPT');
 });
 
 test('verifySelection detects tampering and elevation', async () => {
   const verdicts = await candidateVerdicts();
-  const { selection } = await select(verdicts);
+  const { selection } = await select(verdicts, { fixtures: FIXTURES });
 
   assert.equal((await verifySelection(selection)).ok, true);
   assert.equal((await verifySelection({ ...selection, applied: true })).ok, false);

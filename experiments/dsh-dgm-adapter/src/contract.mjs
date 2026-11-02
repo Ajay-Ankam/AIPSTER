@@ -17,7 +17,9 @@ export const RECEIPT_SCHEMA = 'aipster.dsh-dgm.receipt/v1';
 export const WORK_ITEM_SCHEMA = 'aipster.dsh-dgm.work-item/v1';
 
 export const MODULE_ID = 'aipster.dsh-dgm.adapter';
-export const MODULE_VERSION = '1.0.0';
+// 1.1.0 adds fixture-bound constraints, derivation-checked selection and
+// fail-closed request validation. Records sealed by 1.0.0 do not verify here.
+export const MODULE_VERSION = '1.1.0';
 
 // The only way this experiment is turned on. Client-side, default off, and
 // never read from a URL or a request body by anything outside this demo.
@@ -45,6 +47,44 @@ export const GATES = [
   'envelope_fits',
   'archive_settled'
 ];
+
+// Every refusal the adapter can return. A refusal is `{ok:false, code, detail}`
+// — never a verdict, never a score, never a receipt. Exported so tests can
+// assert that no code path invents a new, unlisted failure mode.
+export const REFUSAL_CODES = Object.freeze([
+  'DGM_BAD_INPUT',
+  'DGM_REQUEST_MALFORMED',
+  'DGM_REQUEST_TAMPERED',
+  'DGM_UNKNOWN_FIXTURE',
+  'DGM_NO_FIXTURE',
+  'DGM_NO_CRITERIA',
+  'DGM_OVERRIDE',
+  'DGM_NO_TICKET',
+  'DGM_TICKET_ENDED',
+  'DGM_NO_MANDATE',
+  'DGM_MANDATE_WEAK',
+  'DGM_BAD_MANDATE',
+  'DGM_REPORT_NOT_REVIEWABLE',
+  'DGM_NOT_READY',
+  'DGM_BAD_FIXTURE',
+  'DGM_BAD_FIXTURE_BUDGET',
+  'DGM_CONSTRAINTS_UNBOUND',
+  'DGM_IDENTITY_MISMATCH',
+  'DGM_BAD_ARTIFACT',
+  'DGM_ENVELOPE_EXCEEDED',
+  'DGM_CRITERIA_FAILED',
+  'DGM_NO_CANDIDATES',
+  'DGM_SELECTION_UNBOUNDED',
+  'DGM_VERDICT_TAMPERED',
+  'DGM_AUTHORITY_VIOLATION',
+  'DGM_NO_RECEIPT',
+  'DGM_RECEIPT_TAMPERED',
+  'DGM_RECEIPT_STATUS_MISMATCH',
+  'DGM_VERDICT_INCOHERENT',
+  'DGM_UNVERIFIED_SELECTION',
+  'DGM_VERDICT_UNBOUND',
+  'DGM_BAD_SELECTION'
+]);
 
 // Nothing in this experiment can apply a proposal. These names exist so the
 // UI can render them as permanently unavailable, not as buttons that fail.
@@ -76,12 +116,14 @@ export const FORBIDDEN_INPUT_KEYS = Object.freeze([
 export const LIMITATIONS = Object.freeze([
   'No model runs in this experiment; every check is a deterministic predicate over fixture data.',
   'The fixture set is authored and small; pass rates describe these fixtures, not general model quality.',
-  'Baseline comparison is a policy comparison (parse-only admission vs DGM gate), not an agent capability measurement.',
+  'The comparison policy is a synthetic no-gate reference (parse-only), with upstream human pull-request review excluded. It is not a measurement of dsh-superagent, of DeepSeek Harness, or of any model.',
   'Latency is reported as observed wall time and is excluded from every digest; it is not reproducible evidence of speed.',
   'Work units count deterministic predicate evaluations, not tokens, tool calls or money.',
   'The adapter maps synthetic dsh-superagent-shaped records; it does not execute dsh-superagent or DeepSeek Harness.',
   'No verdict applies, promotes, executes, merges or writes to GitHub, even when a proposal is selected.',
-  'Scores are fixture check pass rates in parts per million, not upstream or DGM harness scores.'
+  'Scores are fixture check pass rates in parts per million, not upstream or DGM harness scores.',
+  'Seals are unkeyed SHA-256 over canonical JSON: they prove integrity and determinism, not authorship or permission. Anyone who can run code here can re-seal a changed record.',
+  'Verdicts are bound to a fixture by re-derivation, not by identity. The adapter cannot tell who produced a record, only whether it reproduces.'
 ]);
 
 /**

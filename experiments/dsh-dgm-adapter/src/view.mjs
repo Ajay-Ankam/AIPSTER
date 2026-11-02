@@ -37,20 +37,27 @@ export function statusTone(status) {
   return STATUS_TONES[status] || 'muted';
 }
 
+// The comparison column is a synthetic no-gate reference, not upstream's
+// behaviour: upstream reviews the resulting pull request by hand, and that
+// human review is excluded from this measurement. The label travels with the
+// numbers so the percentage cannot be quoted without it.
+export const BASELINE_LABEL = 'Synthetic no-gate reference';
+export const BASELINE_CAVEAT = 'parse-only admission; upstream human pull-request review is excluded';
+
 export function metricRows(report) {
-  const parse = report.metrics['upstream-parse-only'];
+  const parse = report.metrics['synthetic-no-gate'];
   const gate = report.metrics['dgm-gate'];
   return [
     {
       label: 'Defect admission',
-      hint: 'defective artifacts admitted ÷ defective artifacts',
+      hint: 'defective artifacts a parse-only check would pass to human review ÷ defective artifacts',
       baseline: formatPpm(parse.defect_admission_ppm),
       gate: formatPpm(gate.defect_admission_ppm),
       better: 'lower'
     },
     {
       label: 'False rejection',
-      hint: 'clean artifacts rejected ÷ clean artifacts',
+      hint: 'clean artifacts a parse-only check would still admit ÷ clean artifacts',
       baseline: formatPpm(parse.false_rejection_ppm),
       gate: formatPpm(gate.false_rejection_ppm),
       better: 'lower'

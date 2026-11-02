@@ -1,8 +1,13 @@
 // Reproducible measurement over the synthetic fixtures.
 //
 // Two policies, same fixtures, same contract:
-//   upstream-parse-only  the status quo: if the artifact parses, it is admissible
-//   dgm-gate             every acceptance predicate + identity + envelope + receipt
+//   synthetic-no-gate  if the artifact parses, it is admissible (no gate at all)
+//   dgm-gate           every acceptance predicate + identity + envelope + receipt
+//
+// The no-gate column is NOT upstream's behaviour. Upstream reviews the resulting
+// pull request by hand; that human review is excluded here, so this is a
+// "gate vs no gate" reference point, never an improvement claim about
+// dsh-superagent, DeepSeek Harness or any model.
 //
 // Every number below is derived from authored fixture labels. Latency is
 // collected separately and is excluded from the report digest: it varies by
@@ -12,10 +17,14 @@ import { digestOf } from './canonical.mjs';
 import { buildRequest } from './adapter.mjs';
 import { baselinePolicy, evaluate } from './evaluate.mjs';
 import { WORK_ITEMS } from '../fixtures/work-items.mjs';
-import { LIMITATIONS } from './contract.mjs';
+import { LIMITATIONS, isRefusal } from './contract.mjs';
 
 export const MEASUREMENT_SCHEMA = 'aipster.dsh-dgm.measurement/v1';
-export const POLICIES = Object.freeze(['upstream-parse-only', 'dgm-gate']);
+export const POLICIES = Object.freeze(['synthetic-no-gate', 'dgm-gate']);
+export const POLICY_LABELS = Object.freeze({
+  'synthetic-no-gate': 'Synthetic no-gate reference: parse-only admission, upstream human pull-request review excluded',
+  'dgm-gate': 'DGM fixture gate: deterministic predicates, identity, envelope and receipt'
+});
 
 function rate(numerator, denominator) {
   if (!denominator) return null;
@@ -68,6 +77,16 @@ export async function runMeasurement({ now = null, replays = 2, keepVerdicts = f
       const started = now ? now() : 0;
       const verdict = await evaluate(workItem, built.request);
       if (now) latencySamples.push(now() - started);
+      if (isRefusal(verdict)) {
+        rows.push({
+          fixture_id: workItem.id,
+          subject,
+          labelled_defects: labelled,
+          unavailable: verdict.code,
+          detail: verdict.detail
+        });
+        continue;
+      }
 
       const failedIds = verdict.checks.subject.filter((check) => !check.passed).map((check) => check.id);
       const detected = labelled.filter((id) => failedIds.includes(id));
@@ -123,7 +142,7 @@ export async function runMeasurement({ now = null, replays = 2, keepVerdicts = f
   const criteriaDefined = criteriaPerArtifact() * rows.length;
 
   const metrics = {
-    'upstream-parse-only': {
+    'synthetic-no-gate': {
       artifacts: rows.length,
       defect_admission_ppm: rate(rows.filter((row) => row.parse_policy && row.parse_policy.admitted_defect).length, defective.length),
       false_rejection_ppm: rate(rows.filter((row) => row.parse_policy && row.parse_policy.rejected_clean).length, clean.length),
@@ -166,6 +185,7 @@ export async function runMeasurement({ now = null, replays = 2, keepVerdicts = f
     fixtures: WORK_ITEMS.length,
     artifacts: rows.length,
     policies: [...POLICIES],
+    policy_labels: { ...POLICY_LABELS },
     subject_sets: {
       baseline: 'the fixture artifact that carries the authored labelled defects',
       candidate: 'the repaired candidate artifact; clean by construction'
@@ -184,6 +204,7 @@ export async function runMeasurement({ now = null, replays = 2, keepVerdicts = f
       ...LIMITATIONS,
       'Metrics are fixture-relative: seven authored work items, fourteen artifacts, eight predicates.',
       'The two policies differ in what they check, not in model or data; this is a gate comparison, not a capability comparison.',
+      'The no-gate column omits upstream human review of the pull request, which is the control that would catch these defects in practice. Do not read it as upstream performance.',
       'A lower work-unit count is not a quality gain; it is a smaller predicate set.'
     ]
   };
@@ -195,6 +216,7 @@ export async function runMeasurement({ now = null, replays = 2, keepVerdicts = f
     fixtures: report.fixtures,
     artifacts: report.artifacts,
     policies: report.policies,
+    policy_labels: report.policy_labels,
     subject_sets: report.subject_sets,
     repeats_per_request: report.repeats_per_request,
     metrics: report.metrics,

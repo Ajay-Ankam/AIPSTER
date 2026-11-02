@@ -10,7 +10,7 @@
 
 import { digestOf, idFromDigest, seal, verifySeal } from './canonical.mjs';
 import { evaluateCriteria } from './checks.mjs';
-import { fixtureIdentity, eligibility, projectTicket } from './adapter.mjs';
+import { fixtureConstraints, fixtureIdentity, eligibility, projectTicket } from './adapter.mjs';
 import {
   AUTHORITY,
   EVALUATION_KIND,
@@ -22,10 +22,96 @@ import {
   SELECTED,
   UNAVAILABLE,
   VERDICT_SCHEMA,
-  gate
+  gate,
+  isRefusal,
+  refusal
 } from './contract.mjs';
 
 const REQUIRED_BASELINE_FIELDS = ['kind', 'policy', 'budgets', 'public_identifiers', 'rollback'];
+const HEX64 = /^[0-9a-f]{64}$/;
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Validate the *shape* of a request before any field is dereferenced.
+ *
+ * A malformed request must produce a typed refusal, never a TypeError: a caller
+ * probing this API has to be able to tell "you gave me garbage" apart from "the
+ * evaluation crashed". Shape only — the seal and every identity are checked
+ * afterwards, against the fixture.
+ */
+export function validateRequest(request) {
+  if (!isPlainObject(request)) {
+    return refusal('DGM_BAD_INPUT', 'request must be a plain object');
+  }
+  if (typeof request.request_sha256 !== 'string' || !HEX64.test(request.request_sha256)) {
+    return refusal('DGM_REQUEST_MALFORMED', 'request_sha256 must be a 64-character lowercase hex digest');
+  }
+  if (request.subject !== 'candidate' && request.subject !== 'baseline') {
+    return refusal('DGM_REQUEST_MALFORMED', 'subject must be candidate or baseline');
+  }
+  if (!isPlainObject(request.snapshot)
+    || typeof request.snapshot.fixture_id !== 'string'
+    || !HEX64.test(request.snapshot.fixture_sha256)
+    || !HEX64.test(request.snapshot.criteria_sha256)) {
+    return refusal('DGM_REQUEST_MALFORMED', 'snapshot must name a fixture with fixture_sha256 and criteria_sha256 digests');
+  }
+  for (const side of ['baseline', 'candidate']) {
+    if (!isPlainObject(request[side]) || !HEX64.test(request[side].sha256)) {
+      return refusal('DGM_REQUEST_MALFORMED', `${side} must carry a 64-character lowercase hex sha256`);
+    }
+  }
+  if (!isPlainObject(request.target)
+    || typeof request.target.kind !== 'string'
+    || typeof request.target.name !== 'string'
+    || !isPlainObject(request.target.source)
+    || typeof request.target.source.repo !== 'string'
+    || !Number.isInteger(request.target.issue_number)) {
+    return refusal('DGM_REQUEST_MALFORMED', 'target must name a ticket, its source repo and issue number');
+  }
+  if (!isPlainObject(request.module)
+    || typeof request.module.id !== 'string'
+    || typeof request.module.version !== 'string') {
+    return refusal('DGM_REQUEST_MALFORMED', 'module must carry an id and a version');
+  }
+  if (!Array.isArray(request.constraints) || request.constraints.length === 0) {
+    return refusal('DGM_REQUEST_MALFORMED', 'constraints must be a non-empty array');
+  }
+  if (!request.constraints.every((entry) => isPlainObject(entry)
+    && typeof entry.name === 'string'
+    && typeof entry.operator === 'string'
+    && Number.isFinite(entry.threshold))) {
+    return refusal('DGM_REQUEST_MALFORMED', 'each constraint needs a name, an operator and a finite threshold');
+  }
+  return { ok: true };
+}
+
+/**
+ * Does the request carry exactly the constraints the fixture budget implies?
+ *
+ * The request's copy is for the reader; the fixture's budget is the authority.
+ */
+export function constraintsBoundToFixture(request, workItem) {
+  const derived = fixtureConstraints(workItem);
+  if (!derived.ok) return derived;
+  const wanted = derived.constraints;
+  const got = request.constraints;
+  if (got.length !== wanted.length) {
+    return refusal('DGM_CONSTRAINTS_UNBOUND', `request carries ${got.length} constraints, the fixture budget defines ${wanted.length}`);
+  }
+  for (let index = 0; index < wanted.length; index += 1) {
+    const want = wanted[index];
+    const entry = got[index];
+    for (const field of ['name', 'operator', 'threshold', 'unit', 'definition_version']) {
+      if (entry[field] !== want[field]) {
+        return refusal('DGM_CONSTRAINTS_UNBOUND', `constraint ${want.name} disagrees with the fixture budget on ${field}`);
+      }
+    }
+  }
+  return { ok: true, constraints: wanted };
+}
 
 function ppm(passed, total) {
   if (!total) return null;
@@ -109,23 +195,37 @@ async function refusalVerdict(request, code, detail) {
  * - `selected`    every gate passed; `applied` stays false.
  */
 export async function evaluate(workItem, request) {
-  if (!workItem || !request) {
-    throw new TypeError('evaluate(workItem, request) requires both arguments');
+  // Fail closed without throwing: a refusal is an honest non-result, and a
+  // caller must be able to probe this API without catching TypeErrors.
+  if (!isPlainObject(workItem)) {
+    return refusal('DGM_BAD_INPUT', 'evaluate requires a fixture object');
   }
+  const shape = validateRequest(request);
+  if (!shape.ok) return shape;
 
-  const requestSeal = await verifySeal(request, 'request_sha256');
+  let requestSeal;
+  try {
+    requestSeal = await verifySeal(request, 'request_sha256');
+  } catch (error) {
+    return refusal('DGM_REQUEST_MALFORMED', `request cannot be canonicalized: ${error && error.message ? error.message : 'unknown'}`);
+  }
   if (!requestSeal.ok) {
     return refusalVerdict(request, 'DGM_REQUEST_TAMPERED', `request digest ${requestSeal.reason}`);
   }
 
   // Recompute every identity the request claims. A post-seal artifact mutation
   // changes the candidate digest and is refused before any scoring happens.
-  const [fixtureSha, baselineSha, candidateSha, criteriaSha] = await Promise.all([
-    fixtureIdentity(workItem),
-    digestOf(workItem.artifact),
-    digestOf(workItem.candidate),
-    digestOf(workItem.criteria)
-  ]);
+  let fixtureSha; let baselineSha; let candidateSha; let criteriaSha;
+  try {
+    [fixtureSha, baselineSha, candidateSha, criteriaSha] = await Promise.all([
+      fixtureIdentity(workItem),
+      digestOf(workItem.artifact),
+      digestOf(workItem.candidate),
+      digestOf(workItem.criteria)
+    ]);
+  } catch (error) {
+    return refusal('DGM_BAD_FIXTURE', `the fixture is not canonicalizable: ${error && error.message ? error.message : 'unknown'}`);
+  }
 
   const identityChecks = [
     { name: 'fixture', claimed: request.snapshot.fixture_sha256, actual: fixtureSha },
@@ -142,6 +242,14 @@ export async function evaluate(workItem, request) {
     );
   }
 
+  // The envelope comes from the fixture's budget. The request carries a copy
+  // for the reader; if the copy disagrees, the request is unbound and nothing
+  // is scored. Re-sealing a looser request therefore cannot widen the envelope.
+  const bound = constraintsBoundToFixture(request, workItem);
+  if (!bound.ok) {
+    return refusalVerdict(request, bound.code, bound.detail);
+  }
+
   const projected = projectTicket(workItem.ticket);
   const eligible = eligibility(projected, { reportState: projected.report_state });
   if (!eligible.ok) {
@@ -152,7 +260,7 @@ export async function evaluate(workItem, request) {
     return refusalVerdict(request, 'DGM_NO_CRITERIA', 'the fixture has no acceptance criteria');
   }
 
-  const subjectName = request.subject === 'baseline' ? 'baseline' : 'candidate';
+  const subjectName = request.subject;
   const subjectArtifact = subjectName === 'baseline' ? workItem.artifact : workItem.candidate;
   const subjectRun = evaluateCriteria(subjectArtifact, workItem.criteria);
   const referenceName = subjectName === 'baseline' ? 'candidate' : 'baseline';
@@ -176,8 +284,10 @@ export async function evaluate(workItem, request) {
 
   const criteriaMet = subjectRun.passed && subjectOutcome.failed === 0;
 
-  const workUnitConstraint = request.constraints.find((constraint) => constraint.name === 'work_units');
-  const repairConstraint = request.constraints.find((constraint) => constraint.name === 'repair_items');
+  // Thresholds come from `bound.constraints`, which are the fixture's own — the
+  // request's copy has already been proven equal above, and is not read here.
+  const workUnitConstraint = bound.constraints.find((constraint) => constraint.name === 'work_units');
+  const repairConstraint = bound.constraints.find((constraint) => constraint.name === 'repair_items');
   const envelopeFits = workUnits <= (workUnitConstraint ? workUnitConstraint.threshold : 0)
     && repairItems <= (repairConstraint ? repairConstraint.threshold : 0);
 
@@ -291,14 +401,21 @@ export async function evaluate(workItem, request) {
 
 /** Verify a stored verdict against its request and fixture. */
 export async function verifyVerdict(verdict, workItem, request) {
+  if (!isPlainObject(verdict)) return { ok: false, reason: 'verdict is not an object' };
   const verdictSeal = await verifySeal(verdict, 'verdict_sha256');
   if (!verdictSeal.ok) return { ok: false, reason: `verdict ${verdictSeal.reason}` };
+  if (!isPlainObject(request) || typeof request.request_sha256 !== 'string') {
+    return { ok: false, reason: 'request is not a sealed request' };
+  }
   const requestSeal = await verifySeal(request, 'request_sha256');
   if (!requestSeal.ok) return { ok: false, reason: `request ${requestSeal.reason}` };
   if (verdict.request_sha256 !== request.request_sha256) {
     return { ok: false, reason: 'verdict binds a different request' };
   }
   const replayed = await evaluate(workItem, request);
+  if (isRefusal(replayed)) {
+    return { ok: false, reason: `replay refused with ${replayed.code}` };
+  }
   if (replayed.verdict_sha256 !== verdict.verdict_sha256) {
     return { ok: false, reason: 'verdict digest diverged on replay' };
   }
@@ -313,9 +430,13 @@ export async function replay(workItem, request, times = 3) {
   const digests = [];
   for (let index = 0; index < times; index += 1) {
     const verdict = await evaluate(workItem, request);
+    if (isRefusal(verdict)) {
+      return { ok: false, code: verdict.code, detail: verdict.detail, runs: index, digests };
+    }
     digests.push(verdict.verdict_sha256);
   }
   return {
+    ok: true,
     runs: times,
     digests,
     identical: digests.every((digest) => digest === digests[0])

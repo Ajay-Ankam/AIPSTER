@@ -11,6 +11,8 @@ import { runMeasurement } from './measure.mjs';
 import { WORK_ITEMS } from '../fixtures/work-items.mjs';
 import { MODULE_ID, MODULE_VERSION, OPT_IN_FLAG } from './contract.mjs';
 import {
+  BASELINE_CAVEAT,
+  BASELINE_LABEL,
   checkRows,
   fixtureRows,
   formatPpm,
@@ -118,7 +120,8 @@ function renderMetrics(report) {
   byId('metrics-note').textContent =
     `${report.fixtures} authored work items, ${report.artifacts} artifacts, `
     + `${report.rows[0]?.gate_policy?.subject_predicates ?? 8} acceptance predicates per artifact. `
-    + 'Both policies saw identical inputs.';
+    + `Both policies saw identical inputs; the ${BASELINE_LABEL.toLowerCase()} column is `
+    + `${BASELINE_CAVEAT}.`;
 
   const gate = report.metrics['dgm-gate'];
   const facts = byId('metric-facts');
@@ -410,6 +413,10 @@ async function runTamperCheck() {
       return;
     }
     const verdict = await evaluate(item, built.request);
+    if (verdict.ok === false) {
+      setStatus(`Tamper probe was refused outright: ${verdict.code}.`, 'warn');
+      return;
+    }
     const honest = verdict.code === 'DGM_IDENTITY_MISMATCH' && verdict.status === 'unavailable';
     setStatus(
       honest
@@ -433,7 +440,12 @@ async function runSelection() {
     const verdicts = state.evidence
       .filter((entry) => entry.subject === 'candidate')
       .map((entry) => entry.verdict);
-    const result = await select(verdicts, { baselineRevision: 'rev-2026-11-02-a' });
+    // Selection re-derives every verdict from its fixture; without the
+    // fixtures it refuses rather than trusting a record's own seal.
+    const result = await select(verdicts, {
+      fixtures: WORK_ITEMS,
+      baselineRevision: 'rev-2026-11-02-a'
+    });
     if (!result.ok) {
       setStatus(`Selection refused: ${result.code} — ${result.detail}`, 'warn');
       return;

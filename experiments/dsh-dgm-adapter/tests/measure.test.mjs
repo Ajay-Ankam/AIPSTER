@@ -10,8 +10,14 @@ test('the sweep covers every fixture on both sides', async () => {
   assert.equal(report.fixtures, WORK_ITEMS.length);
   assert.equal(report.artifacts, WORK_ITEMS.length * 2);
   assert.equal(report.rows.length, report.artifacts);
-  assert.deepEqual(report.policies, ['upstream-parse-only', 'dgm-gate']);
+  assert.deepEqual(report.policies, ['synthetic-no-gate', 'dgm-gate']);
   assert.ok(report.limitations.length > LIMITATIONS.length);
+
+  // The reference column must not be readable as upstream or model performance.
+  assert.match(report.policy_labels['synthetic-no-gate'], /no-gate/i);
+  assert.match(report.policy_labels['synthetic-no-gate'], /human pull-request review excluded/i);
+  assert.ok(report.limitations.some((line) => /human review/i.test(line)));
+  assert.equal(/upstream-parse-only/.test(JSON.stringify(report)), false);
 });
 
 test('the gate catches exactly the labelled defects and rejects nothing clean', async () => {
@@ -30,9 +36,9 @@ test('the gate catches exactly the labelled defects and rejects nothing clean', 
   );
 });
 
-test('the baseline policy admits every defective artifact', async () => {
+test('the synthetic no-gate reference admits every defective artifact', async () => {
   const report = await runMeasurement({ replays: 1 });
-  const parse = report.metrics['upstream-parse-only'];
+  const parse = report.metrics['synthetic-no-gate'];
   assert.equal(parse.defect_admission_ppm, 1_000_000);
   assert.equal(parse.criteria_coverage_ppm, 0);
   assert.equal(parse.work_units_total, report.artifacts);
@@ -66,3 +72,4 @@ test('evidence is only collected when asked for', async () => {
   assert.equal(kept.report_sha256, quiet.report_sha256);
   assert.ok(kept.evidence.every((entry) => entry.verdict && entry.request));
 });
+

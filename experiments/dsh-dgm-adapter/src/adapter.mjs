@@ -26,6 +26,34 @@ function shortText(value, limit = MAX_TEXT) {
   return typeof value === 'string' ? value.slice(0, limit) : '';
 }
 
+/**
+ * The authoritative admission envelope, derived from the fixture's own budget.
+ *
+ * This is the single source of truth for the envelope gate. A request carries a
+ * copy of these constraints so a reader can see what was evaluated, but the copy
+ * is never trusted: `evaluate()` re-derives from here and refuses a request whose
+ * thresholds disagree. Without that, a re-sealed request could widen its own
+ * budget (seals are unkeyed, so re-sealing is not a barrier).
+ */
+export function fixtureConstraints(workItem) {
+  const budget = workItem && workItem.budget;
+  if (!budget || typeof budget !== 'object' || Array.isArray(budget)) {
+    return refusal('DGM_BAD_FIXTURE_BUDGET', 'the fixture declares no budget object');
+  }
+  for (const field of ['max_work_units', 'max_repairs']) {
+    if (!Number.isInteger(budget[field]) || budget[field] < 0) {
+      return refusal('DGM_BAD_FIXTURE_BUDGET', `budget.${field} must be a non-negative integer`);
+    }
+  }
+  return {
+    ok: true,
+    constraints: [
+      { name: 'work_units', definition_version: 'fixture-checks/v1', unit: 'predicate', operator: '<=', threshold: budget.max_work_units },
+      { name: 'repair_items', definition_version: 'fixture-checks/v1', unit: 'check', operator: '<=', threshold: budget.max_repairs }
+    ]
+  };
+}
+
 /** Stable identity for everything a request binds: fixture, ticket, artifacts, criteria. */
 export async function fixtureIdentity(workItem) {
   return digestOf({
@@ -127,6 +155,9 @@ export async function buildRequest(workItem, {
     return { ok: false, code: 'DGM_NO_CRITERIA', detail: 'the fixture has no acceptance criteria' };
   }
 
+  const envelope = fixtureConstraints(workItem);
+  if (!envelope.ok) return envelope;
+
   const candidateArtifact = tamper === 'candidate'
     ? { ...workItem.candidate, tampered: 'post-seal mutation' }
     : workItem.candidate;
@@ -171,10 +202,7 @@ export async function buildRequest(workItem, {
       { name: 'work_units', definition_version: 'fixture-checks/v1', unit: 'predicate', direction: 'lower' },
       { name: 'repair_items', definition_version: 'fixture-checks/v1', unit: 'check', direction: 'lower' }
     ],
-    constraints: [
-      { name: 'work_units', definition_version: 'fixture-checks/v1', unit: 'predicate', operator: '<=', threshold: workItem.budget.max_work_units },
-      { name: 'repair_items', definition_version: 'fixture-checks/v1', unit: 'check', operator: '<=', threshold: workItem.budget.max_repairs }
-    ],
+    constraints: envelope.constraints,
     authority: AUTHORITY,
     evaluation: EVALUATION_KIND
   }, 'request_sha256');
