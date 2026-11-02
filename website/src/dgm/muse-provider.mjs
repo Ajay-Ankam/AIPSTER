@@ -353,7 +353,12 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
-      redirect: 'error',
+      // The Workers runtime rejects `redirect: 'error'` while constructing the
+      // request (TypeError, nothing sent), so it cannot be used here. 'manual'
+      // is supported: the 3xx is returned to us instead of being followed, and
+      // the branch below refuses it explicitly. Authorization is only ever
+      // sent to DGM_MUSE_RESPONSES_HOST — a Location is never followed.
+      redirect: 'manual',
       signal,
     });
   } catch (e) {
@@ -361,6 +366,14 @@ export async function proposeLive({ fetchImpl = fetch, apiKey, prompt, deadlineM
       throw fail(504, 'DGM provider call timed out.', 'DGM_MUSE_TIMEOUT');
     }
     throw fail(502, 'DGM provider unreachable.', 'DGM_MUSE_UNREACHABLE');
+  }
+  // A redirect (or an opaque status 0 from a manual response) means the
+  // request reached the host but its outcome is unknown: the provider may have
+  // accepted and billed it. Refuse the Location — never follow it, never send
+  // the bearer to another origin — and keep acceptance unknown so the caller
+  // quarantines instead of freeing admission for a possibly chargeable call.
+  if (response.status === 0 || (response.status >= 300 && response.status < 400)) {
+    throw acceptedFailure(502, 'DGM provider answered with a redirect that was refused; acceptance unknown, no duplicate was sent.', 'DGM_MUSE_UPSTREAM', response.status);
   }
   if (response.status === 429) throw rejectedFailure(429, 'DGM provider is rate limited. No retry was sent.', 'DGM_MUSE_RATE_LIMITED', 503);
   if (response.status === 401 || response.status === 403) {
