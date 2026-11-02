@@ -43,10 +43,19 @@ asserted by CI (`website/scripts/build.mjs`, `check.mjs`); it measures nothing l
 Mobile: no document overflow at 320–1440px (measured 2026-10-31 on d1de902);
 see [viewport evidence](docs/demo/VIEWPORTS.md).
 
-3. No recorded video exists yet: follow the [60–90 second shot list](docs/demo/SHOT-LIST.md).
-   Owner action: record with an authorized test identity, upload, and link it here.
+3. Watch the current hackathon intro cut (38 seconds) on the
+   [homepage](https://aipster.net/#hackathon-video), or open the
+   [direct MP4](https://aipster.net/assets/aipster-intro-mix.mp4).
 
-**In this build:** landing page, research and LoRA diagrams, `/app` sign-in shell
+   [![AIPSTER intro video poster: the AIPSTER wordmark above the line “AI is for everyone.”](website/public/assets/aipster-intro-mix-poster.jpg)](https://aipster.net/#hackathon-video)
+
+   The cut is a progress and vision piece: concept visuals, not proof of
+   working live inference or measured gains. Captions and a transcript are on
+   the homepage. The published copy is byte-identical to the owner's
+   `aipster-intro-mix.mp4` (SHA-256 `4dd3947e66cb6e70946f910d15388ba2fa6ba188b95579539a7066118b237109`).
+
+**In this build:** landing page, the current hackathon intro video with captions,
+research and LoRA diagrams, `/app` sign-in shell
 (GitHub OAuth handshake + demo-login endpoint, handshake shapes verified),
 authenticated API boundary (`401` without a session), federation UI shell labeled
 fixture-only with no live peers, DGM fixture preview shipped flag-gated and off by
