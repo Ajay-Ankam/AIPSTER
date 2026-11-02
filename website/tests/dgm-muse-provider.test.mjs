@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { createTestEnv, readJson, sessionCookieHeader, TEST_SECRET, MIGRATION_FILES, applyMigrations } from './d1-shim.mjs';
 import {
@@ -64,7 +65,9 @@ test('muse provider: request pins exact model, endpoint, bounds, no tools', asyn
   assert.ok(!('tools' in body), 'no tool surface on a qualification call');
   assert.ok(!('tool_choice' in body));
   assert.equal(seen[0].init.method, 'POST');
-  assert.equal(seen[0].init.redirect, 'error');
+  // 'error' is rejected by the Workers runtime while constructing the request
+  // (nothing is sent); 'manual' is supported and the 3xx is refused below.
+  assert.equal(seen[0].init.redirect, 'manual');
   assert.equal(seen[0].init.headers.Authorization, 'Bearer k');
   assert.ok(seen[0].init.signal, 'abort signal bound');
 });
@@ -203,6 +206,92 @@ test('muse provider: 401/403/400/429/5xx map sanitized without leaks', async () 
         return true;
       });
   }
+});
+
+// ---------- fix round 3: transport compatibility (redirect refusal) ----------
+// The deployed code passed `redirect: 'error'`, which workerd rejects while
+// constructing the request (TypeError, zero dispatch, mapped to 502
+// DGM_MUSE_UNREACHABLE). The transport now uses supported `redirect: 'manual'`
+// and refuses any 3xx explicitly. A redirect proves the host answered, so the
+// outcome is acceptance-unknown (quarantine), never a clean rejection.
+
+const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
+const REDIRECT_LOCATIONS = [
+  ['relative', '/v1/responses-moved'],
+  ['same-origin-absolute', 'https://api.meta.ai/v1/responses-moved'],
+  ['cross-origin', 'https://second-origin.invalid/v1/responses'],
+];
+
+test('muse provider T1: every redirect status stays acceptance-unknown, refuses Location, dispatches once', async () => {
+  for (const status of REDIRECT_STATUSES) {
+    for (const [kind, location] of REDIRECT_LOCATIONS) {
+      const calls = [];
+      await assert.rejects(
+        proposeLive({
+          ...baseArgs(),
+          fetchImpl: async (url, init) => {
+            calls.push({ url, init });
+            return new Response(null, { status, headers: { Location: location } });
+          },
+        }),
+        (e) => {
+          assert.equal(e.code, 'DGM_MUSE_UPSTREAM', `${status} ${kind}`);
+          assert.equal(e.status, 502, `${status} ${kind}`);
+          assert.equal(e.accepted, true, `${status} ${kind}: the host answered, so acceptance is unknown`);
+          assert.equal(e.httpStatus, status, `${status} ${kind}: provider status preserved`);
+          assert.ok(!String(e.message).includes('second-origin'), 'no Location reaches the message');
+          return true;
+        });
+      assert.equal(calls.length, 1, `${status} ${kind}: exactly one dispatch, never a follow`);
+      assert.equal(calls[0].url, DGM_MUSE_RESPONSES_URL, `${status} ${kind}: only the pinned endpoint`);
+      assert.equal(calls[0].init.headers.Authorization, 'Bearer k', `${status} ${kind}: bearer only on the pinned call`);
+    }
+  }
+});
+
+test('muse provider T2: an opaque status 0 is refused as acceptance-unknown', async () => {
+  // A browser exposes a manual redirect as an opaque response with status 0;
+  // workerd returns the real 3xx, but both must stay ambiguous, not clean.
+  let calls = 0;
+  await assert.rejects(
+    proposeLive({ ...baseArgs(), fetchImpl: async () => { calls += 1; return { status: 0, headers: new Headers(), body: null }; } }),
+    (e) => {
+      assert.equal(e.code, 'DGM_MUSE_UPSTREAM');
+      assert.equal(e.status, 502);
+      assert.equal(e.accepted, true, 'an opaque response still means the request was sent');
+      assert.equal(e.httpStatus, 0);
+      return true;
+    });
+  assert.equal(calls, 1);
+});
+
+test('muse provider T3: timeout and transport failures stay redacted and claim no acceptance', async () => {
+  const secret = 'Bearer sk-live-SECRET-0123456789';
+  await assert.rejects(
+    proposeLive({
+      ...baseArgs(),
+      fetchImpl: async () => { const e = new Error(`connect failed for ${DGM_MUSE_RESPONSES_URL} with ${secret}`); e.name = 'TimeoutError'; throw e; },
+    }),
+    (e) => {
+      assert.equal(e.code, 'DGM_MUSE_TIMEOUT');
+      assert.equal(e.status, 504);
+      assert.equal(e.accepted, undefined, 'no response headers were observed, so no acceptance is claimed');
+      assert.equal(e.httpStatus, undefined);
+      assert.ok(!JSON.stringify(e).includes('SECRET'), 'the raw transport error never leaves the module');
+      return true;
+    });
+  await assert.rejects(
+    proposeLive({
+      ...baseArgs(),
+      fetchImpl: async () => { throw new Error(`fetch failed ${secret} at https://second-origin.invalid`); },
+    }),
+    (e) => {
+      assert.equal(e.code, 'DGM_MUSE_UNREACHABLE');
+      assert.equal(e.message, 'DGM provider unreachable.', 'the fixed message never echoes transport internals');
+      assert.ok(!JSON.stringify(e).includes('SECRET'));
+      assert.ok(!JSON.stringify(e).includes('second-origin'));
+      return true;
+    });
 });
 
 test('muse provider: happy path extracts proposal, usage, identity; never echoes key', async () => {
@@ -827,6 +916,30 @@ test('muse routes: uncertain receipts retain the reservation with no refund', as
   assert.match(receipt.chargeNote || '', /no automatic refund/i);
 });
 
+test('muse routes T5: a refused redirect quarantines and keeps the reservation', async () => {
+  const t = await createTestEnv(LIVE);
+  let calls = 0;
+  await assert.rejects(
+    handleMusePropose({
+      db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Redirected.', opKey: 'sp4', mode: 'live' },
+      fetchImpl: async () => { calls += 1; return new Response(null, { status: 302, headers: { Location: 'https://second-origin.invalid/v1/responses' } }); },
+    }),
+    (e) => e.code === 'DGM_MUSE_UPSTREAM' && e.status === 502 && e.accepted === true);
+  assert.equal(calls, 1, 'exactly one dispatch');
+  const row = await t.DB.prepare('SELECT state, unknown_outcome, receipt_json FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?').bind('u_alice', 'sp4').first();
+  assert.equal(row.state, 'uncertain', 'a redirect is a sent call, not a clean rejection');
+  assert.equal(Number(row.unknown_outcome), 1);
+  const receipt = JSON.parse(row.receipt_json);
+  assert.equal(receipt.accepted, true);
+  assert.equal(receipt.httpStatus, 302);
+  assert.equal(receipt.providerContact, 'sent');
+  assert.equal(receipt.acceptance, 'unknown');
+  assert.equal(receipt.billing, 'unknown');
+  assert.ok(receipt.spendUsdReserved > 0, 'reservation retained');
+  assert.equal(receipt.spendUsdUsed, null);
+  assert.ok(!JSON.stringify(receipt).includes('second-origin'), 'no Location in the durable receipt');
+});
+
 test('muse routes: status exposes spend cap, price ref and input constraints', async () => {
   const t = await createTestEnv(LIVE);
   await grant(t, 'u_alice', 'engineering_reviewer');
@@ -1301,6 +1414,125 @@ test('muse routes R2 N3: real local D1 serializes concurrent aggregate admission
     assert.equal(calls, 1, 'refused concurrent admissions send no provider call');
     const spend = await db.prepare('SELECT reserved_micros FROM dgm_muse_spend WHERE scope = ? AND window_key = ?').bind('global', 'all-time').first();
     assert.equal(Number(spend.reserved_micros), Math.round(worst * 1e6), 'the aggregate holds exactly one reservation');
+  } finally {
+    await mf.dispose();
+  }
+});
+
+// ---------- fix round 3: native workerd conformance ----------
+// Every other live test injects fetchImpl, so the real request init was never
+// constructed by the runtime that runs it in production — which is exactly how
+// an unsupported `redirect: 'error'` shipped. This harness runs the unmodified
+// module under workerd with the runtime's own native fetch and a synthetic
+// outbound service that answers every request (nothing is forwarded).
+
+const NATIVE_HARNESS = `
+import { proposeLive } from '../../src/dgm/muse-provider.mjs';
+
+export default {
+  async fetch(request) {
+    const kase = new URL(request.url).searchParams.get('case') || 'call';
+    if (kase === 'ctor-error' || kase === 'ctor-manual') {
+      try {
+        const probe = new Request('https://api.meta.ai/v1/responses', {
+          method: 'POST', body: '{}', redirect: kase === 'ctor-error' ? 'error' : 'manual',
+        });
+        return Response.json({ constructed: true, redirect: probe.redirect });
+      } catch (e) {
+        return Response.json({ constructed: false, name: e.name, mentionsRedirect: /redirect/i.test(String(e.message)) });
+      }
+    }
+    try {
+      const out = await proposeLive({ apiKey: 'dummy-ascii-key-0123456789', prompt: 'Draft a synthetic boundary test.' });
+      return Response.json({ ok: true, model: out.model, proposal: out.proposal, usage: out.usage });
+    } catch (e) {
+      return Response.json({
+        ok: false,
+        name: e && e.name ? e.name : null,
+        code: e && e.code ? e.code : null,
+        status: e && e.status ? e.status : null,
+        accepted: e ? e.accepted === true : null,
+        httpStatus: e && Number.isSafeInteger(e.httpStatus) ? e.httpStatus : null,
+        message: e && typeof e.message === 'string' ? e.message : '',
+      });
+    }
+  },
+};
+`;
+
+async function nativeProviderModules() {
+  const root = new URL('../', import.meta.url);
+  const read = async (rel) => readFile(new URL(rel, root), 'utf8');
+  // Mirrors muse-provider.mjs's real import graph; add a module here if that
+  // graph grows, so the harness always executes the production source.
+  return {
+    modulesRoot: fileURLToPath(root),
+    modules: [
+      { type: 'ESModule', path: 'tests/fixtures/dgm-native-harness.mjs', contents: NATIVE_HARNESS },
+      { type: 'ESModule', path: 'src/dgm/muse-provider.mjs', contents: await read('src/dgm/muse-provider.mjs') },
+      { type: 'ESModule', path: 'src/dgm/preview.mjs', contents: await read('src/dgm/preview.mjs') },
+      { type: 'ESModule', path: 'src/routing/adapters/meta.mjs', contents: await read('src/routing/adapters/meta.mjs') },
+      { type: 'ESModule', path: 'src/lib/validate.js', contents: await read('src/lib/validate.js') },
+    ],
+  };
+}
+
+test('muse provider T4: real module dispatches under workerd; redirects refuse without a second origin', async () => {
+  let planned = { status: 200 };
+  const dispatched = [];
+  const mf = new Miniflare(convertV4MiniflareOptions({
+    ...(await nativeProviderModules()),
+    // The deployed Worker's compatibility date/flags, not a looser one.
+    compatibilityDate: '2026-10-26',
+    compatibilityFlags: ['nodejs_als'],
+    outboundService: (req) => {
+      dispatched.push({ url: req.url, method: req.method, authorization: req.headers.get('authorization') });
+      if (planned.status === 200) {
+        return new Response(JSON.stringify(wireProposal('fixture: good')), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(null, { status: planned.status, headers: { Location: planned.location } });
+    },
+  }));
+  try {
+    const call = async (search) => (await mf.dispatchFetch(`http://harness.test/${search}`)).json();
+
+    // 1. The original failure, reproduced in the same runtime: 'error' throws
+    //    while constructing the request; 'manual' constructs.
+    assert.deepEqual(await call('?case=ctor-error'), { constructed: false, name: 'TypeError', mentionsRedirect: true });
+    assert.deepEqual(await call('?case=ctor-manual'), { constructed: true, redirect: 'manual' });
+    assert.equal(dispatched.length, 0, 'construction probes send nothing');
+
+    // 2. The corrected path reaches the provider host exactly once.
+    planned = { status: 200 };
+    const ok = await call('?case=call');
+    assert.equal(ok.ok, true, `native 200: ${JSON.stringify(ok)}`);
+    assert.equal(ok.model, DGM_MUSE_MODEL);
+    assert.equal(ok.proposal, 'fixture: good');
+    assert.deepEqual(ok.usage, { input_tokens: 120, output_tokens: 40 });
+    assert.equal(dispatched.length, 1, 'exactly one native dispatch');
+    assert.equal(dispatched[0].url, DGM_MUSE_RESPONSES_URL);
+    assert.equal(dispatched[0].method, 'POST');
+    assert.equal(dispatched[0].authorization, 'Bearer dummy-ascii-key-0123456789');
+
+    // 3. Every redirect status is refused as acceptance-unknown, with exactly
+    //    one dispatch and no request to the Location's origin.
+    for (const status of REDIRECT_STATUSES) {
+      for (const [kind, location] of REDIRECT_LOCATIONS) {
+        dispatched.length = 0;
+        planned = { status, location };
+        const out = await call('?case=call');
+        assert.equal(out.ok, false, `${status} ${kind}: no delivery`);
+        assert.equal(out.code, 'DGM_MUSE_UPSTREAM', `${status} ${kind}`);
+        assert.equal(out.status, 502, `${status} ${kind}`);
+        assert.equal(out.accepted, true, `${status} ${kind}: acceptance unknown`);
+        assert.equal(out.httpStatus, status, `${status} ${kind}: real status surfaced by manual mode`);
+        assert.ok(!JSON.stringify(out).includes('second-origin'), `${status} ${kind}: no Location leak`);
+        assert.ok(!JSON.stringify(out).includes('dummy-ascii-key'), `${status} ${kind}: no key leak`);
+        assert.equal(dispatched.length, 1, `${status} ${kind}: exactly one dispatch under workerd`);
+        assert.equal(dispatched[0].url, DGM_MUSE_RESPONSES_URL, `${status} ${kind}: Location never fetched`);
+        assert.equal(dispatched[0].authorization, 'Bearer dummy-ascii-key-0123456789', `${status} ${kind}: bearer only to the pinned origin`);
+      }
+    }
   } finally {
     await mf.dispose();
   }
