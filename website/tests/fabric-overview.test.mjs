@@ -307,13 +307,39 @@ test('throughput bench marks unavailable with coverage and no bar lengths', asyn
   assert.ok(!/tok\/s/i.test(tp.replace(/tokens\/sec/g, '')), 'no fabricated rates');
 });
 
-test('snapshot freshness states its age and the no-poll reload rule', async () => {
+test('FINDING-B: snapshot states absolute captured-at time, never a frozen age', async () => {
   const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
-  const fresh = render(context, el, statusPayload([item()], { generatedAt: iso(Date.now() - 65000) }), usagePayload());
-  assert.ok(/snapshot \d+m ago/.test(fresh.flow), fresh.flow);
-  assert.ok(fresh.flow.includes('refreshes when Overview reloads'), fresh.flow);
+  const stamp = iso(Date.now() - 65000);
+  const fresh = render(context, el, statusPayload([item()], { generatedAt: stamp }), usagePayload());
+  assert.ok(fresh.flow.includes(`snapshot taken ${stamp}`), fresh.flow);
+  assert.ok(fresh.flow.includes('snapshot only') && fresh.flow.includes('does not update until Overview reloads'), fresh.flow);
+  assert.ok(!/snapshot \d+[smhd] ago/.test(fresh.flow), 'no frozen relative age');
   const timeless = render(context, el, statusPayload([item()], { generatedAt: 'not-a-time' }), usagePayload());
   assert.ok(timeless.flow.includes('snapshot time unknown'), timeless.flow);
+  const futureStamp = iso(Date.now() + 3600000);
+  const future = render(context, el, statusPayload([item()], { generatedAt: futureStamp }), usagePayload());
+  assert.ok(future.flow.includes(`snapshot taken ${futureStamp}`) && future.flow.includes('snapshot only'), future.flow);
+  assert.ok(!future.flow.includes('just taken'), 'future stamps stay absolute, never reworded as past');
+});
+
+test('FINDING-A: heartbeat lane follows the liveness set in the renderer', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const laneOf = (items) => {
+    const { flow } = render(context, el, statusPayload(items), usagePayload());
+    const m = /Heartbeat returns: reachability only \(([^)]+)\)/.exec(flow);
+    assert.ok(m, 'return lane present');
+    return m[1];
+  };
+  const on = item({ id: 'r_on' });
+  const stale = item({ id: 'r_st', liveness: 'stale', lastSeenAt: iso(NOW - 10 * 60 * 1000), lastSeenAgeMs: 10 * 60 * 1000 });
+  const unknown = item({ id: 'r_un', liveness: 'unknown', lastSeenAt: null, lastSeenAgeMs: null });
+  const off = item({ id: 'r_off', liveness: 'offline', lastSeenAt: null, lastSeenAgeMs: null });
+  assert.equal(laneOf([on, stale]), 'live');
+  assert.equal(laneOf([stale]), 'stale only');
+  assert.equal(laneOf([stale, unknown]), 'stale only');
+  assert.equal(laneOf([unknown]), 'unknown only');
+  assert.equal(laneOf([off]), 'none seen');
+  assert.equal(laneOf([]), 'none seen');
 });
 
 test('topology stylesheet is responsive, static, and reduced-motion safe', async () => {

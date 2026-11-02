@@ -80,6 +80,22 @@ function usageCoverageOf(usage) {
   return { shown: usage.items.length, total: usage.total, complete: usage.items.length >= usage.total };
 }
 
+// Heartbeat-lane state derives from the node liveness SET, never from bare
+// timestamp presence: an all-stale fabric is stale, not live. Offline-only
+// and empty fabrics report none.
+function heartbeatLane(nodes) {
+  let stale = false, unknown = false;
+  for (const n of nodes) {
+    if (!n || typeof n !== 'object') continue;
+    if (n.liveness === 'online') return 'live';
+    if (n.liveness === 'stale') stale = true;
+    else if (n.liveness === 'unknown') unknown = true;
+  }
+  if (stale) return 'stale';
+  if (unknown) return 'unknown';
+  return 'none';
+}
+
 export function buildFabricFlow({ status, usage, nowMs }) {
   const now = safeNow(nowMs);
   const items = status && Array.isArray(status.items) ? status.items : [];
@@ -114,7 +130,13 @@ export function buildFabricFlow({ status, usage, nowMs }) {
   // edge stays unavailable rather than presenting an empty summary.
   const measuredTotals = usageTotals && (usageTotals.requests !== null || usageTotals.tokensIn !== null
     || usageTotals.tokensOut !== null || usageTotals.modelCostUsd !== null || usageTotals.executionCostUsd !== null);
-  const anyHeartbeat = nodes.some((n) => n.lastSeenAt !== null);
+  const lane = heartbeatLane(nodes);
+  const laneLabels = {
+    live: 'Heartbeat: fresh heartbeat seen (reachability only, never inference acceptance)',
+    stale: 'Heartbeat: only stale heartbeats seen (reachability only, never inference acceptance)',
+    unknown: 'Heartbeat: flags without heartbeat telemetry (reachability unproven)',
+    none: 'No worker heartbeats seen',
+  };
   return {
     schema: 'aipster.fabric-flow/1',
     generatedAt: now.toISOString(),
@@ -131,17 +153,12 @@ export function buildFabricFlow({ status, usage, nowMs }) {
           ? 'Result (architectural: usage totals only, no streamed results)'
           : 'Result unavailable: no measured usage',
       },
-      heartbeat: {
-        state: anyHeartbeat ? 'live' : 'none',
-        label: anyHeartbeat
-          ? 'Heartbeat: reachability only, never inference acceptance'
-          : 'No worker heartbeats seen',
-      },
+      heartbeat: { state: lane, label: laneLabels[lane] },
     },
     legend: [
       { key: 'request', state: 'architectural' },
       { key: 'result', state: 'architectural' },
-      { key: 'heartbeat', state: anyHeartbeat ? 'live' : 'none' },
+      { key: 'heartbeat', state: lane },
       { key: 'resident', state: 'unsupported' },
       { key: 'cached', state: 'unsupported' },
       { key: 'unprovisioned', state: 'unsupported' },

@@ -183,3 +183,23 @@ test('O-5/O-1: legend heartbeat mirrors the edge; missing shared/truncation stay
   assert.equal(live.countsSource, 'aggregate');
   assert.deepEqual(live.usageCoverage, { shown: 1, total: 4, complete: false });
 });
+
+test('FINDING-A: heartbeat lane follows the liveness set in the view-model', () => {
+  const on = { id: 'r_on', name: 'fresh', kind: 'local', liveness: 'online', lastSeenAt: iso(NOW - 1000), lastSeenAgeMs: 1000, usable: true, demoFixture: false };
+  const stale = { id: 'r_st', name: 'old', kind: 'local', liveness: 'stale', lastSeenAt: iso(NOW - 10 * 60 * 1000), lastSeenAgeMs: 10 * 60 * 1000, usable: true, demoFixture: false };
+  const unknown = { id: 'r_un', name: 'flag-only', kind: 'local', liveness: 'unknown', lastSeenAt: null, lastSeenAgeMs: null, usable: null, demoFixture: false };
+  const off = { id: 'r_off', name: 'down', kind: 'local', liveness: 'offline', lastSeenAt: null, lastSeenAgeMs: null, usable: null, demoFixture: false };
+  const laneOf = (items) => {
+    const out = buildFabricFlow({ status: statusOf(items), usage: null, nowMs: NOW });
+    assert.equal(out.legend.find((e) => e.key === 'heartbeat').state, out.edges.heartbeat.state, 'legend mirrors the edge, no drift');
+    return out.edges.heartbeat;
+  };
+  assert.equal(laneOf([on, stale]).state, 'live');
+  const onlyStale = laneOf([stale]);
+  assert.equal(onlyStale.state, 'stale');
+  assert.match(onlyStale.label, /only stale/);
+  assert.equal(laneOf([stale, unknown]).state, 'stale');
+  assert.equal(laneOf([unknown]).state, 'unknown');
+  assert.equal(laneOf([off]).state, 'none');
+  assert.equal(laneOf([]).state, 'none');
+});

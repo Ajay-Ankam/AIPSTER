@@ -184,6 +184,20 @@ function fabricFlowNode(r, inv) {
     + `</dl></li>`;
 }
 
+// Heartbeat-lane state derives from the row liveness SET, mirroring the
+// view-model's heartbeatLane: an all-stale fabric is stale, never live.
+function flowHeartbeatLane(rows) {
+  let stale = false, unknown = false;
+  for (const r of rows || []) {
+    const l = flowRowLiveness(r);
+    if (l === 'online') return 'live';
+    if (l === 'stale') stale = true;
+    else if (l === 'unknown') unknown = true;
+  }
+  if (stale) return 'stale';
+  if (unknown) return 'unknown';
+  return 'none';
+}
 function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   const rows = statusData && Array.isArray(statusData.items) ? statusData.items : null;
   if (!rows) {
@@ -208,7 +222,8 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   const total = Number.isSafeInteger(statusData.total) && statusData.total >= 0 ? statusData.total : nodes.length;
   // Absent-vs-zero: a missing shared count renders unknown, never zero.
   const shared = Number.isSafeInteger(statusData.sharedWithMe) && statusData.sharedWithMe >= 0 ? statusData.sharedWithMe : 'unknown';
-  const anyHeartbeat = rows.some((r) => (r.liveness === 'online' || r.liveness === 'stale') && r.lastSeenAt !== null && r.lastSeenAt !== undefined);
+  const lane = flowHeartbeatLane(rows);
+  const laneWord = lane === 'live' ? 'live' : lane === 'stale' ? 'stale only' : lane === 'unknown' ? 'unknown only' : 'none seen';
   const list = nodes.length
     ? `<ul class="topo-nodes">${nodes.join('')}</ul>`
     : '<p class="muted">No resources yet — register or pair one to see it here.</p>';
@@ -218,12 +233,16 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   const note = statusData.demo
     ? 'DEMO DATA: simulated fixture, not a live node.'
     : 'Worker heartbeats prove reachability only, never inference acceptance. Nothing here means ready to run.';
-  // Snapshot freshness for a view left open: this panel does not poll, so it
-  // states when its data was taken and that it refreshes on Overview reload.
-  const snapTaken = statusData && typeof statusData.generatedAt === 'string' ? Date.parse(statusData.generatedAt) : NaN;
-  const snapAge = !Number.isFinite(snapTaken)
+  // Snapshot identity for a view left open: this panel does not poll, so it
+  // states the absolute captured-at time with snapshot-only wording. A
+  // relative age would freeze at render and mislead; invalid stamps stay
+  // unknown and future stamps stay absolute, never reworded as past.
+  const snapStamp = statusData && typeof statusData.generatedAt === 'string' && !Number.isNaN(Date.parse(statusData.generatedAt))
+    ? statusData.generatedAt
+    : null;
+  const snapLine = snapStamp === null
     ? 'snapshot time unknown'
-    : (Date.now() - snapTaken < 0 ? 'snapshot just taken' : `snapshot ${formatAge(Date.now() - snapTaken)}`);
+    : `snapshot taken ${snapStamp} (snapshot only — this panel does not update until Overview reloads)`;
   flowEl.innerHTML = `<div class="topo" role="group" aria-label="Fabric flow: the browser session reads the AIPSTER API, which reports worker resources from heartbeats. Request and result lanes are architectural, not live connections.">`
     + `<p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown · ${shared} shared with me${countsNote}</p>`
     + `<div class="topo-stage"><span class="topo-kicker" aria-hidden="true">entry</span><div><strong>Browser session</strong><br><span class="muted">signed-in owner · read-only view</span></div></div>`
@@ -231,10 +250,10 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
     + `<div class="topo-stage"><span class="topo-kicker" aria-hidden="true">control</span><div><strong>AIPSTER API</strong><br><span class="muted">status · inventory · usage reads</span></div></div>`
     + `<div class="topo-edge arch" aria-hidden="true"><i></i><span>Request to node (architectural)</span></div>`
     + list + truncated
-    + `<div class="topo-return"><span>Heartbeat returns: reachability only (${anyHeartbeat ? 'live' : 'none seen'})</span><span>Result returns: usage totals only</span></div>`
+    + `<div class="topo-return"><span>Heartbeat returns: reachability only (${laneWord})</span><span>Result returns: usage totals only</span></div>`
     + `<p class="muted">Heartbeat freshness: online means a fresh heartbeat, stale an older one, unknown a flag without heartbeat, offline not flagged. Resident, Cached, Unprovisioned: unsupported in this build.</p>`
     + `<p class="muted">${esc(note)}</p>`
-    + `<p class="muted">${esc(snapAge)} · this panel refreshes when Overview reloads.</p></div>`;
+    + `<p class="muted">${esc(snapLine)}.</p></div>`;
   // Throughput is always unavailable: usage reports cumulative counts only.
   const rawT = usageData && usageData.totals && typeof usageData.totals === 'object' ? usageData.totals : null;
   // An all-absent totals object measures nothing: treat it as unavailable.
