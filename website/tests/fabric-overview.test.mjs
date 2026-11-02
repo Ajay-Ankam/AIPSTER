@@ -424,10 +424,57 @@ test('topology stylesheet is responsive, static, and reduced-motion safe', async
   const css = await readFile(APP_CSS, 'utf8');
   assert.ok(css.includes('.topo-nodes'), 'topology grid present');
   assert.ok(/@media\s*\(max-width:860px\)\s*\{[^}]*\.topo-map\s*\{\s*grid-template-columns:1fr/.test(css), 'vertical collapse');
-  assert.ok(/\.topo-map\s*\{\s*display:grid;grid-template-columns:150px 60px 172px 60px/.test(css), 'wide horizontal map');
-  assert.ok(/\.topo-map \.topo-nodes\s*\{\s*grid-column:1\/-1/.test(css), 'node field spans full map width');
+  assert.ok(/\.topo-map\s*\{\s*display:grid;grid-template-columns:150px 60px 172px 60px minmax\(320px,1fr\)/.test(css), 'wide horizontal map with a flexible node track');
+  assert.ok(/\.topo-map \.topo-nodes\s*\{\s*grid-column:5;grid-row:1/.test(css), 'node field occupies the flexible track, not the fixed stage tracks');
+  assert.ok(/\.bench-lane-grid\s*\{\s*display:grid;[^}]*grid-template-columns:minmax\(0,16rem\) minmax\(0,1fr\) minmax\(0,11rem\)/.test(css), 'bench lanes use a three-column measurement grid');
+  assert.ok(/\.topo-map \.topo-nodes\s*\{\s*grid-column:auto;grid-row:auto/.test(css), 'node field placement resets on mobile');
+  assert.ok(/\.bench-lane-grid\s*\{\s*grid-template-columns:1fr/.test(css), 'bench lanes stack on mobile');
   assert.ok(/\.topo-link span\{[^}]*right:\.2rem;white-space:normal/.test(css), 'mobile link labels wrap inside the viewport');
   assert.ok(css.includes('prefers-reduced-motion'), 'reduced-motion rule present');
   const topoRules = css.slice(css.indexOf('.topo'));
   assert.ok(!/animation|transition|@keyframes/i.test(topoRules), 'no motion in topology rules');
+});
+
+test('edge links carry short labels; the dispatch disclaimer lives in the return lane', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const { flow } = render(context, el, statusPayload([item()]), usagePayload());
+  assert.ok(flow.includes('<span>Request</span>'), 'short request label');
+  assert.ok(flow.includes('<span>Request to node</span>'), 'short node-request label');
+  assert.ok(!/<span>Request[^<]*<small>/.test(flow) && !/<span>Request to node[^<]*<small>/.test(flow), 'no cramped small print inside the links');
+  assert.ok(flow.includes('dispatch availability unverified'), 'disclaimer kept');
+  const ret = flow.slice(flow.indexOf('topo-return'));
+  assert.ok(ret.includes('Request lanes: architectural · dispatch availability unverified here'), 'disclaimer sits in the return lane');
+});
+
+test('bench lanes use a three-column measurement grid with honest slots', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const { tp } = render(context, el, statusPayload([item()]), usagePayload(), new Map([['r_1', invCard()]]));
+  const doc = parseFragment(tp);
+  const byClass = (root, cls) => {
+    const out = [];
+    const walk = (n) => {
+      if (n.attrs && n.attrs.some((a) => a.name === 'class' && a.value.split(' ').includes(cls))) out.push(n);
+      for (const c of n.childNodes || []) walk(c);
+    };
+    walk(root); return out;
+  };
+  const lanes = byClass(doc, 'bench-lane');
+  assert.equal(lanes.length, 1, 'one lane per rendered row');
+  const text = (n) => (n.value || '') + (n.childNodes || []).map(text).join('');
+  for (const lane of lanes) {
+    const cols = (lane.childNodes || []).flatMap((c) => (c.tagName === 'div' && (c.attrs || []).some((a) => a.name === 'class' && a.value.split(' ').includes('bench-lane-grid')) ? (c.childNodes || []) : [])).filter((c) => c.tagName === 'div');
+    assert.equal(cols.length, 3, 'compute / plot / accelerator columns');
+    assert.ok(text(cols[0]).includes('Declared CPU'), 'compute column carries declared facts');
+    assert.ok(text(cols[1]).includes('tok/s scale unavailable') && text(cols[1]).includes('Generation rate'), 'plot column carries axis ticks plus the unmeasured rate slot');
+    assert.ok(text(cols[2]).includes('Accelerator'), 'accelerator column present');
+  }
+  assert.ok(tp.includes('Not measured: no measured tok/s exist in this build'), 'no fabricated rate');
+});
+
+test('fabric panels precede the legacy inventory cards in the Overview tab', async () => {
+  const html = await readFile(APP_HTML, 'utf8');
+  const tab = html.slice(html.indexOf('tab-overview'), html.indexOf('tab-compute'));
+  assert.ok(tab.indexOf('fabric-flow-panel') !== -1 && tab.indexOf('fabric-throughput-panel') !== -1, 'fabric panels present');
+  assert.ok(tab.indexOf('fabric-flow-panel') < tab.indexOf('ov-cards'), 'flow panel above legacy cards');
+  assert.ok(tab.indexOf('fabric-throughput-panel') < tab.indexOf('ov-cards'), 'bench panel above legacy cards');
 });

@@ -64,8 +64,8 @@ a.btn.secondary, button.btn.secondary { background:transparent; color:var(--acce
 .topo-head{display:flex;justify-content:space-between;gap:1rem;align-items:end;flex-wrap:wrap}
 .eyebrow{font-size:.72rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0 0 .3rem}
 .topo-note{margin:0;color:var(--muted);font-size:.8rem;max-width:22rem}
-.topo-map{display:grid;grid-template-columns:150px 60px 172px 60px;align-items:center;gap:.6rem .4rem;margin-top:.6rem}
-.topo-map .topo-nodes{grid-column:1/-1}
+.topo-map{display:grid;grid-template-columns:150px 60px 172px 60px minmax(320px,1fr);align-items:center;gap:.6rem .4rem;margin-top:.6rem}
+.topo-map .topo-nodes{grid-column:5;grid-row:1}
 .topo-stage{display:flex;gap:.6rem;align-items:center;border:1px solid var(--line);border-radius:.4rem;padding:.55rem .7rem;background:#10151d;min-width:0}
 .topo-icon{display:grid;place-items:center;width:1.6rem;height:1.6rem;flex:none;background:#3a2c1c;color:var(--accent);border-radius:.3rem;font-weight:700}
 .topo-stage b{display:block;font-size:.85rem}
@@ -130,10 +130,12 @@ a.btn.secondary, button.btn.secondary { background:transparent; color:var(--acce
 .bench-lane.online .topo-dot{background:var(--ok)}
 .bench-lane.stale .topo-dot{background:var(--warn)}
 .bench-lane.offline .topo-dot{background:var(--bad)}
-.bench-lane-grid{display:grid;gap:.45rem .8rem;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:.5rem}
+.bench-lane-grid{display:grid;gap:.45rem 1rem;grid-template-columns:minmax(0,16rem) minmax(0,1fr) minmax(0,11rem);margin-top:.5rem}
+.bench-col{min-width:0}
+.bench-col .bench-axis{margin-top:0}
 .bench-cell span{display:block;font-size:.68rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
 .bench-cell b{display:block;font-size:.82rem;margin-top:.15rem;overflow-wrap:anywhere}
 .bench-cell small{display:block;color:var(--muted);font-size:.74rem;margin-top:.2rem}
 .bench-track.sm{min-height:1rem}
-@media (max-width:860px){ .topo-map{grid-template-columns:1fr;gap:.55rem} .topo-link{height:2.7rem} .topo-link:before{top:0;bottom:0;left:50%;right:auto;border-top:0;border-left:2px solid var(--accent)} .topo-link:after{content:"↓";top:.85rem;right:auto;left:calc(50% - .45rem)} .topo-link span{position:absolute;top:.6rem;left:calc(50% + .7rem);right:.2rem;white-space:normal;text-align:left} .topo-return{grid-column:auto} .topo-nodes{grid-template-columns:1fr} }
+@media (max-width:860px){ .topo-map{grid-template-columns:1fr;gap:.55rem} .topo-map .topo-nodes{grid-column:auto;grid-row:auto} .bench-lane-grid{grid-template-columns:1fr} .topo-link{height:2.7rem} .topo-link:before{top:0;bottom:0;left:50%;right:auto;border-top:0;border-left:2px solid var(--accent)} .topo-link:after{content:"↓";top:.85rem;right:auto;left:calc(50% - .45rem)} .topo-link span{position:absolute;top:.6rem;left:calc(50% + .7rem);right:.2rem;white-space:normal;text-align:left} .topo-return{grid-column:auto} .topo-nodes{grid-template-columns:1fr} }
 @media (max-width:640px){ .ev dt{min-width:7rem;} .bench .ev dt{min-width:0;} .bench .ev div{display:block;} .bench .ev dd{margin:.15rem 0 0;} }

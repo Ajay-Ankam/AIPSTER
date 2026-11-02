@@ -26,7 +26,7 @@ comparison is claimed.
 
 | EIF | AIPSTER |
 | --- | --- |
-| Request | Architectural label: dispatch availability is a deployment flag (`INFERENCE_ENABLED`) this read-only view cannot verify, so the lane never claims a `501` or an enabled dispatch |
+| Request | Short rendered labels (`Request`, `Request to node`); the dispatch-availability disclaimer lives in the return lane, not inside the link, so narrow tracks never carry cramped small print. Dispatch availability is a deployment flag (`INFERENCE_ENABLED`) this read-only view cannot verify, so the lane never claims a `501` or an enabled dispatch |
 | Result | Summarized-or-unavailable: cumulative usage totals, no streamed results |
 | Heartbeat | Live: `heartbeat_at` freshness (`STALE_AFTER_MS` = 5 min); `unknown` when the flag claims online without telemetry |
 | Resident / Cached / Unprovisioned | Unsupported legend entries, labeled as such |
@@ -60,6 +60,27 @@ pixels. Gap map, current versus reference:
   "models not reported" line (no resident/cached states exist here).
   The bench keeps the axis + hatched-empty-track + "Not measured" pattern
   with cumulative totals and page coverage; no fills, bars, or rates.
+  Desktop geometry follows the EIF 5-track map (`150px 60px 172px 60px`
+  plus a flexible `minmax(320px,1fr)` node field, collapsing to one
+  column on mobile) and EIF-style 3-column bench lanes (compute facts /
+  axis-ticked unmeasured plot / accelerator slots), all slots truthful.
+  The Fabric flow and throughput panels render above the legacy
+  inventory cards so the primary visualization reaches the first fold.
+
+## Reproduction status (corrected wording)
+
+- Long-string overflow (`r4439073205`): NOT reproduced at the
+  intermediate baseline — max-valid unbroken strings (80-char name,
+  64-char id, 80-char CPU/GPU) wrapped with no page overflow at
+  390px and 320px. The fix is defensive hardening, proven by
+  final-state checks on the fixed head.
+- Bench label reset (`r4439073227`): final-state checks at 320px and
+  390px on the fixed head (labels stack, no overflow); no
+  failing-before repro is claimed.
+- Stale-response ordinal (`r4439073247`): verified by mutation — the
+  rewritten test FAILS against a guard-stripped disposable copy
+  (stale first-render repaints) and passes against production. No
+  production source was touched for the diagnostic.
 
 ## Permission boundary
 

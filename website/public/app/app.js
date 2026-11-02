@@ -219,15 +219,19 @@ function fabricBenchLane(r, inv) {
   return `<div class="bench-lane ${disp}">`
     + `<header><span class="topo-dot" aria-hidden="true"></span><strong>${esc(r.name)}</strong><b>${esc(disp)}</b><span class="muted">${esc(r.id)} · ${esc(r.kind)}${r.demoFixture ? ' · DEMO' : ''}</span></header>`
     + `<div class="bench-lane-grid">`
+    + `<div class="bench-col">`
     + val('Heartbeat', `${age} · ${disp}`)
     + val('Declared CPU', ev.cpu) + val('Declared GPU', ev.gpu)
     + val('Capabilities', ev.caps === null ? 'none recorded' : ev.caps)
     + hatch('CPU load', 'not reported: heartbeats carry no load numbers')
     + hatch('Memory', 'not reported: no memory readings in contract')
+    + `</div><div class="bench-col">`
+    + `<div class="bench-axis" aria-hidden="true"><span>0</span><span>tok/s scale unavailable</span></div>`
     + hatch('Generation rate', 'Not measured: no measured tok/s exist in this build')
+    + `</div><div class="bench-col">`
     + hatch('Accelerator', 'unavailable: no accelerator inventory')
     + hatch('Runtime · latency · prompt', 'unavailable: no runtime telemetry in contract')
-    + `</div>`
+    + `</div></div>`
     + `<p class="muted">Models: No models reported.</p></div>`;
 }
 function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
@@ -284,13 +288,13 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
     + `<div class="topo-head"><div><p class="eyebrow">snapshot · read-only</p><p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown · ${shared} shared with me${countsNote}</p></div><p class="topo-note">Heartbeat freshness, not inference readiness.</p></div>`
     + `<div class="topo-map">`
     + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true">→</span><div><b>Browser session</b><small>signed-in owner · read-only view</small></div></div>`
-    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request<small>architectural · dispatch availability unverified here</small></span></div>`
+    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request</span></div>`
     + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true">≡</span><div><b>AIPSTER API</b><small>status · inventory · usage reads</small></div></div>`
-    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request to node<small>architectural · dispatch availability unverified here</small></span></div>`
+    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request to node</span></div>`
     + (nodes.length ? `<ul class="topo-nodes">${nodes.join('')}</ul>` : '<p class="muted">No resources yet — register or pair one to see it here.</p>')
     + `</div>`
     + truncated
-    + `<div class="topo-return"><span>Heartbeat returns: reachability only (${laneWord})</span><span>Result returns: usage totals only</span></div>`
+    + `<div class="topo-return"><span>Heartbeat returns: reachability only (${laneWord})</span><span>Result returns: usage totals only</span><span>Request lanes: architectural · dispatch availability unverified here</span></div>`
     + `<p class="muted">Heartbeat freshness: online means a fresh heartbeat, stale an older one, unknown a flag without heartbeat, offline not flagged.</p>`
     + `<footer class="topo-legend"><span><i class="sw-request"></i>Request (architectural)</span><span><i class="sw-heartbeat"></i>Heartbeat</span><span><i class="sw-result"></i>Result (architectural: usage totals only)</span><span><i class="sw-unsupported"></i>Resident / Cached / Unprovisioned (unsupported)</span></footer>`
     + `<p class="muted">${esc(note)}</p>`
