@@ -64,7 +64,8 @@ a.btn.secondary, button.btn.secondary { background:transparent; color:var(--acce
 .topo-head{display:flex;justify-content:space-between;gap:1rem;align-items:end;flex-wrap:wrap}
 .eyebrow{font-size:.72rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0 0 .3rem}
 .topo-note{margin:0;color:var(--muted);font-size:.8rem;max-width:22rem}
-.topo-map{display:grid;grid-template-columns:150px 60px 172px 60px minmax(0,1fr);align-items:center;gap:0 .4rem;margin-top:.6rem}
+.topo-map{display:grid;grid-template-columns:150px 60px 172px 60px;align-items:center;gap:.6rem .4rem;margin-top:.6rem}
+.topo-map .topo-nodes{grid-column:1/-1}
 .topo-stage{display:flex;gap:.6rem;align-items:center;border:1px solid var(--line);border-radius:.4rem;padding:.55rem .7rem;background:#10151d;min-width:0}
 .topo-icon{display:grid;place-items:center;width:1.6rem;height:1.6rem;flex:none;background:#3a2c1c;color:var(--accent);border-radius:.3rem;font-weight:700}
 .topo-stage b{display:block;font-size:.85rem}

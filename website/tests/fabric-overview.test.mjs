@@ -414,6 +414,7 @@ test('topology stylesheet is responsive, static, and reduced-motion safe', async
   assert.ok(css.includes('.topo-nodes'), 'topology grid present');
   assert.ok(/@media\s*\(max-width:860px\)\s*\{[^}]*\.topo-map\s*\{\s*grid-template-columns:1fr/.test(css), 'vertical collapse');
   assert.ok(/\.topo-map\s*\{\s*display:grid;grid-template-columns:150px 60px 172px 60px/.test(css), 'wide horizontal map');
+  assert.ok(/\.topo-map \.topo-nodes\s*\{\s*grid-column:1\/-1/.test(css), 'node field spans full map width');
   assert.ok(/\.topo-link span\{[^}]*right:\.2rem;white-space:normal/.test(css), 'mobile link labels wrap inside the viewport');
   assert.ok(css.includes('prefers-reduced-motion'), 'reduced-motion rule present');
   const topoRules = css.slice(css.indexOf('.topo'));
