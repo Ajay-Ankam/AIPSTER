@@ -42,7 +42,7 @@ assumes GDM = DGM. See the evidence `ARCHITECTURE-FIT.md`.
 Node 20 or newer. No install step.
 
 ```bash
-node --test "tests/*.test.mjs"     # 72 deterministic tests
+node --test "tests/*.test.mjs"     # 73 deterministic tests
 node scripts/measure.mjs           # sweep -> artifacts/measurement.json
 node scripts/measure.mjs --json    # print the report
 node scripts/serve.mjs             # http://127.0.0.1:8099/?experiment=on

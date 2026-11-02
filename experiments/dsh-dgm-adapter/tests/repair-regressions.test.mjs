@@ -182,6 +182,34 @@ test('B: selection requires the fixtures and refuses an unknown one', async () =
   assert.equal((await select([verdict], { fixtures: other })).code, 'DGM_VERDICT_UNBOUND');
 });
 
+test('B: a genuine unavailable or failed verdict is selected over, never refused', async () => {
+  // The coherence check must not reject real records. This one is honestly
+  // unavailable because its own budget cannot fit the check set.
+  const tight = { ...findWorkItem('sm-106'), budget: { max_work_units: 4, max_repairs: 3 } };
+  const built = await buildRequest(tight);
+  const unavailable = await evaluate(tight, built.request);
+  assert.equal(unavailable.status, 'unavailable');
+
+  const withTight = [...FIXTURES.filter((fixture) => fixture.id !== 'sm-106'), tight];
+  const result = await select([unavailable], { fixtures: withTight });
+  assert.equal(result.ok, true, `a genuine unavailable verdict must not be refused: ${result.code}`);
+  assert.equal(result.selection.selected, null);
+  assert.equal(result.selection.verification.verified, 1);
+
+  // The same verdict named against a fixture whose budget differs cannot be
+  // re-derived, so it is unbound — the refusal is about reproduction, not status.
+  assert.equal((await select([unavailable], { fixtures: FIXTURES })).code, 'DGM_VERDICT_UNBOUND');
+
+  // A rejected or unavailable verdict mixed with a selectable one: the
+  // selectable one wins and the others are still counted as verified.
+  const selectable = (await candidateVerdicts(findWorkItem('sm-101'))).verdict;
+  assert.equal(selectable.status, 'selected');
+  const mixed = await select([unavailable, selectable], { fixtures: withTight });
+  assert.equal(mixed.ok, true);
+  assert.equal(mixed.selection.selected.verdict_sha256, selectable.verdict_sha256);
+  assert.equal(mixed.selection.verification.verified, 2);
+});
+
 test('B: a genuine selection records what it verified', async () => {
   const verdicts = [];
   for (const workItem of WORK_ITEMS) verdicts.push((await candidateVerdicts(workItem)).verdict);
