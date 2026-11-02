@@ -60,8 +60,41 @@ const SPEND_WINDOW = 'all-time';
 // States whose outcome is unknown or still running. A cancelled op that may
 // have been sent stays in the quarantine set until an explicit operator
 // reconciliation; a local cancel is bookkeeping, not proof.
-const BLOCKING_WHERE = `(state IN ('reserved','fetching','uncertain') OR (state = 'cancelled' AND unknown_outcome = 1))`;
+//
+// The cancelled branch cannot rely on `unknown_outcome` alone: migration 0028
+// gave every pre-existing row the column default 0, including round-1 rows
+// that were already uncertain or in flight, and a row can be written by a
+// future path that forgets the flag. The retained receipt is therefore part
+// of the predicate, so evidence — not only a flag — keeps a possibly-sent
+// cancellation quarantined. Every pattern only ever makes the predicate more
+// conservative.
+const CANCELLED_MAY_HAVE_BEEN_SENT = `(
+      unknown_outcome = 1
+      OR receipt_json LIKE '%"providerContact":"sent"%'
+      OR receipt_json LIKE '%"providerContact":"unknown"%'
+      OR receipt_json LIKE '%"acceptance":"accepted"%'
+      OR receipt_json LIKE '%"acceptance":"unknown"%'
+      OR receipt_json LIKE '%"billing":"possibly-chargeable"%'
+      OR receipt_json LIKE '%"cancelledFrom":"fetching"%'
+      OR receipt_json LIKE '%"accepted":true%')`;
+const BLOCKING_WHERE = `(state IN ('reserved','fetching','uncertain') OR (state = 'cancelled' AND ${CANCELLED_MAY_HAVE_BEEN_SENT}))`;
 const RECONCILE_STATES = ['fetching', 'uncertain', 'cancelled'];
+
+/**
+ * The same derivation as CANCELLED_MAY_HAVE_BEEN_SENT, in JS, for rows
+ * already read. Used by admission classification and the op readback so a
+ * legacy cancelled row is treated exactly as the SQL predicate treats it.
+ */
+function rowMayHaveBeenSent(row, receipt = null) {
+  if (Number(row && row.unknown_outcome) === 1) return true;
+  const r = receipt || parseReceipt(row && row.receipt_json, null);
+  if (!r || typeof r !== 'object') return false;
+  return r.providerContact === 'sent' || r.providerContact === 'unknown'
+    || r.acceptance === 'accepted' || r.acceptance === 'unknown'
+    || r.billing === 'possibly-chargeable'
+    || r.cancelledFrom === 'fetching'
+    || r.accepted === true;
+}
 
 function send(ctx, status, body) {
   return ctx.json(status, body);
@@ -108,7 +141,11 @@ function checkProposeBody(raw) {
 
 function storageMissing(e) {
   const msg = String((e && e.message) || e || '');
-  return /no such table/i.test(msg);
+  // A missing table is the un-migrated store; a missing column is the same
+  // state for a database that stopped one migration short (e.g. 0027 without
+  // 0028). Both fail closed with the same named code rather than leaking the
+  // raw SQLite message through the generic 500 path.
+  return /no such (table|column)/i.test(msg);
 }
 
 function opAge(createdAt) {
@@ -237,10 +274,13 @@ function resolveExisting(found, digest) {
  */
 async function admissionBlockers(db, tenant) {
   const rows = await all(db,
-    `SELECT op_key, state, unknown_outcome, created_at FROM dgm_muse_ops
+    `SELECT op_key, state, unknown_outcome, receipt_json, created_at FROM dgm_muse_ops
      WHERE tenant_id = ? AND ${BLOCKING_WHERE} ORDER BY updated_at ASC LIMIT 5`,
     tenant);
-  const uncertain = (rows || []).filter((r) => r.state === 'uncertain' || (r.state === 'cancelled' && Number(r.unknown_outcome) === 1));
+  // Same evidence rule as the SQL predicate: a cancelled row blocks when its
+  // flag says so OR its retained receipt shows a possibly-sent call. This is
+  // what keeps migrated rows (flag defaulted to 0) quarantined.
+  const uncertain = (rows || []).filter((r) => r.state === 'uncertain' || (r.state === 'cancelled' && rowMayHaveBeenSent(r)));
   const inFlight = (rows || []).filter((r) => r.state === 'reserved' || r.state === 'fetching');
   return { uncertain, inFlight };
 }
@@ -713,9 +753,10 @@ async function statusRoute(ctx) {
         capUsd: capMicros / 1e6,
         reservedUsd: Number(row.reserved_micros) / 1e6,
         usedUsd: Number(row.used_micros) / 1e6,
+        usedBasis: 'reported-usage-from-delivered-calls-only',
         remainingUsd: Math.max(0, (capMicros - Number(row.reserved_micros)) / 1e6),
         updatedAt: row.updated_at,
-        note: 'Aggregate worst-case reservations across all tenants and every op key in this window. Cancellations, TTL cleanup, missing usage and new keys never release or reset a reservation; usedUsd is reported usage for delivered calls and is not a bill.',
+        note: 'Aggregate worst-case reservations across all tenants and every op key in this window. Cancellations, TTL cleanup, missing usage and new keys never release or reset a reservation. reservedUsd is the admission bound, not a bill. usedUsd is reported usage from delivered calls only: an accepted-but-unusable outcome records its reported usage on the op receipt but is not added here, so it is a lower bound on known usage and is not a bill.',
       }
       : { scope: SPEND_SCOPE, window: SPEND_WINDOW, capUsd: capMicros / 1e6, status: 'uninitialised' };
   } catch (e) {
@@ -736,7 +777,7 @@ async function statusRoute(ctx) {
       contributorTrainingUse: 'Contributor mode permits training use of submitted content: operators must submit synthetic qualification input only.',
       inputMustBeSynthetic: 'Labelling the output synthetic does not make arbitrary input synthetic. Tenant, credential, personal, or production data must never be submitted.',
       liveRequires: ['DGM_MUSE_LIVE=1', 'server-side DGM_MUSE_API_KEY binding', 'DGM_MUSE_SPEND_CAP_USD covering the aggregate worst-case reservation', 'admin.engineering.assign grant'],
-      spendAccounting: 'Each live admission atomically reserves its worst-case cost in one deployment-wide, all-time aggregate ledger enforced against the operator cap. Cancellations, TTL cleanup, missing usage and new keys never release or reset a reservation; no automatic refund exists.',
+      spendAccounting: 'Each live admission atomically reserves its worst-case cost in one deployment-wide, all-time aggregate ledger enforced against the operator cap. Cancellations, TTL cleanup, missing usage and new keys never release or reset a reservation; no automatic refund exists. The reservation is an admission bound, not a bill; reported usage is booked for delivered calls only, so the status usedUsd is a lower bound on known usage.',
       reconciliation: 'Cancelling an op keeps its durable reservation and unknown-outcome evidence. A cancelled op that may have been sent stays quarantined; POST ops/{key}/reconcile with acknowledge:true is the explicit operator act that closes it, and it never erases the evidence.',
     },
     promotion: { promote: 'disabled', execute: 'disabled', detail: 'promotion is disabled; no code path enables it', code: 'ADMIN_NOT_IMPLEMENTED' },
@@ -808,12 +849,22 @@ async function opRoute(ctx, opKey) {
   if (!row) return send(ctx, 404, { error: 'DGM proposal operation not found.', code: 'DGM_MUSE_UNKNOWN_OP' });
   let receipt = null;
   try { receipt = row.receipt_json ? JSON.parse(row.receipt_json) : null; } catch { receipt = null; }
+  // `unknownOutcome` is the durable, historical record that an outcome was
+  // unknown; it stays true after reconciliation. `blocking` is the current
+  // admission effect, derived from state and retained evidence, so an
+  // operator reading only this projection cannot mistake the two.
+  const unknownOutcome = Number(row.unknown_outcome) === 1;
+  const blocking = row.state === 'reserved' || row.state === 'fetching' || row.state === 'uncertain'
+    || (row.state === 'cancelled' && (unknownOutcome || rowMayHaveBeenSent(row, receipt)));
   return send(ctx, 200, {
     opKey,
     state: row.state,
     // Durable quarantine flag: true means the provider outcome is unknown
     // (the call may have been sent). A local cancel does not clear it.
-    unknownOutcome: Number(row.unknown_outcome) === 1,
+    unknownOutcome,
+    // Whether this op currently blocks a new admission for the tenant. Only
+    // an explicit reconciliation clears a possibly-sent cancellation.
+    blocking,
     receipt,
     evaluation: receipt && receipt.evaluation ? receipt.evaluation : 'fixture',
   });
@@ -846,11 +897,14 @@ async function cancelRoute(ctx, opKey) {
   const prior = parseReceipt(current.receipt_json, {}) || {};
   const now = nowIso();
   const mode = current.mode || prior.mode || null;
-  const mayHaveBeenSent = current.state === 'fetching'
+  // Evidence, not the column default, decides whether this cancellation may
+  // have left a provider call in flight. A fixture op never contacts the
+  // provider, so its cancellation is provably unsent even from `fetching`;
+  // an unknown mode stays conservative. `rowMayHaveBeenSent` covers migrated
+  // rows whose flag defaulted to 0 but whose receipt still records contact.
+  const mayHaveBeenSent = rowMayHaveBeenSent(current, prior)
     || current.state === 'uncertain'
-    || Number(current.unknown_outcome) === 1
-    || prior.providerContact === 'sent'
-    || prior.accepted === true;
+    || (current.state === 'fetching' && mode !== 'fixture');
   const merged = {
     ...prior,
     opKey,
@@ -877,7 +931,12 @@ async function cancelRoute(ctx, opKey) {
   };
   let marked;
   try {
-    marked = await markOp(ctx.db, ctx.actor.user.id, opKey, ['reserved', 'fetching', 'uncertain'], 'cancelled', merged);
+    // The durable flag is written from the evidence above, never left at the
+    // migrated default. A provably-unsent cancellation stores 0 so it stays
+    // usable; a possibly-sent one stores 1 so no new key is admitted.
+    marked = await markOp(ctx.db, ctx.actor.user.id, opKey, ['reserved', 'fetching', 'uncertain'], 'cancelled', merged, {
+      unknownOutcome: mayHaveBeenSent ? 1 : 0,
+    });
   } catch (e) {
     if (storageMissing(e)) return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
     throw e;
@@ -933,9 +992,18 @@ async function reconcileRoute(ctx, opKey) {
       code: 'DGM_MUSE_ACK_REQUIRED',
     });
   }
-  const note = body.note === undefined ? null : boundedText(body.note, 200);
-  if (body.note !== undefined && (typeof body.note !== 'string' || note === null || note.length > 200)) {
-    return send(ctx, 400, { error: 'note must be a string of at most 200 chars.', code: 'DGM_MUSE_BAD_BODY' });
+  // Validate the operator's raw input, then redact for storage. Checking the
+  // post-redaction value would make the bound unreachable (redaction/truncation
+  // happens first) and silently cut an over-length note.
+  let note = null;
+  let noteTruncated = false;
+  if (body.note !== undefined) {
+    if (typeof body.note !== 'string' || body.note.length > 200) {
+      return send(ctx, 400, { error: 'note must be a string of at most 200 chars.', code: 'DGM_MUSE_BAD_BODY' });
+    }
+    const bounded = boundProviderText(body.note, 200);
+    note = bounded && bounded.value ? bounded.value : null;
+    noteTruncated = !!(bounded && bounded.truncated);
   }
   let current = null;
   try {
@@ -962,6 +1030,7 @@ async function reconcileRoute(ctx, opKey) {
     reconciledBy: ctx.actor.user.id,
     acknowledged: true,
     ...(note ? { reconcileNote: note } : {}),
+    ...(noteTruncated ? { reconcileNoteTruncated: true } : {}),
     mode: current.mode || prior.mode || null,
     evaluation: evaluationForMode(current.mode || prior.mode, prior.evaluation || null),
     // Snapshot of what the operator reconciled against; the top-level

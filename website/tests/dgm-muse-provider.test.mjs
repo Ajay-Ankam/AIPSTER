@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { createTestEnv, readJson, sessionCookieHeader, TEST_SECRET, MIGRATION_FILES } from './d1-shim.mjs';
+import { createTestEnv, readJson, sessionCookieHeader, TEST_SECRET, MIGRATION_FILES, applyMigrations } from './d1-shim.mjs';
 import {
   DGM_MUSE_MODEL, DGM_MUSE_RESPONSES_URL, DGM_MUSE_PROMPT_MAX_BYTES,
   DGM_MUSE_OUTPUT_MAX_TOKENS, DGM_MUSE_RESPONSE_MAX, DGM_MUSE_DEADLINE_MS,
@@ -238,6 +238,36 @@ test('muse provider: fixture proposal is deterministic and labelled', () => {
 // ---------- propose core: explicit modes, idempotency, quarantine ----------
 
 const alice = () => ({ user: { id: 'u_alice' } });
+
+// ---------- fix round 3 helpers: migrated legacy rows and schema edges ----------
+
+const PRE_0028 = MIGRATION_FILES.filter((n) => n !== '0028_dgm_muse_spend.sql');
+
+/** A row shaped exactly as migration 0028 leaves pre-existing data by default. */
+function seedMuseRow(t, { key, state, unknown = 0, receipt = {}, tenant = 'u_alice', mode = 'live', created = new Date().toISOString() }) {
+  return t.DB.prepare(
+    'INSERT INTO dgm_muse_ops (tenant_id, op_key, input_digest, mode, state, receipt_json, unknown_outcome, spend_micros, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(tenant, key, `d-${key}`, mode, state, JSON.stringify({ opKey: key, mode, ...receipt }), unknown, 170, created, created).run();
+}
+
+async function seedUser(t, id = 'u_pre28') {
+  const now = new Date().toISOString();
+  const token = randomBytes(32).toString('hex');
+  await t.DB.prepare('INSERT INTO allowlist (email, added_at) VALUES (?, ?)').bind(`${id}@synthetic.invalid`, now).run();
+  await t.DB.prepare('INSERT INTO "user" (id, name, email, emailVerified, image, createdAt, updatedAt) VALUES (?, ?, ?, 1, NULL, ?, ?)')
+    .bind(id, 'Pre 0028', `${id}@synthetic.invalid`, now, now).run();
+  await t.DB.prepare('INSERT INTO session (id, expiresAt, token, createdAt, updatedAt, ipAddress, userAgent, userId) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)')
+    .bind(`s_${token.slice(0, 8)}`, new Date(Date.now() + 12 * 3600e3).toISOString(), token, now, now, 'test', id).run();
+  return { id, token };
+}
+
+const museOp = (t, key, tenant = 'u_alice') =>
+  t.DB.prepare('SELECT state, unknown_outcome, receipt_json FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?').bind(tenant, key).first();
+const postMuse = async (t, path, body, user = null) => readJson(await t.call(path, {
+  method: 'POST',
+  headers: { ...(user ? t.as(user) : t.as(t.alice)), ...t.csrf },
+  body,
+}));
 
 test('muse propose: default mode is labelled fixture, no fetch', async () => {
   const t = await createTestEnv(FLAG);
@@ -1179,12 +1209,24 @@ test('muse routes R2 N3: aggregate spend cap bounds sequential admissions; cance
   assert.equal(calls, 2, 'refused admissions send no provider call');
   const spend = await t.DB.prepare('SELECT reserved_micros FROM dgm_muse_spend WHERE scope = ? AND window_key = ?').bind('global', 'all-time').first();
   assert.equal(Number(spend.reserved_micros), Math.round(worst * 2 * 1e6));
-  // Cancelling one admitted op keeps its reservation: the aggregate does not shrink.
-  await t.DB.prepare("UPDATE dgm_muse_ops SET state = 'cancelled', unknown_outcome = 0 WHERE tenant_id = 'u_alice' AND op_key = 'r3-0'").run();
+  // Cancelling one admitted op keeps its reservation: the aggregate does not
+  // shrink. Mark it as a cancellation recorded before provider contact, which
+  // is provably unsent and therefore does not quarantine the tenant on its own.
+  const preContact = JSON.stringify({ cancelledFrom: 'reserved', providerContact: 'none', acceptance: 'not-sent', billing: 'not-chargeable' });
+  await t.DB.prepare("UPDATE dgm_muse_ops SET state = 'cancelled', unknown_outcome = 0, receipt_json = ? WHERE tenant_id = 'u_alice' AND op_key = 'r3-0'").bind(preContact).run();
   await assert.rejects(
     handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Priced call.', opKey: 'r3-3', mode: 'live' }, fetchImpl: okCall }),
     (e) => e.code === 'DGM_MUSE_SPEND_EXCEEDED');
   assert.equal(calls, 2);
+  // A cancelled op that retains delivery evidence is a different matter: the
+  // cancel is a local record and cannot prove the sent call did not run, so it
+  // quarantines the tenant ahead of the spend gate until it is reconciled.
+  const mayHaveBeenSent = JSON.stringify({ cancelledFrom: 'fetching', providerContact: 'sent', acceptance: 'accepted', billing: 'possibly-chargeable' });
+  await t.DB.prepare("UPDATE dgm_muse_ops SET receipt_json = ? WHERE tenant_id = 'u_alice' AND op_key = 'r3-0'").bind(mayHaveBeenSent).run();
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Priced call.', opKey: 'r3-4', mode: 'live' }, fetchImpl: okCall }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+  assert.equal(calls, 2, 'a quarantined tenant sends no provider call');
 });
 
 test('muse propose R2 N4: settled replays survive activation and spend configuration changes', async () => {
@@ -1283,4 +1325,170 @@ test('muse provider R2 N6: provider identifiers and model text are bounded and f
       assert.ok(e.detail.truncated.includes('observedModel'));
       return true;
     });
+});
+
+// ---------- fix round 3: migrated legacy rows, note bounds, schema edges ----------
+
+test('muse routes R3 N-R2-1a: a migrated uncertain row stays quarantined through a real cancel', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  // Exactly what 0028 leaves for a round-1 uncertain row: flag defaults to 0.
+  await seedMuseRow(t, {
+    key: 'legacy-unc', state: 'uncertain', unknown: 0, receipt: {
+      error: 'DGM_MUSE_TRUNCATED', status: 502, providerContact: 'sent', acceptance: 'accepted',
+      billing: 'possibly-chargeable', spendUsdReserved: 0.00017,
+    },
+  });
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Before cancel.', opKey: 'legacy-before', mode: 'live' }, fetchImpl: okFetch() }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+  const cancel = await postMuse(t, `${BASE}/ops/legacy-unc/cancel`, {});
+  assert.equal(cancel.status, 200, 'the cancel request itself succeeded');
+  assert.equal(cancel.json.state, 'cancelled');
+  assert.equal(cancel.json.unknownOutcome, true, 'the migrated row keeps its unknown outcome');
+  const row = await museOp(t, 'legacy-unc');
+  assert.equal(Number(row.unknown_outcome), 1, 'the durable flag is derived from retained evidence, not left at the default');
+  let calls = 0;
+  const stub = async () => { calls += 1; return new Response(JSON.stringify(wireProposal('After.')), { status: 200 }); };
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'After cancel.', opKey: 'legacy-after', mode: 'live' }, fetchImpl: stub }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+  assert.equal(calls, 0, 'a legacy cancelled row admits no provider call');
+  const op = await readJson(await t.call(`${BASE}/ops/legacy-unc`, { headers: t.as(t.alice) }));
+  assert.equal(op.json.blocking, true);
+  const rec = await postMuse(t, `${BASE}/ops/legacy-unc/reconcile`, { acknowledge: true, note: 'Provider console checked.' });
+  assert.equal(rec.status, 200);
+  assert.equal(rec.json.state, 'reconciled');
+  assert.equal(rec.json.blocking, false, 'explicit reconciliation is the release');
+  assert.equal(rec.json.receipt.spendUsdReserved, 0.00017, 'the reservation is preserved through cancel and reconcile');
+  const admitted = await handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'After cancel.', opKey: 'legacy-after', mode: 'live' }, fetchImpl: stub });
+  assert.equal(admitted.status, 200);
+  assert.equal(calls, 1);
+});
+
+test('muse routes R3 N-R2-1b: a migrated fetching row cancelled before its sweep stays quarantined', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  await seedMuseRow(t, {
+    key: 'legacy-fetch', state: 'fetching', unknown: 0, receipt: {
+      providerContact: 'sent', acceptance: 'unknown', billing: 'possibly-chargeable', spendUsdReserved: 0.00017,
+    },
+  });
+  const cancel = await postMuse(t, `${BASE}/ops/legacy-fetch/cancel`, {});
+  assert.equal(cancel.status, 200);
+  assert.equal(cancel.json.unknownOutcome, true);
+  assert.equal(Number((await museOp(t, 'legacy-fetch')).unknown_outcome), 1);
+  let calls = 0;
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Next.', opKey: 'legacy-fetch-next', mode: 'live' }, fetchImpl: async () => { calls += 1; return new Response('{}', { status: 200 }); } }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+  assert.equal(calls, 0);
+});
+
+test('muse routes R3 N-R2-1c: a legacy cancelled-in-flight row blocks and survives TTL', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  const old = new Date(Date.now() - 8 * 24 * 3600e3).toISOString();
+  // A round-1 cancellation left this shape with unknown_outcome defaulted to 0.
+  await seedMuseRow(t, {
+    key: 'legacy-cancelled', state: 'cancelled', unknown: 0, created: old, receipt: {
+      cancelledFrom: 'fetching', providerContact: 'sent', acceptance: 'unknown', billing: 'unknown',
+      error: 'DGM_MUSE_CANCELLED', status: 504, spendUsdReserved: 0.00017,
+    },
+  });
+  let calls = 0;
+  await assert.rejects(
+    handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'After TTL.', opKey: 'ttl-legacy', mode: 'live' }, fetchImpl: async () => { calls += 1; return new Response('{}', { status: 200 }); } }),
+    (e) => e.code === 'DGM_MUSE_UNCERTAIN');
+  assert.equal(calls, 0);
+  assert.ok(await museOp(t, 'legacy-cancelled'), 'TTL cleanup must not delete evidence of a possibly-sent call');
+  const op = await readJson(await t.call(`${BASE}/ops/legacy-cancelled`, { headers: t.as(t.alice) }));
+  assert.equal(op.json.unknownOutcome, false, 'the historical flag really is 0 on this migrated row');
+  assert.equal(op.json.blocking, true, 'blocking is derived from retained evidence, not only the flag');
+});
+
+test('muse routes R3 N-R2-1d: a migrated row cancelled before contact stays usable', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  await seedMuseRow(t, {
+    key: 'legacy-reserved', state: 'cancelled', unknown: 0, receipt: {
+      cancelledFrom: 'reserved', providerContact: 'none', acceptance: 'not-sent', billing: 'not-chargeable', status: 409,
+    },
+  });
+  const out = await handleMusePropose({ db: t.DB, env: t.env, actor: alice(), body: { prompt: 'Next.', opKey: 'legacy-next', mode: 'live' }, fetchImpl: okFetch() });
+  assert.equal(out.status, 200, 'a provably unsent cancellation never quarantines the tenant');
+  const op = await readJson(await t.call(`${BASE}/ops/legacy-reserved`, { headers: t.as(t.alice) }));
+  assert.equal(op.json.unknownOutcome, false);
+  assert.equal(op.json.blocking, false);
+});
+
+test('muse routes R3 N-R2-2: reconciliation notes over the bound are refused, never silently cut', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  const seed = (key) => seedMuseRow(t, { key, state: 'uncertain', unknown: 1, receipt: { error: 'DGM_MUSE_TIMEOUT', status: 504 } });
+  for (const key of ['note200', 'note201', 'note500', 'noteType', 'noteRedact']) await seed(key);
+  const exact = await postMuse(t, `${BASE}/ops/note200/reconcile`, { acknowledge: true, note: 'y'.repeat(200) });
+  assert.equal(exact.status, 200);
+  assert.equal(exact.json.receipt.reconcileNote, 'y'.repeat(200), 'an exactly-200-char note is stored verbatim');
+  for (const [key, len] of [['note201', 201], ['note500', 500]]) {
+    const out = await postMuse(t, `${BASE}/ops/${key}/reconcile`, { acknowledge: true, note: 'z'.repeat(len) });
+    assert.equal(out.status, 400, `${len}-char note must be refused`);
+    assert.equal(out.json.code, 'DGM_MUSE_BAD_BODY');
+    assert.equal((await museOp(t, key)).state, 'uncertain', 'a refused note does not partially reconcile');
+  }
+  const bad = await postMuse(t, `${BASE}/ops/noteType/reconcile`, { acknowledge: true, note: 42 });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.code, 'DGM_MUSE_BAD_BODY');
+  const red = await postMuse(t, `${BASE}/ops/noteRedact/reconcile`, { acknowledge: true, note: 'call Bearer abcDEF123 then ok' });
+  assert.equal(red.status, 200);
+  assert.ok(!red.json.receipt.reconcileNote.includes('abcDEF123'), 'operator notes are still redacted');
+  assert.ok(red.json.receipt.reconcileNote.includes('[redacted]'));
+});
+
+test('muse routes R3 N-R2-3: a pre-0028 store fails closed with a named 503 and no provider contact', async () => {
+  const t = await createTestEnv({ skipMigrations: true, ...LIVE });
+  applyMigrations(t.sqlite, PRE_0028);
+  const user = await seedUser(t);
+  await grant(t, user.id, 'engineering_reviewer');
+  let calls = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => { calls += 1; return new Response(JSON.stringify(wireProposal('x')), { status: 200 }); };
+  try {
+    const propose = await postMuse(t, `${BASE}/proposals`, { prompt: 'Pre 0028.', opKey: 'pre28', mode: 'live' }, user);
+    assert.equal(propose.status, 503, 'a missing 0028 column is a named fail-closed state, not a raw SQL error');
+    assert.equal(propose.json.code, 'DGM_MUSE_UNAVAILABLE');
+    assert.doesNotMatch(propose.text, /no such column|SQLITE_ERROR|unknown_outcome/i, 'raw schema detail never reaches the caller');
+    assert.equal(calls, 0, 'no provider contact on an unmigrated store');
+    const read = await readJson(await t.call(`${BASE}/ops/pre28`, { headers: t.as(user) }));
+    assert.equal(read.status, 503);
+    assert.equal(read.json.code, 'DGM_MUSE_UNAVAILABLE');
+    const anon = await readJson(await t.call(`${BASE}/ops/pre28`));
+    assert.equal(anon.status, 401, 'authorization still precedes any schema probe');
+    const other = await seedUser(t, 'u_pre28_nogrant');
+    const denied = await readJson(await t.call(`${BASE}/ops/pre28`, { headers: t.as(other) }));
+    assert.equal(denied.status, 403);
+  } finally {
+    globalThis.fetch = realFetch;
+    t.sqlite.close();
+  }
+});
+
+test('muse routes R3 N-R2-4: readback separates recorded flag from current blocking; used spend is labelled', async () => {
+  const t = await createTestEnv(LIVE);
+  await grant(t, 'u_alice', 'engineering_reviewer');
+  await seedMuseRow(t, { key: 'n4-reconciled', state: 'reconciled', unknown: 1, receipt: { reconciledFrom: 'cancelled', acknowledged: true } });
+  const rec = await readJson(await t.call(`${BASE}/ops/n4-reconciled`, { headers: t.as(t.alice) }));
+  assert.equal(rec.status, 200);
+  assert.equal(rec.json.unknownOutcome, true, 'the historical flag records that an outcome was unknown');
+  assert.equal(rec.json.blocking, false, 'a reconciled op no longer blocks admission');
+  await seedMuseRow(t, { key: 'n4-legacy', state: 'cancelled', unknown: 0, receipt: { cancelledFrom: 'fetching' } });
+  const leg = await readJson(await t.call(`${BASE}/ops/n4-legacy`, { headers: t.as(t.alice) }));
+  assert.equal(leg.json.unknownOutcome, false);
+  assert.equal(leg.json.blocking, true);
+  await t.DB.prepare("INSERT INTO dgm_muse_spend (scope, window_key, reserved_micros, used_micros, updated_at) VALUES ('global', 'all-time', 340, 35, ?)")
+    .bind(new Date().toISOString()).run();
+  const status = await readJson(await t.call(`${BASE}/status`, { headers: t.as(t.alice) }));
+  assert.equal(status.status, 200);
+  assert.equal(status.json.spend.usedBasis, 'reported-usage-from-delivered-calls-only');
+  assert.match(status.json.spend.note, /accepted-but-unusable|lower bound|not a bill/i);
 });

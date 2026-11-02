@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { applyMigrations } from './d1-shim.mjs';
+import { applyMigrations, MIGRATION_FILES } from './d1-shim.mjs';
 
 test('migrations create the auth and app tables', () => {
   const sqlite = new DatabaseSync(':memory:');
@@ -84,6 +84,32 @@ test('migrations create the auth and app tables', () => {
   }
   const unique = sqlite.prepare('SELECT * FROM pragma_index_list(?)').all('dispatch_holds');
   assert.ok(unique.some((i) => i.unique === 1), 'dispatch_holds is unique per (op_id, pool_id)');
+});
+
+test('migration 0028 backfills the unknown-outcome flag for migrated rows', () => {
+  const sqlite = new DatabaseSync(':memory:');
+  applyMigrations(sqlite, MIGRATION_FILES.filter((n) => n !== '0028_dgm_muse_spend.sql'));
+  const now = new Date().toISOString();
+  sqlite.prepare('INSERT INTO "user" (id, name, email, emailVerified, image, createdAt, updatedAt) VALUES (?, ?, ?, 1, NULL, ?, ?)')
+    .run('u_legacy', 'Legacy', 'legacy@synthetic.invalid', now, now);
+  const insert = (key, state, receipt) => sqlite.prepare(
+    'INSERT INTO dgm_muse_ops (tenant_id, op_key, input_digest, mode, state, receipt_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run('u_legacy', key, `d-${key}`, 'live', state, JSON.stringify(receipt), now, now);
+  insert('unc', 'uncertain', { providerContact: 'sent', acceptance: 'accepted' });
+  insert('fetch', 'fetching', { providerContact: 'sent', acceptance: 'unknown' });
+  insert('cancelled-inflight', 'cancelled', { cancelledFrom: 'fetching' });
+  insert('cancelled-sent', 'cancelled', { providerContact: 'sent' });
+  insert('cancelled-reserved', 'cancelled', { cancelledFrom: 'reserved', providerContact: 'none' });
+  insert('delivered', 'delivered', { providerContact: 'sent' });
+  applyMigrations(sqlite, ['0028_dgm_muse_spend.sql']);
+  const flag = (k) => Number(sqlite.prepare('SELECT unknown_outcome FROM dgm_muse_ops WHERE op_key = ?').get(k).unknown_outcome);
+  assert.equal(flag('unc'), 1, 'a migrated uncertain row is conservatively unknown');
+  assert.equal(flag('fetch'), 1, 'a migrated live fetch may have been sent');
+  assert.equal(flag('cancelled-inflight'), 1, 'a legacy cancel during flight cannot prove the call did not run');
+  assert.equal(flag('cancelled-sent'), 1, 'retained contact evidence marks the outcome unknown');
+  assert.equal(flag('cancelled-reserved'), 0, 'a cancellation before contact stays provably unsent');
+  assert.equal(flag('delivered'), 0);
+  sqlite.close();
 });
 
 test('migrations are idempotent where SQLite allows', () => {
