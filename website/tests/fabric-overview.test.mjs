@@ -96,7 +96,7 @@ test('flow panel renders nodes, counts, architectural lanes, and honest copy', a
   const { flow, tp } = render(context, el, statusPayload([item()]), usagePayload());
   assert.ok(flow.includes('1 resource(s)'), flow);
   assert.ok(flow.includes('reachability only'), flow);
-  assert.ok(flow.includes('dispatch is disabled'), flow);
+  assert.ok(flow.includes('dispatch availability unverified'), flow);
   assert.ok(flow.includes('usage totals only'), flow);
   assert.ok(flow.includes('unsupported'), flow);
   assert.ok(!/ready to run/i.test(flow.replace(/not ready to run|nothing here means ready to run/gi, '')), 'no ready presentation');
@@ -297,6 +297,24 @@ test('node cards join inventory evidence and mark the rest not reported', async 
   assert.ok(unmatched.flow.includes('not reported'), 'unmatched rows report no evidence');
 });
 
+test('bench lanes detail each node with honest unavailable slots', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const stale = item({ id: 'r_st', liveness: 'stale', lastSeenAt: iso(NOW - 10 * 60 * 1000), lastSeenAgeMs: 10 * 60 * 1000 });
+  const { tp } = render(context, el, statusPayload([item(), stale]), usagePayload(), new Map([['r_1', invCard()]]));
+  assert.ok(tp.includes('bench-lane online') && tp.includes('bench-lane stale'), 'one lane per rendered row');
+  assert.ok(tp.includes('Heartbeat') && tp.includes('10m ago'), 'genuine freshness data shown');
+  assert.ok(tp.includes('16-core x86'), 'declared CPU shown, never a load number');
+  assert.ok(tp.includes('not reported: heartbeats carry no load numbers'), 'CPU track slot stays empty with reason');
+  assert.ok(tp.includes('not reported: no memory readings in contract'), 'memory slot stays empty with reason');
+  assert.ok(tp.includes('Not measured: no measured tok/s exist in this build'), 'generation slot stays empty with reason');
+  assert.ok(tp.includes('unavailable: no accelerator inventory'), 'accelerator slot explicit');
+  assert.ok(tp.includes('unavailable: no runtime telemetry in contract'), 'runtime/latency/prompt slot explicit');
+  assert.ok(tp.includes('Models: No models reported.'), 'model slot explicit');
+  const tracks = tp.match(/bench-track sm/g) || [];
+  assert.equal(tracks.length, 10, 'five hatched tracks per lane, two lanes');
+  assert.ok(!/bench-micro-fill|bench-plot-fill|width\s*:\s*\d/.test(tp), 'no fill widths anywhere in the bench');
+});
+
 test('node cards carry status dots, host lines, and liveness words', async () => {
   const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
   const stale = item({ id: 'r_st', liveness: 'stale', lastSeenAt: iso(NOW - 10 * 60 * 1000), lastSeenAgeMs: 10 * 60 * 1000 });
@@ -395,7 +413,7 @@ test('topology stylesheet is responsive, static, and reduced-motion safe', async
   const css = await readFile(APP_CSS, 'utf8');
   assert.ok(css.includes('.topo-nodes'), 'topology grid present');
   assert.ok(/@media\s*\(max-width:860px\)\s*\{[^}]*\.topo-map\s*\{\s*grid-template-columns:1fr/.test(css), 'vertical collapse');
-  assert.ok(/\.topo-map\s*\{\s*display:grid;grid-template-columns:172px 88px 202px 88px/.test(css), 'wide horizontal map');
+  assert.ok(/\.topo-map\s*\{\s*display:grid;grid-template-columns:150px 60px 172px 60px/.test(css), 'wide horizontal map');
   assert.ok(/\.topo-link span\{[^}]*right:\.2rem;white-space:normal/.test(css), 'mobile link labels wrap inside the viewport');
   assert.ok(css.includes('prefers-reduced-motion'), 'reduced-motion rule present');
   const topoRules = css.slice(css.indexOf('.topo'));

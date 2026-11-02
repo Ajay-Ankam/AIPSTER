@@ -205,6 +205,31 @@ function flowHeartbeatLane(rows) {
   if (unknown) return 'unknown';
   return 'none';
 }
+// Per-node bench lanes: measurement-oriented detail adapted from the EIF
+// bench lane pattern. Every slot is either genuinely reported data or an
+// explicit unavailable note — tracks fill ONLY from numeric sources, and no
+// numeric source exists in this contract, so every track stays hatched.
+function fabricBenchLane(r, inv) {
+  const disp = flowRowLiveness(r);
+  if (!disp) return null;
+  const age = r.lastSeenAgeMs === null || r.lastSeenAgeMs === undefined ? 'never' : formatAge(r.lastSeenAgeMs);
+  const ev = fabricEvidence(inv);
+  const val = (label, value) => `<div class="bench-cell"><span>${esc(label)}</span><b>${value === null ? 'not reported' : esc(value)}</b></div>`;
+  const hatch = (label, note) => `<div class="bench-cell"><span>${esc(label)}</span><div class="bench-track sm"><span class="bench-hatch"></span></div><small>${esc(note)}</small></div>`;
+  return `<div class="bench-lane ${disp}">`
+    + `<header><span class="topo-dot" aria-hidden="true"></span><strong>${esc(r.name)}</strong><b>${esc(disp)}</b><span class="muted">${esc(r.id)} · ${esc(r.kind)}${r.demoFixture ? ' · DEMO' : ''}</span></header>`
+    + `<div class="bench-lane-grid">`
+    + val('Heartbeat', `${age} · ${disp}`)
+    + val('Declared CPU', ev.cpu) + val('Declared GPU', ev.gpu)
+    + val('Capabilities', ev.caps === null ? 'none recorded' : ev.caps)
+    + hatch('CPU load', 'not reported: heartbeats carry no load numbers')
+    + hatch('Memory', 'not reported: no memory readings in contract')
+    + hatch('Generation rate', 'Not measured: no measured tok/s exist in this build')
+    + hatch('Accelerator', 'unavailable: no accelerator inventory')
+    + hatch('Runtime · latency · prompt', 'unavailable: no runtime telemetry in contract')
+    + `</div>`
+    + `<p class="muted">Models: No models reported.</p></div>`;
+}
 function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   const rows = statusData && Array.isArray(statusData.items) ? statusData.items : null;
   if (!rows) {
@@ -259,9 +284,9 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
     + `<div class="topo-head"><div><p class="eyebrow">snapshot · read-only</p><p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown · ${shared} shared with me${countsNote}</p></div><p class="topo-note">Heartbeat freshness, not inference readiness.</p></div>`
     + `<div class="topo-map">`
     + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true">→</span><div><b>Browser session</b><small>signed-in owner · read-only view</small></div></div>`
-    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request (architectural: dispatch is disabled)</span></div>`
+    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request<small>architectural · dispatch availability unverified here</small></span></div>`
     + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true">≡</span><div><b>AIPSTER API</b><small>status · inventory · usage reads</small></div></div>`
-    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request to node (architectural)</span></div>`
+    + `<div class="topo-link" aria-hidden="true"><i></i><span>Request to node<small>architectural · dispatch availability unverified here</small></span></div>`
     + (nodes.length ? `<ul class="topo-nodes">${nodes.join('')}</ul>` : '<p class="muted">No resources yet — register or pair one to see it here.</p>')
     + `</div>`
     + truncated
@@ -283,11 +308,14 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   // Designed measurement/coverage layout: definition rows for what exists,
   // an explicit unavailable marker for what does not. No bars anywhere, so
   // no bar length can be misread as a measured or zero rate.
+  const lanes = [];
+  for (const raw of laneRows) { const l = fabricBenchLane(raw, lookup ? lookup.get(raw.id) : null); if (l) lanes.push(l); }
   const benchRow = (label, value) => `<div><dt>${esc(label)}</dt><dd>${value}</dd></div>`;
   tpEl.innerHTML = `<div class="bench" role="group" aria-label="Throughput bench: measured rates are unavailable; cumulative usage totals below.">`
     + `<p><span class="pill bad">measured rate: unavailable</span></p>`
     + `<div class="bench-plot"><div class="bench-axis" aria-hidden="true"><span>0</span><span>tok/s scale unavailable</span></div>`
     + `<div class="bench-track"><span class="bench-hatch"></span><span class="bench-word">Not measured</span></div></div>`
+    + (lanes.length ? `<div class="bench-lanes">${lanes.join('')}</div>` : '<p class="muted">No node lanes: no resources.</p>')
     + (t
       ? `<dl class="ev">`
         + benchRow('Requests (cumulative)', esc(num(t.requests)))
@@ -393,8 +421,8 @@ async function loadOverview() {
       <div class="card"><h2>Usage</h2><p>${usage.totals.requests} requests · ${usage.totals.tokensIn + usage.totals.tokensOut} tokens</p></div>
       <div class="card"><h2>Models & adapters</h2><p>${catalog.privateAssets} private · ${catalog.activeDeployments} active deployment(s)</p><div class="actions"><button type="button" class="btn secondary" data-goto="models">Browse catalog</button></div></div>`;
     $('ov-note').innerHTML = me && me.demo
-      ? '<p class="muted">DEMO DATA: simulated fixtures for exploration. Grants and live actions are disabled. Inference dispatch is disabled.</p>'
-      : '<p class="muted">No demo data: only resources you register or pair appear here. Inference dispatch is disabled.</p>';
+      ? '<p class="muted">DEMO DATA: simulated fixtures for exploration. Grants and live actions are disabled. Inference dispatch needs a deployment flag this view does not verify.</p>'
+      : '<p class="muted">No demo data: only resources you register or pair appear here. Inference dispatch needs a deployment flag this view does not verify.</p>';
   } catch (e) { if (isStale(e)) return; state(el, 'error', e.message); }
 }
 

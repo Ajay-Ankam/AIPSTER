@@ -146,7 +146,7 @@ export function buildFabricFlow({ status, usage, nowMs }) {
     edges: {
       // No dispatch plane exists in this build (/api/jobs is disabled), so
       // request/result lanes are architectural labels, never live state.
-      request: { state: 'architectural', label: 'Request (architectural: dispatch is disabled)' },
+      request: { state: 'architectural', label: 'Request (architectural: dispatch availability unverified in this view)' },
       result: {
         state: measuredTotals ? 'summarized' : 'unavailable',
         label: measuredTotals

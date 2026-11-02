@@ -26,7 +26,7 @@ comparison is claimed.
 
 | EIF | AIPSTER |
 | --- | --- |
-| Request | Architectural label: dispatch is disabled (`POST /api/jobs` → `501`) |
+| Request | Architectural label: dispatch availability is a deployment flag (`INFERENCE_ENABLED`) this read-only view cannot verify, so the lane never claims a `501` or an enabled dispatch |
 | Result | Summarized-or-unavailable: cumulative usage totals, no streamed results |
 | Heartbeat | Live: `heartbeat_at` freshness (`STALE_AFTER_MS` = 5 min); `unknown` when the flag claims online without telemetry |
 | Resident / Cached / Unprovisioned | Unsupported legend entries, labeled as such |

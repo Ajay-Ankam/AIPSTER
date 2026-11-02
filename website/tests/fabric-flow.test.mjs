@@ -86,7 +86,7 @@ test('throughput is always unavailable: usage totals never become tokens/sec', (
 test('request/result edges are architectural labels, never live connections', () => {
   const out = buildFabricFlow({ status: statusOf([]), usage: null, nowMs: NOW });
   assert.equal(out.edges.request.state, 'architectural');
-  assert.match(out.edges.request.label, /dispatch is disabled/);
+  assert.match(out.edges.request.label, /dispatch availability unverified/);
   assert.equal(out.edges.result.state, 'unavailable');
   assert.ok(out.legend.some((e) => e.key === 'resident' && e.state === 'unsupported'));
   // O-5: with no heartbeat seen, the legend agrees with the edge (none).
