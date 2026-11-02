@@ -112,8 +112,7 @@ export async function readUsers(db, { limit, offset } = {}, nowMs = Date.now()) 
         const k = await db.prepare(
           'SELECT COUNT(*) AS n FROM key_verifiers WHERE owner_id = ? AND revoked_at IS NULL'
         ).bind(raw.id).first();
-        keysActive = Number(k && k.n);
-        if (!Number.isSafeInteger(keysActive) || keysActive < 0) keysActive = null;
+        keysActive = k && Number.isSafeInteger(k.n) && k.n >= 0 ? k.n : null;
       } catch {
         keysActive = null;
       }
@@ -122,8 +121,7 @@ export async function readUsers(db, { limit, offset } = {}, nowMs = Date.now()) 
         const s = await db.prepare(
           'SELECT COUNT(*) AS n FROM session WHERE userId = ? AND datetime(expiresAt) IS NOT NULL AND expiresAt > ?'
         ).bind(raw.id, nowIso).first();
-        sessionsActive = Number(s && s.n);
-        if (!Number.isSafeInteger(sessionsActive) || sessionsActive < 0) sessionsActive = null;
+        sessionsActive = s && Number.isSafeInteger(s.n) && s.n >= 0 ? s.n : null;
       } catch {
         sessionsActive = null;
       }

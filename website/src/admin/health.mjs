@@ -17,14 +17,12 @@
 export const HEALTH_SCHEMA_VERSION = 'admin.operations.health.v1';
 
 async function tablePresent(db, name) {
-  try {
-    const row = await db.prepare(
-      "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?"
-    ).bind(name).first();
-    return !!(row && row.ok === 1);
-  } catch {
-    return false;
-  }
+  // A failed observation must reach readHealth's unavailable envelope;
+  // only a successful query with no row establishes a missing table.
+  const row = await db.prepare(
+    "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?"
+  ).bind(name).first();
+  return !!(row && row.ok === 1);
 }
 
 export async function readHealth(db, env, nowMs = Date.now()) {

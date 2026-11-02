@@ -216,6 +216,57 @@ test('admin coverage: unreadable store is unavailable, not a missing schema', as
   assert.ok(out.json.reason_code, 'the gap names a reason');
 });
 
+test('admin health: failed dispatch schema read is unavailable, not missing', async () => {
+  const t = await createTestEnv();
+  await grant(t, 'u_alice', 'operations_observer');
+  const realPrepare = t.DB.prepare.bind(t.DB);
+  t.DB.prepare = (sql) => {
+    const statement = realPrepare(sql);
+    if (/sqlite_master/.test(sql)) {
+      const realBind = statement.bind.bind(statement);
+      statement.bind = (...args) => {
+        const bound = realBind(...args);
+        if (args[0] === 'dispatch_jobs') {
+          bound.first = async () => { throw new Error('schema read failed'); };
+        }
+        return bound;
+      };
+    }
+    return statement;
+  };
+  const out = await readJson(await t.call('/api/admin/v1/operations/health', { headers: t.as(t.alice) }));
+  assert.equal(out.status, 200);
+  assert.equal(out.json.state, 'unavailable');
+  assert.equal(out.json.reason_code, 'health_check_failed');
+  assert.equal(out.json.compatibility, null, 'failed observation cannot assert missing schema');
+  assert.equal(out.json.observed_at, null);
+  t.DB.prepare = realPrepare;
+  await t.DB.prepare('DROP TABLE dispatch_jobs').run();
+  const missing = await readJson(await t.call('/api/admin/v1/operations/health', { headers: t.as(t.alice) }));
+  assert.equal(missing.json.state, 'available', 'successful observation of absence stays distinct');
+  assert.equal(missing.json.compatibility.inference_reason_code, 'dispatch_schema_missing');
+});
+
+test('admin directory: absent count rows are unknown, not measured zero', async () => {
+  const t = await createTestEnv();
+  await grant(t, 'u_alice', 'access_administrator');
+  const realPrepare = t.DB.prepare.bind(t.DB);
+  t.DB.prepare = (sql) => {
+    if (/SELECT COUNT\(\*\) AS n FROM (key_verifiers|session)\b/.test(sql)) {
+      return { bind: () => ({ first: async () => null }) };
+    }
+    return realPrepare(sql);
+  };
+  const out = await readJson(await t.call('/api/admin/v1/access/users', { headers: t.as(t.alice) }));
+  assert.equal(out.status, 200);
+  assert.equal(out.json.state, 'available');
+  assert.ok(out.json.items.length > 0);
+  for (const row of out.json.items) {
+    assert.equal(row.keys_active, null, 'missing key-count row is not a measured zero');
+    assert.equal(row.sessions_active, null, 'missing session-count row is not a measured zero');
+  }
+});
+
 test('admin directory: demo tenants never display exercisable admin roles', async () => {
   const t = await createTestEnv();
   await grant(t, 'u_alice', 'access_administrator');
