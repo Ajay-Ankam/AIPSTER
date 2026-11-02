@@ -129,8 +129,11 @@ Current sweep (regenerate with `node scripts/measure.mjs`):
 The gate's failed-check identifiers match the authored labels exactly on 6/6
 defective artifacts, leave 8/8 clean artifacts untouched, and every verdict
 replays to the same digest. Latency is reported but **excluded from the report
-digest**. The report digest for the current inputs is recorded in
-`artifacts/measurement.json` and in the evidence directory.
+digest**. The digest depends on the replay count, which is part of the measured
+configuration: the recorded report is
+`repeats_per_request: 2` → `report_sha256 = ca23d01f…` (see
+`artifacts/measurement.json` for the full value); at `--replays 1` the same code
+digests to a different value, so quote the digest with its replay count.
 
 No model ran. Nothing here measures `dsh-superagent`, DeepSeek Harness or any
 model, and no number here should be read as an improvement claim.
@@ -138,18 +141,29 @@ model, and no number here should be read as an improvement claim.
 Limitations, stated on every verdict and in the UI: seven authored fixtures,
 eight predicates, no model, policy comparison only, a lower work-unit count is
 not improvement, the no-gate reference omits human review, seals are not
-authentication, and no number here generalises beyond these fixtures.
+authentication, the fixture corpus given to selection is trusted input, request
+validation is total over JSON values only (a throwing getter or Proxy can still
+escape as an exception, and `JSON.parse` cannot produce one), the runtime
+no-effect probe covers the Node path only, and no number here generalises beyond
+these fixtures.
 
 ## Safety posture
 
 - Owned entirely by this directory. No shared module, route, flag, migration,
   permission, worker or admin file is touched.
-- The delivered code path is exercised in a child process whose network,
-  storage, notification, clock and randomness globals are denied before import;
-  the probe reports no denied capability was reached and no file changed. A
-  source-spelling scan also runs, but it is a **spelling guard only**: it does
-  not constrain capability (`globalThis['fetch'](...)`, `new Date(...)`,
-  `await import('node:fs')` all pass it), and it is not cited as containment.
+- The **Node-side** delivered path (adapter, evaluate, selection, measure) is
+  exercised in a child process whose network, storage, notification, clock and
+  randomness globals are denied before import; the probe reports no denied
+  capability was reached and no file changed. The browser demo is **not** part
+  of that probe: `src/demo.mjs` cannot be imported outside a DOM, so the browser
+  surface is covered by manual QA only. A source-spelling scan also runs, but it
+  is a **spelling guard only**: it does not constrain capability
+  (`globalThis['fetch'](...)`, `new Date(...)`, `await import('node:fs')` all pass
+  it), and it is not cited as containment.
+- `select` re-derives every verdict from the fixture corpus it is given. That
+  corpus is **trusted input**: a forged fixture reproduces by construction, so
+  the check proves consistency with the supplied fixtures, not their
+  authenticity. Seals are unkeyed and are not authentication.
 - No live GitHub, webhook, org, account, credential or model access. Fixture text
   is untrusted display data and is rendered as text.
 - Secret-shaped material is detected and never echoed; e.g. the token-shaped

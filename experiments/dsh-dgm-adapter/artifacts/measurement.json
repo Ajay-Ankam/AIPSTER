@@ -47,9 +47,9 @@
   },
   "latency": {
     "samples": 14,
-    "p50_ms": 0.3791999999999991,
-    "p95_ms": 1.9185999999999996,
-    "max_ms": 1.9185999999999996,
+    "p50_ms": 0.5564999999999998,
+    "p95_ms": 3.4488000000000003,
+    "max_ms": 3.4488000000000003,
     "note": "observed wall time on this machine; excluded from the report digest; not evidence of speed"
   },
   "rows": [
@@ -90,7 +90,7 @@
       },
       "digests": {
         "request_sha256": "9e578e79122c3a2392a2dc8b5a8ff47177197b1effd0605679a374917e67a1fb",
-        "verdict_sha256": "c0d373184875224dc092f7da399ca7a24b8e7508200567b53e01015e9f1dee2f"
+        "verdict_sha256": "4bb822c288ba6e67cd210f71f3357bbd3702b8a43b6d9a4d74d2428ce76c389e"
       },
       "deterministic": true
     },
@@ -122,7 +122,7 @@
       },
       "digests": {
         "request_sha256": "12a5d1dd9705155e734050f21104286433c6b4b8248d6aafe5ca85bfa9a1c4be",
-        "verdict_sha256": "50712d1d36ac7080cd4f819e82f686cb43fa690a611de99ce1d48148cb2aad2a"
+        "verdict_sha256": "b7ebb1f7c61a75322cbe7471914c369dc2cb14ad897d3b9d560f891a83364b58"
       },
       "deterministic": true
     },
@@ -160,7 +160,7 @@
       },
       "digests": {
         "request_sha256": "bb38e545de80204d2dad57ef570239ad5b3627f80677132292320f2d7da0531f",
-        "verdict_sha256": "1b8c4a1527b5c2fd8cb8315ca08982b109a6fe58b830b7a914de01dbc63210ca"
+        "verdict_sha256": "98c1142dc42f6a49a2e2722fd4b42c806ce473eba604c8e76940487dff70b91d"
       },
       "deterministic": true
     },
@@ -192,7 +192,7 @@
       },
       "digests": {
         "request_sha256": "ee4be8af6cbf43bc6b2095fa560ecfee44cbfcb8763c241c0eccd7c55a30d833",
-        "verdict_sha256": "e8108a6de10bd6959b738f11fa32e952e79219bdd4e1e7c6d1031b8c90dd2904"
+        "verdict_sha256": "a5eb61a5a7c697c6d2945f3f2fcf638955948812ea420ccf6abed6b9b99d9aea"
       },
       "deterministic": true
     },
@@ -230,7 +230,7 @@
       },
       "digests": {
         "request_sha256": "77eb32da920610c4d7f7828cc076cd3ee963c4adebf3dd58995f3d703ea68d45",
-        "verdict_sha256": "c4ef01379940ae0c628523612e417cb58d53e59e57102bd2f60745a6d878c581"
+        "verdict_sha256": "912528b9c2588ce611a807e63a6c3f0cff8be9ea10808e6f01443403e555e251"
       },
       "deterministic": true
     },
@@ -262,7 +262,7 @@
       },
       "digests": {
         "request_sha256": "135f96adbe7de1309abb7efc80be1c0eee35f285a5f9a0ba5dcb559bd1c779a8",
-        "verdict_sha256": "1ca7d8c642520743a42fdc6077551f682a58eb61aacd09887e8ed04ccb244a37"
+        "verdict_sha256": "2b5e9dae42ea3f36a0b6ed7d3a3d36a4b20114c651c44a3974c36cb60ca536db"
       },
       "deterministic": true
     },
@@ -300,7 +300,7 @@
       },
       "digests": {
         "request_sha256": "3044a0e4c42a80a6b0f53a100b4f01bc03610ca9cd81727f5259377e109f4ddf",
-        "verdict_sha256": "b74a05bc465dd9dad3110984d57a072b40bf9dc24809debf178e2f2305c13939"
+        "verdict_sha256": "07f46f548f45ce5975c3b258bd21866ba54da54ef6352be11282110b3041ff24"
       },
       "deterministic": true
     },
@@ -332,7 +332,7 @@
       },
       "digests": {
         "request_sha256": "25e299022541929d3f69c1084012db86dcfd7d371a333e9437b4c77fa39f4822",
-        "verdict_sha256": "4d6bb5473e7b7b28053e3146432ff14c45e0e3b3be3039633400cc2d035b2247"
+        "verdict_sha256": "80044090d20f2662a8619690969eadf7b01ce5d222f33ed0c65d7736333bdf45"
       },
       "deterministic": true
     },
@@ -370,7 +370,7 @@
       },
       "digests": {
         "request_sha256": "195d4f0a493e253d981a8d3eb26b74991ec808d2b5d44b94fb5a0bb110106658",
-        "verdict_sha256": "40710bf856c0ab7e0bc351bf24a992aac9fa8821d22fc5ff5118a1998dc5d072"
+        "verdict_sha256": "806bf91daceb3e8c6659b68944f4b95af5c5f19f1907eda3bae61e0c3af3a8b2"
       },
       "deterministic": true
     },
@@ -402,7 +402,7 @@
       },
       "digests": {
         "request_sha256": "6fd8a54c4be3be159306e9bb26856f6ab66b9ce293d912e9ee7b99a349ccdc47",
-        "verdict_sha256": "193b45fbd824ad90691b291089cafd0b7dd81e897351007203b22100f0d54150"
+        "verdict_sha256": "cf352e8bf057640e3ad0703ce6b442850ccf01e54e53ab4e8753a4067a12b489"
       },
       "deterministic": true
     },
@@ -434,7 +434,7 @@
       },
       "digests": {
         "request_sha256": "d0e1f4697c78b19d3735fd467bcd327e181ab141b6189d0934ec728de985e666",
-        "verdict_sha256": "58dc4883dfb51012501f562f82a77a2c50945b7cdedf1a262bd47b7df9429f25"
+        "verdict_sha256": "9de77a6d13f76f93bf4c6d63b7293efdf7728981edcf49aab5edf20613af7081"
       },
       "deterministic": true
     },
@@ -466,7 +466,7 @@
       },
       "digests": {
         "request_sha256": "01c61ede01ad28723ba4e04c22fc3b7ea5be2bccb5da5ceba6aa55ae4043bd99",
-        "verdict_sha256": "03b265de965ae5fed42eb22828c3021f940310ba62ce5dbb9b1e0ebecc17c8ee"
+        "verdict_sha256": "4b900c2da0cfc0b76f2265e8ef1e25ae4d9874a72c3b7e287662d21258d06ceb"
       },
       "deterministic": true
     },
@@ -507,7 +507,7 @@
       },
       "digests": {
         "request_sha256": "f8f6d36fda99d7dbeaa2c68b149643262b95949282d71c2999971db93e801662",
-        "verdict_sha256": "22c77016b6199346894746d6385788fdd0bc9c00548be0e0263a7594799ab95d"
+        "verdict_sha256": "2c5c760c90c2f4ffdae9f852ae8d90c7fa2d0c87ccce0c1858c0148456bf2e14"
       },
       "deterministic": true
     },
@@ -539,7 +539,7 @@
       },
       "digests": {
         "request_sha256": "c3b1503bf5fe95f1fa0d6fe3660f4ce1f71c58860e5cc8c015c6e268b1a84a9f",
-        "verdict_sha256": "ff0866cfe3f33e847c91fd41d7cca9688d29bad7a4e79df515ef5f0ca066482b"
+        "verdict_sha256": "e8dffaa8220b9917ecb092081f5c70b6ae7800bc07cd68ca0be954df25c94b72"
       },
       "deterministic": true
     }
@@ -556,10 +556,13 @@
     "Scores are fixture check pass rates in parts per million, not upstream or DGM harness scores.",
     "Seals are unkeyed SHA-256 over canonical JSON: they prove integrity and determinism, not authorship or permission. Anyone who can run code here can re-seal a changed record.",
     "Verdicts are bound to a fixture by re-derivation, not by identity. The adapter cannot tell who produced a record, only whether it reproduces.",
+    "The fixture corpus passed to select() is trusted input. A forged fixture reproduces by construction, so re-derivation proves consistency with the supplied fixtures, not their authenticity.",
+    "Request validation is total over JSON values. An in-process caller can still pass an object with a throwing getter or Proxy, which escapes as an exception; JSON.parse cannot produce that shape.",
+    "The runtime no-effect probe denies capabilities in a Node child process and exercises the Node-side path (adapter, evaluate, selection, measure). It does not load the browser demo, which cannot be imported outside a DOM; the browser surface is covered by manual QA only.",
     "Metrics are fixture-relative: seven authored work items, fourteen artifacts, eight predicates.",
     "The two policies differ in what they check, not in model or data; this is a gate comparison, not a capability comparison.",
     "The no-gate column omits upstream human review of the pull request, which is the control that would catch these defects in practice. Do not read it as upstream performance.",
     "A lower work-unit count is not a quality gain; it is a smaller predicate set."
   ],
-  "report_sha256": "4c150c9bfeaa15b9c5d84016b08d1d8c9773989b40d28604e5ca155748c59def"
+  "report_sha256": "ca23d01f38727541ac8cd1f8bbe6553811c52b2a7a916be36bda72bdc6e0cfe9"
 }

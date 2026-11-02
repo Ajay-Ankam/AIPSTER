@@ -59,10 +59,10 @@ if (asJson) {
   console.log(`  unlabelled failures        ${gate.unlabelled_failures}`);
   console.log(`  exact label matches        ${gate.exact_label_matches}/${gate.defective_artifacts}`);
   console.log(`  clean artifacts untouched  ${gate.clean_without_failures}/${gate.clean_artifacts}`);
-  console.log(`  replay determinism         ${report.determinism.all_replays_identical ? 'identical' : 'DIVERGED'} (${report.determinism.distinct_digests} distinct digests)`);
+  console.log(`  replay determinism         ${report.determinism.all_replays_identical ? 'identical' : 'DIVERGED'} (${report.determinism.distinct_digests} distinct digests, ${report.repeats_per_request} repeats/request)`);
   console.log(`  latency p50 / p95 (ms)     ${report.latency.p50_ms.toFixed(2)} / ${report.latency.p95_ms.toFixed(2)} (not digested)`);
   console.log('');
-  console.log(`  report digest              ${report.report_sha256}`);
+  console.log(`  report digest              ${report.report_sha256}  (repeats_per_request ${report.repeats_per_request})`);
   console.log(`  written                    ${outFile}`);
   console.log('');
   console.log('  Fixture-relative. No model ran. Fewer steps is not improvement.');

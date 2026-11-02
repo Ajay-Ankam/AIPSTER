@@ -142,6 +142,9 @@
         <li>Fewer work units is not an improvement; it is a smaller predicate set.</li>
         <li>The comparison column excludes upstream's human pull-request review, so it is a no-gate reference point, never an upstream or model measurement.</li>
         <li>Seals are unkeyed SHA-256: they prove a record was not altered, not who produced it. Selection re-derives a verdict from its fixture instead of trusting its seal.</li>
+        <li>The fixtures passed to selection are trusted input: a forged fixture would reproduce by construction. Re-derivation proves consistency with the supplied fixtures, not their authenticity.</li>
+        <li>Request validation covers JSON values. An in-process caller passing an object with a throwing getter or Proxy can still provoke an exception; <code>JSON.parse</code> cannot produce that shape.</li>
+        <li>The runtime no-effect probe runs in Node and covers the Node-side path only. The browser surface of this page is checked by manual QA, not by that probe.</li>
         <li>The adapter reads no repository, token, webhook, account or live ticket.</li>
         <li>Nothing here is production-ready, and nothing here is connected to a running system.</li>
       </ul>

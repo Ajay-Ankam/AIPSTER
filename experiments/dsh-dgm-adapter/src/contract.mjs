@@ -123,7 +123,10 @@ export const LIMITATIONS = Object.freeze([
   'No verdict applies, promotes, executes, merges or writes to GitHub, even when a proposal is selected.',
   'Scores are fixture check pass rates in parts per million, not upstream or DGM harness scores.',
   'Seals are unkeyed SHA-256 over canonical JSON: they prove integrity and determinism, not authorship or permission. Anyone who can run code here can re-seal a changed record.',
-  'Verdicts are bound to a fixture by re-derivation, not by identity. The adapter cannot tell who produced a record, only whether it reproduces.'
+  'Verdicts are bound to a fixture by re-derivation, not by identity. The adapter cannot tell who produced a record, only whether it reproduces.',
+  'The fixture corpus passed to select() is trusted input. A forged fixture reproduces by construction, so re-derivation proves consistency with the supplied fixtures, not their authenticity.',
+  'Request validation is total over JSON values. An in-process caller can still pass an object with a throwing getter or Proxy, which escapes as an exception; JSON.parse cannot produce that shape.',
+  'The runtime no-effect probe denies capabilities in a Node child process and exercises the Node-side path (adapter, evaluate, selection, measure). It does not load the browser demo, which cannot be imported outside a DOM; the browser surface is covered by manual QA only.'
 ]);
 
 /**
