@@ -44,8 +44,22 @@ is executed; JJP install additionally requires the rollout procedure in
   unpushed). The documented release path stands: release-owner hand build
   from the merged commit with the same pinned script, independent review,
   hand upload.
-- Workflow change implemented 2026-11-02 on this branch (unpushed, review
-  requested): `worker-installer-build.yml` gains a `windows-installer-qualified`
+- Qualified artifact OBTAINED 2026-11-02 via authorized demo-program path:
+  PR [#66](https://github.com/synchronic1/AIPSTER/pull/66) (draft, unmerged),
+  CI run 41402089398 `success`, artifact `windows-installer-qualified`
+  (13,140,652 bytes zipped): `AIPSTER-Worker-0.1.0-win64-setup.exe`
+  (13,152,228 bytes, SHA-256
+  `f9d038b05e13f72e260627ef452a0a13f7348f61126a144b26749556044dbdde`),
+  `manifest.json` (SHA-256
+  `fd31997aa9ed2510d0a9aba4c810d941ef8e7b19f0489ee7925407f5a77ea8af`,
+  both matching `SHA256SUMS`), source `e8a3926b33476051dc93d14a638b1eae2120b34c`
+  (PR merge commit: this branch + current main), clean tree, 98 payload files
+  incl. `aipster-tray.exe`, toolchain CPython 3.12.14 / uv 0.12.12 /
+  NSIS 3.13 / PyInstaller 6.22.3. Manifest keys are identity-only; secret
+  scan clean. Review evidence only — NOT a release, NOT published to
+  GitHub Releases, NOT installed anywhere.
+- Workflow change implemented 2026-11-02 on this branch (review APPROVED
+  60e0da9, PR opened): `worker-installer-build.yml` gains a `windows-installer-qualified`
   upload (Setup exe + manifest + SHA256SUMS, 14-day retention,
   `if-no-files-found: error`, same pinned upload-artifact v5 SHA,
   success-only so only qualified runs publish it). Targeted validation 16/16
