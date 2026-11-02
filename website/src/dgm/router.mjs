@@ -22,6 +22,7 @@ import {
   fixtureTelemetryRows, transitionOutcomeRow, buildTelemetryView,
   latencySummary, tokensSummary, BASELINE_SCORE_PPM
 } from './preview.mjs';
+import { handleDgmMuse } from './muse-router.mjs';
 
 export const DGM_PREVIEW_PERMISSION = 'admin.dgm.preview';
 
@@ -151,7 +152,62 @@ async function createRun(ctx) {
   }
   const checked = checkCreateBody(raw);
   if (isRefusal(checked)) return send(ctx, 400, { error: checked.detail, code: checked.reason });
-  const { fixture, held, label, target } = checked.body;
+  const { fixture: requestedFixture, held, label, target, proposalOpKey } = checked.body;
+  // Advisory proposal input (verified before any budget is charged): only a
+  // DELIVERED Muse proposal op owned by this operator attaches, and its
+  // bounded allowlisted `fixture:` directive is the evaluated input. Safe
+  // receipt identity plus the delivery hash/chars enter immutable
+  // provenance; the raw proposal text is never copied and never executed.
+  let proposal = null;
+  let evaluatedFixture = requestedFixture;
+  let fixtureSource = 'request';
+  if (proposalOpKey !== null && proposalOpKey !== undefined) {
+    let op = null;
+    try {
+      op = await first(ctx.db, 'SELECT state, mode, receipt_json FROM dgm_muse_ops WHERE tenant_id = ? AND op_key = ?', ctx.actor.user.id, proposalOpKey);
+    } catch (e) {
+      if (/no such table/i.test(String((e && e.message) || e))) {
+        return send(ctx, 503, { error: 'DGM Muse proposal store is not migrated.', code: 'DGM_MUSE_UNAVAILABLE' });
+      }
+      throw e;
+    }
+    if (!op) return send(ctx, 404, { error: 'DGM proposal operation not found.', code: 'DGM_MUSE_UNKNOWN_OP' });
+    if (op.state !== 'delivered') {
+      return send(ctx, 409, { error: 'Only a delivered DGM proposal attaches as advisory run input.', code: 'DGM_MUSE_NOT_DELIVERED' });
+    }
+    let receipt = null;
+    try { receipt = op.receipt_json ? JSON.parse(op.receipt_json) : null; } catch { receipt = null; }
+    const inputFixture = receipt && receipt.proposalInput && typeof receipt.proposalInput.fixture === 'string'
+      ? receipt.proposalInput.fixture : null;
+    if (inputFixture === null || !FIXTURES.includes(inputFixture)) {
+      return send(ctx, 400, {
+        error: 'The delivered proposal carried no usable allowlisted fixture directive, so there is no evaluation input to consume. Only one unambiguous `fixture: <name>` line over a known fixture can be evaluated; no verdict was produced and nothing was charged.',
+        code: 'DGM_MUSE_INPUT_REQUIRED',
+      });
+    }
+    if (requestedFixture !== null && requestedFixture !== undefined && requestedFixture !== inputFixture) {
+      return send(ctx, 409, {
+        error: `Requested fixture ${JSON.stringify(requestedFixture)} conflicts with the delivered proposal input ${JSON.stringify(inputFixture)}. The proposal's own input is the evaluated one; omit fixture to evaluate it.`,
+        code: 'DGM_MUSE_INPUT_CONFLICT',
+      });
+    }
+    evaluatedFixture = inputFixture;
+    fixtureSource = 'proposal';
+    proposal = {
+      opKey: proposalOpKey,
+      mode: op.mode || (receipt && receipt.mode) || null,
+      evaluation: (receipt && receipt.evaluation) || 'unknown',
+      model: (receipt && receipt.model) || null,
+      responseId: (receipt && receipt.responseId) || null,
+      usage: (receipt && receipt.usage) || null,
+      // Content identity, never content: the bounded input plus the delivery
+      // hash/chars prove what was evaluated and by which delivered output.
+      inputFixture,
+      proposalHash: (receipt && receipt.proposalHash) || null,
+      proposalChars: Number.isSafeInteger(receipt && receipt.proposalChars) ? receipt.proposalChars : null,
+    };
+  }
+  const fixture = evaluatedFixture;
   const verdict = evaluateFixture(fixture);
   const status = creationStatus(verdict.status, held);
   await checkWriteBudget(ctx.db, ctx.actor.user.id);
@@ -161,7 +217,11 @@ async function createRun(ctx) {
   const me = ctx.actor.user.id;
   const traceEvents = [
     ...verdict.events.map((e) => ({ event: e.event, body: { detail: e.detail } })),
-    { event: 'preview.created', body: { detail: `fixture=${fixture} held=${held ? 'true' : 'false'}` } }
+    { event: 'preview.created', body: { detail: `fixture=${fixture} fixtureSource=${fixtureSource} held=${held ? 'true' : 'false'}` } },
+    // The evaluated input came from the delivered proposal, not from the
+    // caller: record its identity so the run proves what was consumed. The
+    // verdict, gates, and scores remain the fixture table's alone.
+    ...(proposal ? [{ event: 'preview.proposal_attached', body: { detail: `op=${proposal.opKey} evaluation=${proposal.evaluation} fixture=${proposal.inputFixture} hash=${proposal.proposalHash || 'unrecorded'}` } }] : [])
   ];
   const telemetryEvents = fixtureTelemetryRows(status);
   const stored = [...traceEvents, ...telemetryEvents];
@@ -175,7 +235,8 @@ async function createRun(ctx) {
     ).bind(id, taskId, me, fixture, held ? 1 : 0, label, target, status,
       verdict.envelopeLabel, verdict.adviceReason, verdict.budgetFits ? 1 : 0,
       verdict.budgetReason, verdict.settlement,
-      JSON.stringify(verdict.gates), JSON.stringify(verdict.provenance), now, now,
+      JSON.stringify(verdict.gates),
+      JSON.stringify(proposal ? { ...verdict.provenance, fixtureSource, proposal: { ...proposal, fixtureSource } } : { ...verdict.provenance, fixtureSource: 'request' }), now, now,
       status, me),
     ...stored.map((r, seq) => eventInsert(ctx.db, id, seq, now, r.event, r.body)),
     auditInsert(ctx.db, now, me, 'dgm.preview.create', id, `fixture=${fixture} status=${status}`)
@@ -338,6 +399,10 @@ export async function handleDgmPreview(ctx) {
   {
     const m = new RegExp(`^${PREFIX}/runs/${ID}/(promote|execute|reserve|final-audit|advise-live)$`).exec(path);
     if (m && method === 'POST') return disabledAction(ctx, m[2]);
+  }
+  // DGM Muse provider slice (bounded proposals, same flag + permission).
+  if (path === `${PREFIX}/muse/status` || path.startsWith(`${PREFIX}/muse/`)) {
+    return handleDgmMuse(ctx);
   }
   // Unknown preview paths deny before revealing routing, like the admin 404.
   const gate = await ctx.requireAdmin(DGM_PREVIEW_PERMISSION);

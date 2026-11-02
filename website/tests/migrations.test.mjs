@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { applyMigrations } from './d1-shim.mjs';
+import { applyMigrations, MIGRATION_FILES } from './d1-shim.mjs';
 
 test('migrations create the auth and app tables', () => {
   const sqlite = new DatabaseSync(':memory:');
@@ -31,6 +31,13 @@ test('migrations create the auth and app tables', () => {
   assert.ok(cols('resources').includes('node_id'), 'resources.node_id (0015 pairing identity)');
   assert.ok(names.includes('advisor_ops'), 'missing table advisor_ops (0018)');
   for (const c of ['tenant_id', 'op_key', 'input_digest', 'state', 'receipt_json', 'created_at', 'updated_at']) assert.ok(cols('advisor_ops').includes(c), `advisor_ops.${c}`);
+  assert.ok(names.includes('dgm_muse_ops'), 'missing table dgm_muse_ops (0026)');
+  for (const c of ['tenant_id', 'op_key', 'input_digest', 'mode', 'state', 'receipt_json', 'created_at', 'updated_at', 'unknown_outcome', 'spend_micros']) assert.ok(cols('dgm_muse_ops').includes(c), `dgm_muse_ops.${c} (0026/0027/0028)`);
+  assert.ok(names.includes('dgm_muse_spend'), 'missing table dgm_muse_spend (0028)');
+  for (const c of ['scope', 'window_key', 'reserved_micros', 'used_micros', 'updated_at']) assert.ok(cols('dgm_muse_spend').includes(c), `dgm_muse_spend.${c}`);
+  // The spend window row is created lazily by the first live admission, so
+  // the migration itself seeds no data and cannot conflict with a copy.
+  assert.equal(Number(sqlite.prepare('SELECT COUNT(*) AS n FROM dgm_muse_spend').get().n), 0, 'dgm_muse_spend starts empty');
   assert.ok(names.includes('routing_ops'), 'missing table routing_ops (0021 provisional)');
   for (const c of ['tenant_id', 'request_id', 'state', 'source', 'ranking_json', 'policy_version', 'created_at', 'updated_at', 'expires_at']) assert.ok(cols('routing_ops').includes(c), `routing_ops.${c}`);
   assert.ok(names.includes('routing_reservations'), 'missing table routing_reservations (0021 provisional)');
@@ -77,6 +84,42 @@ test('migrations create the auth and app tables', () => {
   }
   const unique = sqlite.prepare('SELECT * FROM pragma_index_list(?)').all('dispatch_holds');
   assert.ok(unique.some((i) => i.unique === 1), 'dispatch_holds is unique per (op_id, pool_id)');
+});
+
+test('migration 0028 backfills the unknown-outcome flag for migrated rows', () => {
+  const sqlite = new DatabaseSync(':memory:');
+  applyMigrations(sqlite, MIGRATION_FILES.filter((n) => n !== '0028_dgm_muse_spend.sql'));
+  const now = new Date().toISOString();
+  sqlite.prepare('INSERT INTO "user" (id, name, email, emailVerified, image, createdAt, updatedAt) VALUES (?, ?, ?, 1, NULL, ?, ?)')
+    .run('u_legacy', 'Legacy', 'legacy@synthetic.invalid', now, now);
+  const insert = (key, state, receipt, mode = 'live') => sqlite.prepare(
+    'INSERT INTO dgm_muse_ops (tenant_id, op_key, input_digest, mode, state, receipt_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run('u_legacy', key, `d-${key}`, mode, state, JSON.stringify(receipt), now, now);
+  insert('unc', 'uncertain', { providerContact: 'sent', acceptance: 'accepted' });
+  insert('fetch', 'fetching', { providerContact: 'sent', acceptance: 'unknown' });
+  insert('cancelled-inflight', 'cancelled', { cancelledFrom: 'fetching' });
+  insert('cancelled-sent', 'cancelled', { providerContact: 'sent' });
+  insert('cancelled-reserved', 'cancelled', { cancelledFrom: 'reserved', providerContact: 'none' });
+  insert('delivered', 'delivered', { providerContact: 'sent' });
+  // Fixture mode never contacts the provider, so its in-flight state and
+  // cancelled-from-fetching phase are not contact evidence.
+  insert('fixture-fetch', 'fetching', { providerContact: 'none', acceptance: 'not-sent' }, 'fixture');
+  insert('fixture-cancelled-inflight', 'cancelled', { cancelledFrom: 'fetching', providerContact: 'none' }, 'fixture');
+  insert('fixture-cancelled-sent', 'cancelled', { providerContact: 'sent' }, 'fixture');
+  insert('unknown-mode-fetch', 'fetching', { providerContact: 'none' }, null);
+  applyMigrations(sqlite, ['0028_dgm_muse_spend.sql']);
+  const flag = (k) => Number(sqlite.prepare('SELECT unknown_outcome FROM dgm_muse_ops WHERE op_key = ?').get(k).unknown_outcome);
+  assert.equal(flag('unc'), 1, 'a migrated uncertain row is conservatively unknown');
+  assert.equal(flag('fetch'), 1, 'a migrated live fetch may have been sent');
+  assert.equal(flag('cancelled-inflight'), 1, 'a legacy cancel during flight cannot prove the call did not run');
+  assert.equal(flag('cancelled-sent'), 1, 'retained contact evidence marks the outcome unknown');
+  assert.equal(flag('cancelled-reserved'), 0, 'a cancellation before contact stays provably unsent');
+  assert.equal(flag('delivered'), 0);
+  assert.equal(flag('fixture-fetch'), 0, 'a fixture fetch has no provider transport and is provably unsent');
+  assert.equal(flag('fixture-cancelled-inflight'), 0, 'the fixture phase alone is not contact evidence');
+  assert.equal(flag('fixture-cancelled-sent'), 1, 'actual contact evidence still marks a fixture row unknown');
+  assert.equal(flag('unknown-mode-fetch'), 1, 'an unknown mode stays conservative');
+  sqlite.close();
 });
 
 test('migrations are idempotent where SQLite allows', () => {
