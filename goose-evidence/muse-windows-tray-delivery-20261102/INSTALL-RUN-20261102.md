@@ -23,10 +23,25 @@ is executed; JJP install additionally requires the rollout procedure in
   stale. No artifact was downloaded (the inference-branch run is out-of-lane
   scope); no workflow dispatch was triggered (not authorized).
 - Concrete unblock paths (both approval-gated): (a) local rebuild when
-  commit-free clears ≥24,000 MB with a coordinator-granted heavy slot;
-  (b) authorized `worker-installer-build.yml` dispatch or release-owner
-  rebuild + re-qualify from the merge commit, then wire that exact verified
-  artifact.
+  commit-free clears ≥24,000 MB with a coordinator-granted heavy slot
+  (18,324 MB at last re-measure — still blocked); (b) authorized
+  `worker-installer-build.yml` dispatch or release-owner rebuild +
+  re-qualify from the merge commit, then wire that exact verified artifact.
+- CI trigger-scope inspection (2026-11-02, read-only): the workflow runs on
+  `pull_request` touching `local-worker/**`, `LICENSE`, or itself, plus
+  parameterless `workflow_dispatch`. A push + CI run on this docs-only tray
+  branch CANNOT yield a qualified downloadable artifact, for two independent
+  reasons: (1) this branch changes only `goose-evidence/*.md`, which matches
+  none of the PR paths-filter entries, so no run triggers; (2) the workflow
+  uploads ONLY `dist/shots/*.png` (14-day retention) — the Setup exe,
+  `manifest.json`, and `SHA256SUMS` are built and full-profile-qualified on
+  the runner (`build.py` then `qualify.py`, no `--app-dir`) but never
+  uploaded, so every artifact is ephemeral by design ("publishes no
+  release"). Closing this path needs a reviewed workflow change adding an
+  installer-artifact upload plus push/PR/dispatch authorization — neither is
+  in-lane. The documented release path stands: release-owner hand build from
+  the merged commit with the same pinned script, independent review, hand
+  upload.
 - Trust path only: download from the AIPSTER GitHub release page and verify
   the SHA-256 against `SHA256SUMS` / the dashboard checksum. Builds are
   **unsigned**: Windows SmartScreen shows "Unknown publisher". Do not disable
