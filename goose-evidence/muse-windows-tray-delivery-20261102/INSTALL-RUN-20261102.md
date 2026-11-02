@@ -58,6 +58,15 @@ is executed; JJP install additionally requires the rollout procedure in
   NSIS 3.13 / PyInstaller 6.22.3. Manifest keys are identity-only; secret
   scan clean. Review evidence only — NOT a release, NOT published to
   GitHub Releases, NOT installed anywhere.
+- Run receipt (re-verified read-only 2026-11-02): workflow "Worker installer
+  build" (`worker-installer-build.yml` @ PR head `60e0da9`), event
+  `pull_request`, run created 06:46:58Z; runner `windows-2025`; pinned actions
+  checkout v6 `d23441a`, setup-uv v7 `94527f2`, upload-artifact v5 `330a01c`;
+  toolchain uv 0.12.12 / CPython 3.12.14 / NSIS 3.13 / PyInstaller 6.22.3
+  (from manifest). Download scratch dir outside worktree; exe hash MATCHES
+  `SHA256SUMS`. Second required check green: Public site asset and build
+  checks 3m54s (run 41402089555). Mergeable UNKNOWN (GitHub recompute) —
+  do not merge.
 - Workflow change implemented 2026-11-02 on this branch (review APPROVED
   60e0da9, PR opened): `worker-installer-build.yml` gains a `windows-installer-qualified`
   upload (Setup exe + manifest + SHA256SUMS, 14-day retention,
