@@ -142,7 +142,20 @@ function flowRowLiveness(r) {
   const seen = (r.liveness === 'online' || r.liveness === 'stale') && typeof r.lastSeenAt === 'string';
   return seen ? r.liveness : (r.liveness === 'offline' ? 'offline' : 'unknown');
 }
-function fabricFlowNode(r) {
+// Declared free-text evidence only: a blank or missing field is reported as
+// not reported, never invented. Memory, runtime, and resident-model readings
+// have no source in this build (verified: cardFor carries compute {cpu, gpu}
+// plus capabilities; heartbeat intake writes reachability only), so those
+// rows are always not reported.
+function fabricEvidence(inv) {
+  const text = (v) => typeof v === 'string' && v.trim() ? v.trim() : null;
+  const compute = inv && inv.compute && typeof inv.compute === 'object' ? inv.compute : null;
+  const caps = inv && Array.isArray(inv.capabilities) && inv.capabilities.length
+    ? inv.capabilities.map(String).join(', ')
+    : null;
+  return { cpu: compute ? text(compute.cpu) : null, gpu: compute ? text(compute.gpu) : null, caps };
+}
+function fabricFlowNode(r, inv) {
   if (!r || typeof r !== 'object') return null;
   if (typeof r.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(r.id)) return null;
   if (typeof r.name !== 'string' || !r.name || r.name.length > 80) return null;
@@ -160,11 +173,18 @@ function fabricFlowNode(r) {
     : r.usable === false
       ? ' · ATTENTION: reachable but NOT usable for inference'
       : ' · heartbeat seen (reachability only · not ready to run)';
-  return `<li class="flow-node"><p><strong>${esc(r.name)}</strong> <span class="muted">${esc(r.id)} · ${esc(r.kind)}</span> <span class="pill ${pill}">${esc(disp)}</span></p>`
-    + `<p class="muted">last seen ${esc(age)}${esc(hb)}${r.demoFixture ? ' · DEMO' : ''}</p></li>`;
+  const ev = fabricEvidence(inv);
+  const evRow = (label, value) => `<div><dt>${esc(label)}</dt><dd>${value === null ? 'not reported' : esc(value)}</dd></div>`;
+  return `<li class="topo-node"><p><strong>${esc(r.name)}</strong> <span class="muted">${esc(r.id)} · ${esc(r.kind)}</span> <span class="pill ${pill}">${esc(disp)}</span></p>`
+    + `<p class="muted">last seen ${esc(age)}${esc(hb)}${r.demoFixture ? ' · DEMO' : ''}</p>`
+    + `<dl class="ev">`
+    + evRow('CPU', ev.cpu) + evRow('GPU', ev.gpu)
+    + `<div><dt>Capabilities</dt><dd>${ev.caps === null ? 'none recorded' : esc(ev.caps)}</dd></div>`
+    + evRow('Memory', null) + evRow('Runtime', null) + evRow('Resident model', null)
+    + `</dl></li>`;
 }
 
-function renderFabricFlow(flowEl, tpEl, statusData, usageData) {
+function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   const rows = statusData && Array.isArray(statusData.items) ? statusData.items : null;
   if (!rows) {
     state(flowEl, 'error', 'Fabric flow unavailable: unexpected status payload.');
@@ -172,7 +192,8 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData) {
     return;
   }
   const nodes = [];
-  for (const raw of rows) { const n = fabricFlowNode(raw); if (n) nodes.push(n); }
+  const lookup = invMap && typeof invMap.get === 'function' ? invMap : null;
+  for (const raw of rows) { const n = fabricFlowNode(raw, lookup ? lookup.get(raw.id) : null); if (n) nodes.push(n); }
   // Counts prefer the server aggregate over all owned rows; otherwise derive
   // from the listed page. Totals that are absent stay unknown, never zero.
   const s = statusData.summary;
@@ -189,7 +210,7 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData) {
   const shared = Number.isSafeInteger(statusData.sharedWithMe) && statusData.sharedWithMe >= 0 ? statusData.sharedWithMe : 'unknown';
   const anyHeartbeat = rows.some((r) => (r.liveness === 'online' || r.liveness === 'stale') && r.lastSeenAt !== null && r.lastSeenAt !== undefined);
   const list = nodes.length
-    ? `<ul class="flow-list">${nodes.join('')}</ul>`
+    ? `<ul class="topo-nodes">${nodes.join('')}</ul>`
     : '<p class="muted">No resources yet — register or pair one to see it here.</p>';
   const truncated = statusData.itemsTruncated === true || total > nodes.length
     ? `<p class="muted">showing ${nodes.length} of ${total} · older resources omitted from the list; counts cover all resources.</p>`
@@ -197,9 +218,23 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData) {
   const note = statusData.demo
     ? 'DEMO DATA: simulated fixture, not a live node.'
     : 'Worker heartbeats prove reachability only, never inference acceptance. Nothing here means ready to run.';
-  flowEl.innerHTML = `<p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown · ${shared} shared with me${countsNote}</p>`
-    + `<p class="muted">Request (architectural: dispatch is disabled) · Result (architectural: usage totals only) · Heartbeat (${anyHeartbeat ? 'live' : 'none seen'}) · Resident, Cached, Unprovisioned (unsupported)</p>`
-    + list + truncated + `<p class="muted">${esc(note)}</p>`;
+  // Snapshot freshness for a view left open: this panel does not poll, so it
+  // states when its data was taken and that it refreshes on Overview reload.
+  const snapTaken = statusData && typeof statusData.generatedAt === 'string' ? Date.parse(statusData.generatedAt) : NaN;
+  const snapAge = !Number.isFinite(snapTaken)
+    ? 'snapshot time unknown'
+    : (Date.now() - snapTaken < 0 ? 'snapshot just taken' : `snapshot ${formatAge(Date.now() - snapTaken)}`);
+  flowEl.innerHTML = `<div class="topo" role="group" aria-label="Fabric flow: the browser session reads the AIPSTER API, which reports worker resources from heartbeats. Request and result lanes are architectural, not live connections.">`
+    + `<p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown · ${shared} shared with me${countsNote}</p>`
+    + `<div class="topo-stage"><span class="topo-kicker" aria-hidden="true">entry</span><div><strong>Browser session</strong><br><span class="muted">signed-in owner · read-only view</span></div></div>`
+    + `<div class="topo-edge arch" aria-hidden="true"><i></i><span>Request (architectural: dispatch is disabled)</span></div>`
+    + `<div class="topo-stage"><span class="topo-kicker" aria-hidden="true">control</span><div><strong>AIPSTER API</strong><br><span class="muted">status · inventory · usage reads</span></div></div>`
+    + `<div class="topo-edge arch" aria-hidden="true"><i></i><span>Request to node (architectural)</span></div>`
+    + list + truncated
+    + `<div class="topo-return"><span>Heartbeat returns: reachability only (${anyHeartbeat ? 'live' : 'none seen'})</span><span>Result returns: usage totals only</span></div>`
+    + `<p class="muted">Heartbeat freshness: online means a fresh heartbeat, stale an older one, unknown a flag without heartbeat, offline not flagged. Resident, Cached, Unprovisioned: unsupported in this build.</p>`
+    + `<p class="muted">${esc(note)}</p>`
+    + `<p class="muted">${esc(snapAge)} · this panel refreshes when Overview reloads.</p></div>`;
   // Throughput is always unavailable: usage reports cumulative counts only.
   const rawT = usageData && usageData.totals && typeof usageData.totals === 'object' ? usageData.totals : null;
   // An all-absent totals object measures nothing: treat it as unavailable.
@@ -210,12 +245,22 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData) {
   const cov = usageData && Array.isArray(usageData.items) && Number.isSafeInteger(usageData.total) && usageData.total >= 0
     ? (usageData.items.length >= usageData.total ? `totals cover all ${usageData.total} rows` : `totals cover the latest ${usageData.items.length} of ${usageData.total} rows (page-cumulative)`)
     : null;
-  tpEl.innerHTML = t
-    ? `<p>${esc(num(t.requests))} requests · ${esc(num(t.tokensIn))} in / ${esc(num(t.tokensOut))} out tokens (cumulative, not a rate)</p>`
-      + `<p class="muted">model cost ${esc(usd(t.modelCostUsd))} · execution cost ${esc(usd(t.executionCostUsd))}</p>`
-      + (cov ? `<p class="muted">${esc(cov)}</p>` : '')
-      + '<p class="muted">Throughput unavailable: no measured tokens/sec exist in this build. Unmeasured values stay unknown, never zero.</p>'
-    : '<p class="muted">Usage totals unavailable.</p><p class="muted">Throughput unavailable: no measured tokens/sec exist in this build.</p>';
+  // Designed measurement/coverage layout: definition rows for what exists,
+  // an explicit unavailable marker for what does not. No bars anywhere, so
+  // no bar length can be misread as a measured or zero rate.
+  const benchRow = (label, value) => `<div><dt>${esc(label)}</dt><dd>${value}</dd></div>`;
+  tpEl.innerHTML = `<div class="bench" role="group" aria-label="Throughput bench: measured rates are unavailable; cumulative usage totals below.">`
+    + `<p><span class="pill bad">measured rate: unavailable</span></p>`
+    + (t
+      ? `<dl class="ev">`
+        + benchRow('Requests (cumulative)', esc(num(t.requests)))
+        + benchRow('Tokens in / out (cumulative, not a rate)', `${esc(num(t.tokensIn))} / ${esc(num(t.tokensOut))}`)
+        + benchRow('Model cost', esc(usd(t.modelCostUsd)))
+        + benchRow('Execution cost', esc(usd(t.executionCostUsd)))
+        + (cov ? benchRow('Coverage', esc(cov)) : '')
+        + `</dl>`
+      : '<p class="muted">Usage totals unavailable.</p>')
+    + '<p class="muted">Throughput unavailable: no measured tokens/sec exist in this build. Unmeasured values stay unknown, never zero.</p></div>';
 }
 
 async function loadFabricFlow() {
@@ -225,9 +270,10 @@ async function loadFabricFlow() {
   flow.innerHTML = '<p class="muted">Loading fabric flow…</p>';
   tp.innerHTML = '<p class="muted">Loading throughput…</p>';
   try {
-    const [statusData, usageData] = await Promise.all([api('/api/status'), api('/api/usage?limit=50')]);
+    const [statusData, usageData, invData] = await Promise.all([api('/api/status'), api('/api/usage?limit=50'), api('/api/inventory?limit=50')]);
     if (gen !== generation) return;
-    renderFabricFlow(flow, tp, statusData, usageData);
+    const invMap = new Map(((invData && Array.isArray(invData.items)) ? invData.items : []).filter((c) => c && typeof c.id === 'string').map((c) => [c.id, c]));
+    renderFabricFlow(flow, tp, statusData, usageData, invMap);
   } catch (e) {
     if (isStale(e) || gen !== generation) return;
     if (/AUTH_REQUIRED|KEY_EXPIRED|KEY_SCOPE|KEY_FORBIDDEN|FORBIDDEN|401|403/.test(e.message)) {

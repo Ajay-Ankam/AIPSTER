@@ -19,6 +19,7 @@ import { parseFragment } from 'parse5';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_JS = path.resolve(HERE, '..', 'public', 'app', 'app.js');
 const APP_HTML = path.resolve(HERE, '..', 'public', 'app', 'index.html');
+const APP_CSS = path.resolve(HERE, '..', 'public', 'app', 'styles.css');
 
 async function loadClient(router) {
   const source = await readFile(APP_JS, 'utf8');
@@ -76,11 +77,19 @@ const okRouter = (status, usage) => async (p) => {
   if (p === '/api/catalog/summary') return Response.json({ privateAssets: 0, activeDeployments: 0 });
   return Response.json({ items: [], total: 0 });
 };
-const render = (context, el, status, usage) => {
+const render = (context, el, status, usage, inv) => {
   const flow = el('fabric-flow'), tp = el('fabric-throughput');
-  context.renderFabricFlow(flow, tp, status, usage === undefined ? usagePayload() : usage);
+  context.renderFabricFlow(flow, tp, status, usage === undefined ? usagePayload() : usage, inv);
   return { flow: flow.innerHTML, tp: tp.innerHTML };
 };
+const invCard = (over = {}) => ({
+  id: 'r_1', name: 'lab', kind: 'local', origin: 'home lab',
+  owner: { id: 'u_1', name: 'owner' },
+  compute: { cpu: '16-core x86', gpu: 'none recorded' }, capabilities: ['text'],
+  state: { configured: true, authenticated: true, online: true, usable: true, status: 'reachable' },
+  heartbeatAt: iso(NOW - 1000), limits: {}, scope: 'owner',
+  verification: {}, credits: null, createdAt: iso(NOW - 1000), ...over,
+});
 
 test('flow panel renders nodes, counts, architectural lanes, and honest copy', async () => {
   const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
@@ -225,7 +234,7 @@ test('O-5: negative costs and all-absent totals stay unavailable', async () => {
   const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
   const neg = render(context, el, statusPayload([item()]),
     usagePayload({ requests: 3, tokensIn: 10, tokensOut: 5, modelCostUsd: -4.5, executionCostUsd: null }));
-  assert.ok(neg.tp.includes('model cost unknown (unmeasured)'), neg.tp);
+  assert.ok(neg.tp.includes('>Model cost<') && neg.tp.includes('>unknown (unmeasured)<'), neg.tp);
   assert.ok(!neg.tp.includes('$-'), 'no negative cost presentation');
   const empty = render(context, el, statusPayload([item()]),
     usagePayload({ requests: null, tokensIn: null, tokensOut: null, modelCostUsd: null, executionCostUsd: null }));
@@ -245,5 +254,73 @@ test('O-4: hostile kind, id, and non-string timestamps never reach markup', asyn
   assert.ok(!flow.includes('evil-kind'), 'hostile-kind row dropped');
   assert.ok(!flow.includes('evil-id'), 'hostile-id row dropped');
   assert.ok(flow.includes('>unknown<'), 'non-string timestamp drops to unknown');
-  assert.ok(elements < 30, `no injected elements (saw ${elements})`);
+  assert.ok(elements < 60, `no injected elements (saw ${elements})`);
+});
+
+test('topology layout names real stages and keeps edges architectural', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const { flow } = render(context, el, statusPayload([item()]), usagePayload());
+  assert.ok(flow.includes('Browser session'), flow);
+  assert.ok(flow.includes('AIPSTER API'), flow);
+  assert.ok(!/mcp/i.test(flow), 'never a falsely live MCP router');
+  assert.ok(flow.includes('topo-edge arch'), flow);
+  assert.ok(flow.includes('topo-nodes'), flow);
+  assert.ok(flow.includes('Heartbeat returns'), flow);
+  assert.ok(flow.includes('Result returns'), flow);
+  const doc = parseFragment(flow);
+  const groups = [];
+  const walk = (n) => {
+    if (n.tagName === 'div' && (n.attrs || []).some((a) => a.name === 'class' && a.value.split(' ').includes('topo'))) groups.push(n);
+    (n.childNodes || []).forEach(walk); if (n.content) walk(n.content);
+  };
+  walk(doc);
+  assert.equal(groups.length, 1, 'exactly one labelled topology group');
+  assert.ok((groups[0].attrs || []).some((a) => a.name === 'aria-label' && /architectural/i.test(a.value)), 'group exposes the architectural caveat as text');
+});
+
+test('node cards join inventory evidence and mark the rest not reported', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const inv = new Map([['r_1', invCard()]]);
+  const { flow } = render(context, el, statusPayload([item()]), usagePayload(), inv);
+  assert.ok(flow.includes('16-core x86'), flow);
+  assert.ok(flow.includes('none recorded'), flow);
+  for (const label of ['>Memory<', '>Runtime<', '>Resident model<']) assert.ok(flow.includes(label), `missing ${label} row`);
+  const unmatched = render(context, el, statusPayload([item({ id: 'r_x', name: 'stray' })]), usagePayload(), inv);
+  assert.ok(unmatched.flow.includes('not reported'), 'unmatched rows report no evidence');
+});
+
+test('hostile inventory free-text renders inert', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const evil = invCard({ compute: { cpu: '<img src=x id="fabric-ev">', gpu: '' }, capabilities: ['<b>nope</b>'] });
+  const { flow } = render(context, el, statusPayload([item()]), usagePayload(), new Map([['r_1', evil]]));
+  const doc = parseFragment(flow);
+  const has = (n) => (n.attrs || []).some((a) => a.value === 'fabric-ev') || (n.childNodes || []).some(has);
+  assert.ok(!has(doc), `BUG: compute text became markup: ${flow}`);
+  assert.ok(flow.includes('not reported'), 'blank gpu reports no evidence');
+});
+
+test('throughput bench marks unavailable with coverage and no bar lengths', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const { tp } = render(context, el, statusPayload([item()]), usagePayload());
+  assert.ok(tp.includes('measured rate: unavailable'), tp);
+  assert.ok(!/width\s*:/i.test(tp), 'no invented bar lengths');
+  assert.ok(!/tok\/s/i.test(tp.replace(/tokens\/sec/g, '')), 'no fabricated rates');
+});
+
+test('snapshot freshness states its age and the no-poll reload rule', async () => {
+  const { context, el } = await loadClient(okRouter(statusPayload([item()]), usagePayload()));
+  const fresh = render(context, el, statusPayload([item()], { generatedAt: iso(Date.now() - 65000) }), usagePayload());
+  assert.ok(/snapshot \d+m ago/.test(fresh.flow), fresh.flow);
+  assert.ok(fresh.flow.includes('refreshes when Overview reloads'), fresh.flow);
+  const timeless = render(context, el, statusPayload([item()], { generatedAt: 'not-a-time' }), usagePayload());
+  assert.ok(timeless.flow.includes('snapshot time unknown'), timeless.flow);
+});
+
+test('topology stylesheet is responsive, static, and reduced-motion safe', async () => {
+  const css = await readFile(APP_CSS, 'utf8');
+  assert.ok(css.includes('.topo-nodes'), 'topology grid present');
+  assert.ok(/@media\s*\(max-width:640px\)\s*\{[^}]*\.topo-nodes\s*\{\s*grid-template-columns:1fr/.test(css), 'single-column fallback');
+  assert.ok(css.includes('prefers-reduced-motion'), 'reduced-motion rule present');
+  const topoRules = css.slice(css.indexOf('.topo'));
+  assert.ok(!/animation|transition|@keyframes/i.test(topoRules), 'no motion in topology rules');
 });
