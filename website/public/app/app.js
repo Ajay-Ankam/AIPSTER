@@ -124,6 +124,105 @@ function renderStatus(el, data) {
     <p class="muted">${esc(note)}</p>`;
 }
 
+// ---- fabric flow + throughput panels (read-only Overview slice) ----
+// Client mirror of website/src/lib/fabric-flow.mjs, which is the source of
+// truth; this file cannot import it because public/ ships verbatim to
+// browsers as one classic script (scripts/build.mjs copies, no bundler).
+// Server shapes verified against this tree: buildStatus in
+// src/lib/status.mjs and the /api/usage handler in src/worker.js. Every
+// string renders through esc(). Request/result lanes stay architectural
+// labels (dispatch is disabled); throughput is always unavailable because
+// usage carries cumulative counts, never measured tokens/sec. Liveness is
+// the server's derivation, but a row that claims online/stale without a
+// heartbeat timestamp never renders as live here.
+const FABRIC_LIVENESS = ['online', 'stale', 'offline', 'unknown'];
+const FABRIC_KINDS = ['local', 'cluster', 'provider'];
+function fabricFlowNode(r) {
+  if (!r || typeof r !== 'object') return null;
+  if (typeof r.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(r.id)) return null;
+  if (typeof r.name !== 'string' || !r.name || r.name.length > 80) return null;
+  if (!FABRIC_KINDS.includes(r.kind)) return null;
+  if (!FABRIC_LIVENESS.includes(r.liveness)) return null;
+  // No live presentation from a bare historical timestamp: online/stale
+  // without a heartbeat timestamp drops to unknown.
+  const seen = (r.liveness === 'online' || r.liveness === 'stale') && r.lastSeenAt !== null && r.lastSeenAt !== undefined;
+  const disp = seen ? r.liveness : (r.liveness === 'offline' ? 'offline' : 'unknown');
+  const pill = disp === 'online' ? 'ok' : disp === 'offline' ? 'bad' : disp === 'stale' ? 'warn' : '';
+  const age = r.lastSeenAgeMs === null || r.lastSeenAgeMs === undefined ? 'never' : formatAge(r.lastSeenAgeMs);
+  const hb = !seen
+    ? ' · not currently reachable'
+    : r.usable === false
+      ? ' · ATTENTION: reachable but NOT usable for inference'
+      : ' · heartbeat seen (reachability only · not ready to run)';
+  return `<li class="flow-node"><p><strong>${esc(r.name)}</strong> <span class="muted">${esc(r.id)} · ${esc(r.kind)}</span> <span class="pill ${pill}">${esc(disp)}</span></p>`
+    + `<p class="muted">last seen ${esc(age)}${esc(hb)}${r.demoFixture ? ' · DEMO' : ''}</p></li>`;
+}
+
+function renderFabricFlow(flowEl, tpEl, statusData, usageData) {
+  const rows = statusData && Array.isArray(statusData.items) ? statusData.items : null;
+  if (!rows) {
+    state(flowEl, 'error', 'Fabric flow unavailable: unexpected status payload.');
+    state(tpEl, 'error', 'Throughput unavailable: unexpected status payload.');
+    return;
+  }
+  const nodes = [];
+  for (const raw of rows) { const n = fabricFlowNode(raw); if (n) nodes.push(n); }
+  // Counts prefer the server aggregate over all owned rows; otherwise derive
+  // from the listed page. Totals that are absent stay unknown, never zero.
+  const s = statusData.summary;
+  const validCounts = s && typeof s === 'object' && ['online', 'stale', 'offline', 'unknown'].every((k) => Number.isSafeInteger(s[k]) && s[k] >= 0);
+  const counts = validCounts ? s : nodes.reduce((t, n) => {
+    const m = /<span class="pill [^"]*">([a-z]+)<\/span>/.exec(n);
+    const k = m ? m[1] : 'unknown';
+    t[k] += 1; return t;
+  }, { online: 0, stale: 0, offline: 0, unknown: 0 });
+  const total = Number.isSafeInteger(statusData.total) && statusData.total >= 0 ? statusData.total : nodes.length;
+  const anyHeartbeat = rows.some((r) => (r.liveness === 'online' || r.liveness === 'stale') && r.lastSeenAt !== null && r.lastSeenAt !== undefined);
+  const list = nodes.length
+    ? `<ul class="flow-list">${nodes.join('')}</ul>`
+    : '<p class="muted">No resources yet — register or pair one to see it here.</p>';
+  const truncated = statusData.itemsTruncated === true
+    ? `<p class="muted">showing ${nodes.length} of ${total} · older resources omitted from the list; counts cover all resources.</p>`
+    : '';
+  const note = statusData.demo
+    ? 'DEMO DATA: simulated fixture, not a live node.'
+    : 'Worker heartbeats prove reachability only, never inference acceptance. Nothing here means ready to run.';
+  flowEl.innerHTML = `<p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown</p>`
+    + `<p class="muted">Request (architectural: dispatch is disabled) · Result (architectural: usage totals only) · Heartbeat (${anyHeartbeat ? 'live' : 'none seen'}) · Resident, Cached, Unprovisioned (unsupported)</p>`
+    + list + truncated + `<p class="muted">${esc(note)}</p>`;
+  // Throughput is always unavailable: usage reports cumulative counts only.
+  const t = usageData && usageData.totals && typeof usageData.totals === 'object' ? usageData.totals : null;
+  const num = (v) => Number.isSafeInteger(v) && v >= 0 ? String(v) : 'unknown';
+  const usd = (v) => v === null || v === undefined ? 'unknown (unmeasured)' : (Number.isFinite(v) ? '$' + String(v) : 'unknown (unmeasured)');
+  tpEl.innerHTML = t
+    ? `<p>${esc(num(t.requests))} requests · ${esc(num(t.tokensIn))} in / ${esc(num(t.tokensOut))} out tokens (cumulative, not a rate)</p>`
+      + `<p class="muted">model cost ${esc(usd(t.modelCostUsd))} · execution cost ${esc(usd(t.executionCostUsd))}</p>`
+      + '<p class="muted">Throughput unavailable: no measured tokens/sec exist in this build. Unmeasured values stay unknown, never zero.</p>'
+    : '<p class="muted">Usage totals unavailable.</p><p class="muted">Throughput unavailable: no measured tokens/sec exist in this build.</p>';
+}
+
+async function loadFabricFlow() {
+  const flow = $('fabric-flow'), tp = $('fabric-throughput');
+  if (!flow || !tp) return;
+  const gen = generation;
+  flow.innerHTML = '<p class="muted">Loading fabric flow…</p>';
+  tp.innerHTML = '<p class="muted">Loading throughput…</p>';
+  try {
+    const [statusData, usageData] = await Promise.all([api('/api/status'), api('/api/usage?limit=1')]);
+    if (gen !== generation) return;
+    renderFabricFlow(flow, tp, statusData, usageData);
+  } catch (e) {
+    if (isStale(e) || gen !== generation) return;
+    if (/AUTH_REQUIRED|KEY_EXPIRED|KEY_SCOPE|KEY_FORBIDDEN|FORBIDDEN|401|403/.test(e.message)) {
+      state(flow, '', 'Sign-in expired or this key cannot read status — fabric flow unavailable.');
+      state(tp, '', 'Throughput unavailable while reads are denied.');
+      return;
+    }
+    state(flow, 'error', e.message);
+    state(tp, 'error', e.message);
+  }
+}
+
 function scheduleStatusPoll(token, gen, delayMs, failures) {
   if (typeof setTimeout !== 'function') return;
   setTimeout(() => {
@@ -182,6 +281,7 @@ async function loadOverview() {
   const gen = generation;
   $('status-strip').innerHTML = '<h2>Resource status</h2><p class="muted">Checking resource status…</p>';
   refreshStatusStrip(token, gen, 0);
+  loadFabricFlow();
   try {
     const [inv, shared, usage, catalog] = await Promise.all([api('/api/inventory?limit=50'), api('/api/shared-with-me?limit=50'), api('/api/usage?limit=1'), api('/api/catalog/summary')]);
     // Reachability is fresh liveness, not terminal usability (Codex P2
@@ -1607,7 +1707,7 @@ function resetState() {
   // every sign-in before the new identity renders, so a same-document account
   // switch never shows the previous identity's data (incl. revealed secrets).
   statusPollToken++;
-  for (const id of ['status-strip', 'ov-cards', 'ov-note', 'compute-list', 'shared-list', 'grant-list', 'key-list', 'usage-totals', 'usage-list', 'audit-list']) $(id).innerHTML = '';
+  for (const id of ['status-strip', 'ov-cards', 'ov-note', 'fabric-flow', 'fabric-throughput', 'compute-list', 'shared-list', 'grant-list', 'key-list', 'usage-totals', 'usage-list', 'audit-list']) $(id).innerHTML = '';
   for (const id of ['fab-node-list', 'fab-inv-out', 'fab-inv-in', 'fab-conn-list', 'fab-grant-out', 'fab-grant-in', 'fab-deny-list', 'fab-authz-out']) $(id).innerHTML = '';
   for (const id of ['fab-inv-issuer', 'fab-accept-node', 'fab-authz-node', 'fab-prev-conn']) $(id).innerHTML = '';
   connect = null;

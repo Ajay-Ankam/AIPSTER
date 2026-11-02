@@ -61,3 +61,6 @@ a.btn.secondary, button.btn.secondary { background:transparent; color:var(--acce
 @media (prefers-reduced-motion:reduce){ *{transition:none !important;} }
 .cardtext { white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Consolas,monospace; font-size:.85rem; background:#0b0e12; border:1px solid var(--line); border-radius:.4rem; padding:.75rem; overflow-x:auto; }
 #tab-models a:not(.btn) { color:var(--accent); }
+.flow-list { list-style:none; padding:0; margin:.5rem 0; display:grid; gap:.5rem; }
+.flow-node { border:1px solid var(--line); border-radius:.4rem; padding:.5rem .75rem; }
+.flow-node p { margin:.25rem 0; }
