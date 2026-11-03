@@ -66,10 +66,17 @@ MAX_ATTEMPTS_NETWORK = 5
 STATUS_STALE_SEC = 5 * 60
 PRIVATE_DIR_SETTLE_SEC = 2  # concurrent creator still normalizing its new directory
 # Capability reports (opt-in, --report-capabilities). The catalog treats a
-# snapshot older than 300s as stale (estimate.mjs TELEMETRY_FRESH_MS), so a
-# 240s cadence keeps one fresh with a heartbeat interval of margin. Each
-# report draws from the owner's shared hourly heartbeat budget (+15/h/node).
+# snapshot older than CAPABILITY_FRESH_WINDOW_SEC as stale (mirrors
+# estimate.mjs TELEMETRY_FRESH_MS; a website test pins the two together).
+# Reports ride successful beats, so the real period is the beat grid
+# rounded up — a fixed 240s target overshoots to 330s on 110s beats.
+# The scheduler below targets the latest beat inside the window minus
+# margin instead, so one missed beat cannot flip fresh to stale. Each
+# report draws from the owner's shared hourly heartbeat budget
+# (~15/h/node at defaults, <=30/h worst case).
 CAPABILITY_INTERVAL_SEC = 240
+CAPABILITY_FRESH_WINDOW_SEC = 300
+CAPABILITY_STALE_MARGIN_SEC = 60
 CAPABILITY_RETRY_SEC = 60
 CAPABILITY_SCHEMA_VERSION = 1
 # Config runtime kind -> reported runtime name. Named after the engine binary
@@ -627,7 +634,37 @@ def send_capabilities(api_base, resource_id, secret, report):
     raise PairingError(status, err, msg)
 
 
-def report_capabilities_step(meta, config_path, data_dir):
+def capability_target_sec():
+    """Latest age a new snapshot may reach: window minus one-beat margin."""
+    return CAPABILITY_FRESH_WINDOW_SEC - CAPABILITY_STALE_MARGIN_SEC
+
+
+def interval_supports_freshness(beat_interval):
+    """Whether beats are dense enough to keep a snapshot fresh.
+
+    Supported intervals (at most the 240s target) always have a beat
+    inside the freshness window. Coarser beats cannot: the sender still
+    reports best-effort after each beat, but snapshots read stale
+    between beats and the catalog fails closed on them.
+    """
+    return beat_interval <= CAPABILITY_INTERVAL_SEC
+
+
+def capability_period(beat_interval):
+    """Seconds from a report to the next one, quantized to the beat grid.
+
+    Reports go out on successful beats only, so the next report lands on
+    the latest beat inside [.., target]: the largest multiple of the beat
+    interval at or under the 240s target. Coarse beats past the target
+    cannot stay fresh; report on the next beat anyway (best effort).
+    """
+    if not interval_supports_freshness(beat_interval):
+        return beat_interval
+    multiple = max(capability_target_sec() // beat_interval, 1)
+    return multiple * beat_interval
+
+
+def report_capabilities_step(meta, config_path, data_dir, beat_interval):
     """One best-effort report inside the sender. Never raises.
 
     Returns seconds until the next attempt. Failures are logged without
@@ -638,7 +675,7 @@ def report_capabilities_step(meta, config_path, data_dir):
     if report is None:
         print("capabilities: not measurable here (psutil or disk usage unavailable); not reported",
               file=sys.stderr)
-        return CAPABILITY_INTERVAL_SEC
+        return capability_period(beat_interval)
     try:
         result = send_capabilities(meta["api_base"], meta["resource_id"],
                                    meta["heartbeat_key"], report)
@@ -650,7 +687,7 @@ def report_capabilities_step(meta, config_path, data_dir):
         print(f"capabilities: [{exc.code}] {exc}; retrying in {wait}s", file=sys.stderr)
         return wait
     print(f"capabilities ok: runtimes={len(report['runtimes'])} at={result.get('reportedAt')}")
-    return CAPABILITY_INTERVAL_SEC
+    return capability_period(beat_interval)
 
 
 def pairing_files(data_dir):
@@ -1002,6 +1039,10 @@ def cmd_heartbeat(args, loop):
     failures = 0
     first_beat = True
     next_capability_at = 0.0  # monotonic; opt-in reports go out after a successful beat
+    if loop and getattr(args, "report_capabilities", False) and not interval_supports_freshness(interval):
+        print(f"capabilities: heartbeat interval {interval}s is coarser than the "
+              f"{CAPABILITY_INTERVAL_SEC}s report target; snapshots will read stale between beats "
+              "(the catalog fails closed on them)", file=sys.stderr)
     if loop and hasattr(sys.stdout, "reconfigure"):
         # Supervised senders pipe stdout to the tray log: line-buffer so
         # each beat lands promptly instead of sitting in the block buffer.
@@ -1100,7 +1141,7 @@ def cmd_heartbeat(args, loop):
             # away, clear of the 25s window.
             if getattr(args, "report_capabilities", False) and time.monotonic() >= next_capability_at:
                 next_capability_at = time.monotonic() + report_capabilities_step(
-                    meta, args.config, data_dir)
+                    meta, args.config, data_dir, interval)
             if not loop:
                 return EXIT_OK
             time.sleep(interval)
@@ -1245,7 +1286,8 @@ def build_parser():
     loop.add_argument("--config", default=None, help="worker config for the usable-bit policy")
     loop.add_argument("--interval", type=int, default=HEARTBEAT_INTERVAL_SEC)
     loop.add_argument("--report-capabilities", action="store_true",
-                      help=f"also post node capability reports every {CAPABILITY_INTERVAL_SEC}s (opt-in)")
+                      help="also post node capability reports (opt-in; beat-quantized ~240s cadence, "
+                           "stays fresh while --interval is at most 240s)")
     caps = sub.add_parser("capabilities-once",
                           help="post one node capability report (RAM, disk, real runtimes)")
     caps.add_argument("--config", default=None, help="worker config for runtime discovery")
