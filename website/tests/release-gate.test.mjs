@@ -4,7 +4,7 @@ import {assertCanaryClean, assertNoCodeFetch, bindEvidence,
   fetchAssociatedPRs, fetchPR, fetchPRFiles, fetchPermission, fetchReviews,
   holdRelationTo, listOpenPRs, mergeEligible, parseEvidenceBlock,
   parseHoldsFile, publishEvaluation, publishHeadStatus,
-  requireCheckPass, resolveAcceptance, resolveMaintainer,
+  requireCheckPass, resolveAcceptance, resolveMaintainer, resolveReviewState,
   runGateEvaluation} from '../scripts/release-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -130,6 +130,97 @@ test('acceptance needs standing plus marker at this head', () => {
     dispatchActor: 'stranger'}), null);
   assert.equal(resolveAcceptance({reviews: [], headSha: HEAD,
     dispatchActor: 'stranger', dispatchActorStanding: true}), null);
+});
+
+// E: deterministic review-state resolution. A newer same-head blocking
+// verdict beats an older PASS; array order never decides; a plain
+// comment never resolves; only a later same-author APPROVED or an
+// explicit dismissal does. Unknown order or unattributable blocking
+// fails closed.
+const T0 = '2026-11-03T00:00:00Z';
+const T1 = '2026-11-03T01:00:00Z';
+const T2 = '2026-11-03T02:00:00Z';
+const passAt = (over = {}) => normReview({id: 1, submittedAt: T0, ...over});
+const crAt = (over = {}) => normReview({id: 2, state: 'CHANGES_REQUESTED',
+  body: 'needs work ' + HEAD, submittedAt: T1, ...over});
+test('newer same-head CHANGES_REQUESTED beats older PASS either array order', () => {
+  const pass = passAt();
+  const cr = crAt();
+  for (const reviews of [[pass, cr], [cr, pass]]) {
+    const state = resolveReviewState({reviews, headSha: HEAD});
+    assert.equal(state.blocked.by, '948a');
+    assert.equal(state.blocked.via, 'changes-requested');
+  }
+  assert.throws(() => mergeEligible(gateInput({reviews: [pass, cr]})),
+    /changes-requested by 948a/);
+});
+test('another authorized publisher blocks; a PASS cannot erase it', () => {
+  const pass = passAt();
+  const cr = crAt({id: 3, user: 'helper', association: 'COLLABORATOR',
+    submittedAt: T2});
+  const perms = {helper: 'admin'};
+  const state = resolveReviewState({reviews: [pass, cr], headSha: HEAD,
+    permissions: perms});
+  assert.equal(state.blocked.by, 'helper');
+  assert.throws(() => mergeEligible(gateInput({reviews: [pass, cr],
+    permissions: perms})), /changes-requested by helper/);
+});
+test('plain COMMENTED after CR does not resolve it', () => {
+  const comment = normReview({id: 3, state: 'COMMENTED', body: 'noted',
+    submittedAt: T2});
+  const state = resolveReviewState(
+    {reviews: [passAt(), crAt(), comment], headSha: HEAD});
+  assert.equal(state.blocked.by, '948a');
+  assert.throws(() => mergeEligible(
+    gateInput({reviews: [passAt(), crAt(), comment]})),
+  /changes-requested by 948a/);
+});
+test('later same-publisher APPROVED resolves; dismissal resolves', () => {
+  const approved = normReview({id: 4, submittedAt: T2});
+  assert.equal(resolveReviewState(
+    {reviews: [passAt(), crAt(), approved], headSha: HEAD}).blocked, null);
+  assert.equal(mergeEligible(
+    gateInput({reviews: [passAt(), crAt(), approved]})).ok, true);
+  const dismissed = normReview({id: 2, state: 'DISMISSED', submittedAt: T2});
+  assert.equal(resolveReviewState(
+    {reviews: [passAt(), crAt(), dismissed], headSha: HEAD}).blocked, null);
+});
+test('stale other-head blocking history is inert', () => {
+  const staleCR = crAt({commitId: OTHER});
+  assert.equal(resolveReviewState(
+    {reviews: [passAt(), staleCR], headSha: HEAD}).blocked, null);
+  assert.equal(
+    mergeEligible(gateInput({reviews: [passAt(), staleCR]})).ok, true);
+});
+test('missing/ambiguous order and unattributable blocking fail closed', () => {
+  const noOrder = (state) => normReview({id: null, submittedAt: null, state,
+    body: state === 'CHANGES_REQUESTED' ? 'needs work ' + HEAD : MARKER_BODY});
+  assert.throws(() => resolveReviewState(
+    {reviews: [noOrder('APPROVED'), noOrder('CHANGES_REQUESTED')],
+      headSha: HEAD}), /Ambiguous review order/);
+  assert.throws(() => resolveReviewState(
+    {reviews: [normReview({id: 9, user: null, state: 'CHANGES_REQUESTED',
+      body: 'needs work ' + HEAD, submittedAt: T1})], headSha: HEAD}),
+  /Unattributable blocking review/);
+});
+test('proven-absent outsider cannot block; unknown standing blocks closed', () => {
+  const outsider = () => crAt({id: 5, user: 'stranger',
+    association: 'COLLABORATOR', submittedAt: T2});
+  assert.equal(resolveReviewState({reviews: [passAt(), outsider()],
+    headSha: HEAD, permissions: {stranger: 'read'}}).blocked, null);
+  const unknown = resolveReviewState(
+    {reviews: [passAt(), outsider()], headSha: HEAD});
+  assert.equal(unknown.blocked.by, 'stranger');
+});
+test('structured HOLD blocks until a later same-reviewer approval', () => {
+  const holdBody = BLOCK.replace('blocking: none', 'blocking: needs-fix');
+  const hold = normReview({id: 3, state: 'COMMENTED', body: holdBody,
+    submittedAt: T1});
+  assert.throws(() => mergeEligible(gateInput({reviews: [passAt(), hold]})),
+    /fix plus new/);
+  const later = normReview({id: 4, submittedAt: T2});
+  assert.equal(mergeEligible(
+    gateInput({reviews: [passAt(), hold, later]})).ok, true);
 });
 test('worker-applicable heads also require installer CI', () => {
   const installer = {id: 12, name: 'Build and qualify Windows installer',
@@ -294,6 +385,35 @@ test('standing resolves via fresh endpoint reads, not caller claims', async () =
   assert(seen.some((p) => p.startsWith('collaborators/948a/permission')),
     'endpoint permission must actually be read');
 });
+test('blocking authors get fresh permission lookup in orchestration', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T01:00:00Z';
+  const approved = reviewDoc({author_association: 'OWNER',
+    submitted_at: T0});
+  const cr = {id: 2, user: {login: 'helper'},
+    author_association: 'COLLABORATOR', state: 'CHANGES_REQUESTED',
+    commit_id: HEAD, body: 'needs work ' + HEAD, submitted_at: T1};
+  const routes = (permission) => ({'pulls/86': prDoc(),
+    'pulls/86/reviews': [approved, cr],
+    'pulls/86/files': [{filename: 'website/x.html'}],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    'collaborators/948a/permission': {permission: 'read'},
+    'collaborators/helper/permission': {permission}});
+  // Fresh endpoint-proven admin for the blocker: merge refuses.
+  {
+    const {seen, request} = mockRequest(routes('admin'));
+    await assert.rejects(runGateEvaluation({request, n: 86, holds: {}}),
+      /changes-requested by helper/);
+    assert(seen.some((p) => p.startsWith('collaborators/helper/permission')),
+      'blocker standing must be read, not assumed');
+  }
+  // Fresh endpoint-proven read for the blocker: no blocking power.
+  {
+    const {request} = mockRequest(routes('read'));
+    const {verdict} = await runGateEvaluation({request, n: 86, holds: {}});
+    assert.equal(verdict.ok, true);
+  }
+});
 test('publishHeadStatus uses POST statuses/{sha}', async () => {
   const posts = [];
   const request = async (path, init) => {
@@ -431,3 +551,4 @@ test('loader never requests code or artifact endpoints', async () => {
   assert(seen.length >= 5);
   assertNoCodeFetch(seen);
 });
+

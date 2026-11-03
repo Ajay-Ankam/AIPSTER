@@ -21,6 +21,16 @@ Peter resolves PR84.
 - Release additionally requires explicit maintainer acceptance of that
   exact-head evidence (both auto and manual paths — no manual bypass).
   One maintainer suffices; no second-human lockout is added.
+- Acceptance never erases blocking. Same-head review records resolve
+  deterministically per author, oldest to latest (`submitted_at`, then
+  review id): a CHANGES_REQUESTED blocks until a later same-author
+  APPROVED or an explicit dismissal clears it — a plain COMMENTED never
+  resolves it, and a different publisher's PASS never erases another
+  author's block. A structured HOLD block stops the gate until a later
+  same-reviewer APPROVED supersedes it. Stale other-head records neither
+  block nor pass. Proven-absent outsiders have no blocking power;
+  unknown standing, unattributable signals, and ambiguous order fail
+  closed.
 - HOLD is cumulative over ancestry: a hold on H covers H and descendants
   for DEPLOY, so a later unrelated main commit cannot bypass it. Unknown
   ancestry ⇒ covered. Only a listed maintainer with a reason can clear;
@@ -39,7 +49,15 @@ Peter resolves PR84.
   rewriting it.
 - Irreversible step rechecks authoritative data first; the residual race
   (main moves between evaluation and deploy) is documented in every
-  receipt — the deploy step re-verifies the SHA itself.
+  receipt — the deploy step re-verifies the SHA itself. That
+  deploy-time re-evaluation is a backstop, not atomic prevention of a
+  merge: a merge that lands between evaluation and deploy is caught
+  before production, not prevented.
+- Honest staleness limits: during a GitHub API outage every evaluation
+  throws before publishing success (fail closed), but no failure status
+  can be posted mid-outage either — an old successful status can remain
+  visible and mergeable until the publisher refreshes it. Stale success
+  becoming impossible is NOT claimed.
 
 ## Identity without extra permissions (fork-safe)
 
@@ -159,7 +177,11 @@ re-verify `actor_id` at apply time):
 Notes: the required context is the single `PUBLISH_CONTEXT`
 `aipster-release-gate/head` — the advisory `release-gate-advisory`
 native job is NEVER a required check. `required_approving_review_count:
-0` keeps the sole maintainer recoverable (no second-human lockout).
+0` only avoids a second-human requirement: it does NOT guarantee
+recovery from a required-status or global-hold deadlock. Recovery from
+a wedged publisher or an active hold needs explicit owner
+intervention — the User bypass OPTION below and/or an explicit
+owner-recorded hold resolution — each with action-time confirmation.
 Emergency-bypass design OPTION (not applied, needs action-time
 confirmation): a User bypass actor for verified `synchronic1`
 (ID 135072919) so the sole maintainer can recover if the publisher
@@ -167,15 +189,17 @@ itself wedges a PR; default is no bypass. Never paste an unverified
 numeric ID — re-resolve the actor ID live at apply time and record the
 exact value in the apply receipt. Bootstrap order (no nonexistent check
 required): merge the publisher draft (still inert) → activate publishing
-→ run the explicit-head status canary on a PR head (`assertCanaryClean`:
-context present and passing ON the head, no competing legacy
-`release-gate` run) → then install the ruleset. The canary's
-PR-head attachment of `pull_request_target` outputs is an unresolved
-live check until run — see RESULT; nothing is installed beforehand.
+→ run the explicit-head commit-status canary on a PR head
+(`assertCanaryClean`: the `POST statuses/{sha}` context present and
+passing ON the head, no competing legacy `release-gate` run) → then
+install the ruleset. The canary proves explicit-head STATUS attachment
+via the API — not native `pull_request_target` job attachment, which is
+a separate unresolved live check until run — see RESULT; nothing is
+installed beforehand.
 Narrowly scoped `statuses: write` on the publisher job and
 `vars.RELEASE_GATE_PUBLISH_ACTIVE=true` are likewise confirmation-gated.
-Environment `production`: confirm single-maintainer reviewer, no second
-human. Security-sensitive hygiene for any privileged gate change:
+No production-environment reviewer rule is proposed (see the NOT-imposed
+verdict above). Security-sensitive hygiene for any privileged gate change:
 `persist-credentials: false`, read-only token, pinned SHAs, no
 `pull_request_target` fork checkout, no issue-comment commands.
 

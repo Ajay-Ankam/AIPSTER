@@ -16,8 +16,9 @@ import {pathToFileURL} from 'node:url';
 import {CANONICAL_REPO, MAIN_CHECK_NAME, WORKER_CHECK_NAME,
   isWorkerApplicable} from './release-preflight.mjs';
 import {bindEvidence, fetchAssociatedPRs, fetchPR,
-  fetchPRFiles, fetchReviews, markerAuthors, parseHoldsFile,
+  fetchPRFiles, fetchReviews, parseHoldsFile,
   requireCheckPass, resolveAcceptance, resolvePermissionsFor,
+  resolveReviewState, standingLogins,
   INSTALLER_CHECK_NAME} from './release-gate.mjs';
 
 const SHA_RE = /^[a-f0-9]{40}$/;
@@ -56,11 +57,12 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       const pr = await fetchPR(request, assoc.number ?? assoc.id);
       const reviews = await fetchReviews(request, pr.number);
       const evidence = bindEvidence({pr, reviews});
-      // Fresh standing for this PR's marker authors (supported endpoint
-      // reads, fail-closed gaps). Fresh reads take precedence over the
-      // caller map: caller booleans can be stale, never authoritative.
+      // Fresh standing for this PR's acceptance authors plus same-head
+      // blocking authors (supported endpoint reads, fail-closed gaps).
+      // Fresh reads take precedence over the caller map: caller booleans
+      // can be stale, never authoritative.
       const fresh = await resolvePermissionsFor({request,
-        logins: markerAuthors(reviews, pr.headSha)});
+        logins: standingLogins(reviews, pr.headSha)});
       permissions = {...(permissions || {}), ...fresh};
       assert(second === pr.headSha,
         `Merge ${sha} does not integrate reviewed head ${pr.headSha}`);
@@ -69,6 +71,12 @@ export async function evaluateDeployGate({git, request, fetchChecks,
         dispatchActorAssociation});
       assert(acceptance,
         `No maintainer acceptance for PR ${pr.number} head ${pr.headSha}`);
+      // Acceptance does not erase blocking: an unresolved same-head
+      // CHANGES_REQUESTED or structured HOLD refuses this PR too.
+      const state = resolveReviewState({reviews, headSha: pr.headSha,
+        permissions});
+      assert(!state.blocked,
+        `PR ${pr.number} has unresolved ${state.blocked?.via} by ${state.blocked?.by} at head ${pr.headSha} (review ${state.blocked?.reviewId})`);
       // Per-PR head CI: the installer workflow is PR-only, so installer
       // results exist only at the head — re-verify them here rather than
       // trusting target CI alone. Merged-main CI below covers site plus

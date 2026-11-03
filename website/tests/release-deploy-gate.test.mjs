@@ -103,6 +103,22 @@ test('fresh endpoint standing wins over stale caller claims', async () => {
       permissions: {helper: 'admin'}}), /No maintainer acceptance/);
   }
 });
+test('same-head CHANGES_REQUESTED blocks deploy until same-author approval', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T01:00:00Z';
+  const T2 = '2026-11-03T02:00:00Z';
+  const pass = reviewDoc(HEAD1, {submitted_at: T0});
+  const cr = reviewDoc(HEAD1, {id: 2, state: 'CHANGES_REQUESTED',
+    body: 'needs work', submitted_at: T1});
+  const blocked = mockRequest(baseRoutes({'pulls/90/reviews': [pass, cr]}));
+  await assert.rejects(evaluateDeployGate({...gateInput(),
+    request: blocked.request}), /changes-requested by 948a/);
+  const resolved = mockRequest(baseRoutes({'pulls/90/reviews':
+    [pass, cr, reviewDoc(HEAD1, {id: 3, submitted_at: T2})]}));
+  const out = await evaluateDeployGate({...gateInput(),
+    request: resolved.request});
+  assert.equal(out.ok, true);
+});
 test('fork-origin PR merged canonically is releasable', async () => {
   const {request} = mockRequest(baseRoutes({'pulls/90': prDoc(90, HEAD1, true)}));
   const out = await evaluateDeployGate({...gateInput(), request});
@@ -232,3 +248,4 @@ test('git and API failures fail closed', async () => {
   await assert.rejects(evaluateDeployGate({...gateInput(), request,
     fetchHeadChecks: async (sha) => [siteCheck(sha)]}), /401/);
 });
+

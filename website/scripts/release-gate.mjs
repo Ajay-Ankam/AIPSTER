@@ -208,15 +208,152 @@ export function parseEvidenceBlock(body, headSha) {
     tests: {passed: Number(tm[1]), total: Number(tm[2])}};
 }
 
+// Deterministic order between two normalized reviews: earlier
+// submitted_at first, review id breaks ties. Returns -1/0/1; 0 means
+// indistinguishable (exact tie or nothing decidable) — callers treat 0
+// with conflicting states as fail-closed, never as a guess.
+export function compareOrder(a, b) {
+  const as = (a && a.submittedAt) || null;
+  const bs = (b && b.submittedAt) || null;
+  if (as && bs) {
+    if (as < bs) return -1;
+    if (as > bs) return 1;
+  } else if (as || bs) {
+    return 0;
+  }
+  const ai = (a && a.id !== undefined && a.id !== null) ? a.id : null;
+  const bi = (b && b.id !== undefined && b.id !== null) ? b.id : null;
+  if (ai !== null && bi !== null) {
+    if (ai < bi) return -1;
+    if (ai > bi) return 1;
+  }
+  return 0;
+}
+
+// Structured HOLD signal in one body at one head: 'hold' (open blocking
+// findings — blocks until resolved), 'clean' (unanimous PASS block), or
+// 'none' (no block / stale). Malformed shapes propagate (fail closed).
+function holdSignalOf(body, headSha) {
+  if (typeof body !== 'string' || !body.includes('RELEASE-EVIDENCE')) {
+    return 'none';
+  }
+  try {
+    return parseEvidenceBlock(body, headSha) ? 'clean' : 'none';
+  } catch (err) {
+    if (/fix plus new/.test(err && err.message)) return 'hold';
+    throw err;
+  }
+}
+
+// Deterministic review-state resolution at one head, shared by the merge
+// and deploy paths. Same-head records only: stale other-head history
+// neither blocks nor passes. Per author, oldest to latest: a
+// CHANGES_REQUESTED blocks; only a later same-author APPROVED or an
+// explicit DISMISSED clears it — a plain COMMENTED never does, and a
+// different publisher's PASS never erases another author's block. A
+// structured HOLD block stops the gate until a later same-reviewer
+// APPROVED supersedes it. Proven-absent outsiders have no blocking
+// power; unknown standing or unattributable/ambiguously-ordered blocking
+// fails closed. Returns {blocked: null | {by, via, reviewId}}.
+export function resolveReviewState({reviews, headSha, permissions}) {
+  assertSha(headSha, 'Head SHA');
+  const same = [];
+  for (const r of reviews || []) {
+    if (!r || r.commitId !== headSha) continue;
+    same.push(r);
+  }
+  const byAuthor = new Map();
+  for (const r of same) {
+    if (!r.user) {
+      if (r.state === 'CHANGES_REQUESTED'
+        || (holdSignalOf(r.body, headSha) === 'hold'
+          && (r.state === 'APPROVED' || r.state === 'COMMENTED'))) {
+        throw new Error('Unattributable blocking review at this head: refusing');
+      }
+      continue;
+    }
+    if (!byAuthor.has(r.user)) byAuthor.set(r.user, []);
+    byAuthor.get(r.user).push(r);
+  }
+  const orderGroup = (records) => {
+    for (let i = 0; i < records.length; i++) {
+      for (let j = i + 1; j < records.length; j++) {
+        if (compareOrder(records[i], records[j]) === 0
+          && records[i].state !== records[j].state) {
+          throw new Error(`Ambiguous review order for ${records[i].user} at this head: refusing`);
+        }
+      }
+    }
+    return records.slice().sort(compareOrder);
+  };
+  const standingOf = (login, association) => {
+    if (resolveMaintainer({login, association,
+      permission: permissions?.[login]}).maintainer) {
+      return 'proven';
+    }
+    // Proven absent only when the endpoint itself reported a
+    // non-qualifying level: anything else (gap, unknown association) is
+    // unknown, and unknown blocking fails closed.
+    return (permissions && typeof permissions[login] === 'string')
+      ? 'absent' : 'unknown';
+  };
+  for (const [, records] of byAuthor) {
+    const ordered = orderGroup(records);
+    let block = null;
+    for (const r of ordered) {
+      if (r.state === 'CHANGES_REQUESTED') {
+        block = {by: r.user, via: 'changes-requested', reviewId: r.id,
+          association: r.association};
+      } else if (r.state === 'APPROVED' || r.state === 'DISMISSED') {
+        block = null;
+      }
+      if ((r.state === 'APPROVED' || r.state === 'COMMENTED')
+        && holdSignalOf(r.body, headSha) === 'hold') {
+        block = {by: r.user, via: 'hold-block', reviewId: r.id,
+          association: r.association};
+      }
+    }
+    if (!block) continue;
+    if (block.via === 'hold-block') return {blocked: block};
+    const standing = standingOf(block.by, block.association);
+    if (standing === 'absent') continue;
+    if (standing === 'unknown') {
+      return {blocked: {...block, via: 'changes-requested-unverified'}};
+    }
+    return {blocked: block};
+  }
+  return {blocked: null};
+}
+
+// A HOLD-bearing record is dead only when a later same-reviewer APPROVED
+// at the same head supersedes it with a non-HOLD body (order decidable
+// and strictly later). Anything else — including a plain COMMENTED —
+// leaves the HOLD in force.
+function holdSuperseded(record, reviews, headSha) {
+  for (const q of reviews || []) {
+    if (!q || q.user !== record.user || q.commitId !== headSha) continue;
+    if (q.state !== 'APPROVED') continue;
+    if (compareOrder(record, q) !== -1) continue;
+    if (holdSignalOf(q.body, headSha) !== 'hold') return true;
+  }
+  return false;
+}
+
 // Independent evidence: APPROVED/COMMENTED only (CHANGES_REQUESTED never
 // counts), bound to the CURRENT head, reviewer agent distinct from the
 // author (the poster may be the maintainer publishing the agent's report —
 // recorded as publisher), evaluated through the shared evidence policy.
+// A structured HOLD still fails closed unless a later same-reviewer
+// APPROVED at this head superseded it (see resolveReviewState).
 export function bindEvidence({pr, reviews}) {
   assert(pr && typeof pr.author === 'string', 'PR author is required');
   const bound = [];
   for (const r of reviews || []) {
     if (r.state !== 'APPROVED' && r.state !== 'COMMENTED') continue;
+    if (r.commitId === pr.headSha && holdSignalOf(r.body, pr.headSha) === 'hold'
+      && holdSuperseded(r, reviews, pr.headSha)) {
+      continue;
+    }
     const block = parseEvidenceBlock(r.body, pr.headSha);
     if (!block) continue;
     assert(block.reviewer !== pr.author,
@@ -270,6 +407,12 @@ function commonGates({pr, reviews, permissions, dispatchActor,
   const acceptance = resolveAcceptance({reviews, headSha, permissions,
     dispatchActor, dispatchActorAssociation});
   assert(acceptance, 'No maintainer acceptance for this head (author prose is not acceptance)');
+  // Acceptance does not erase blocking: a newer same-head
+  // CHANGES_REQUESTED or an unresolved structured HOLD from any
+  // still-blocking author refuses, whatever older PASS exists.
+  const state = resolveReviewState({reviews, headSha, permissions});
+  assert(!state.blocked,
+    `Unresolved ${state.blocked?.via} by ${state.blocked?.by} at this head (review ${state.blocked?.reviewId}) — a later same-author APPROVED or dismissal is required`);
   const hold = holdCovers(holdMap, headSha, holdRelation);
   assert(!hold.covered,
     `Release HOLD active: ${hold.holds.map(h => h.sha + ' (' + h.reason + ')').join(', ')}`);
@@ -327,10 +470,11 @@ export async function runGateEvaluation({request, n, holds}) {
   // the patch, is what fails closed.
   assert(!(files || []).includes(HOLD_REGISTRY_PATH),
     `PR touches the hold registry (${HOLD_REGISTRY_PATH}): refused — clearance needs a separately approved owner operation`);
-  // Fresh standing for the reviewers that actually need it (marker
-  // authors): supported endpoint reads, fail-closed gaps, never invented.
+  // Fresh standing for everyone whose standing the verdict may need
+  // (acceptance authors plus same-head blocking authors): supported
+  // endpoint reads, fail-closed gaps, never invented.
   const permissions = await resolvePermissionsFor(
-    {request, logins: markerAuthors(reviews, pr.headSha)});
+    {request, logins: standingLogins(reviews, pr.headSha)});
   const verdict = mergeEligible({pr, reviews, permissions, holdMap: holds,
     checks, workerApplicable: isWorkerApplicable(files), headSha: pr.headSha});
   const fresh = await fetchPR(request, n);
@@ -467,4 +611,18 @@ export function markerAuthors(reviews, headSha) {
   return (reviews || []).filter(r => r && typeof r.body === 'string'
     && r.body.includes(ACCEPT_MARKER) && r.body.includes(headSha))
     .map(r => r.user).filter(Boolean);
+}
+
+// Every login whose standing the evaluator may need: acceptance authors
+// plus same-head blocking authors (CHANGES_REQUESTED). Resolved with
+// fresh supported endpoint reads; fail-closed gaps, never invented.
+export function standingLogins(reviews, headSha) {
+  const logins = new Set(markerAuthors(reviews, headSha));
+  for (const r of reviews || []) {
+    if (r && r.commitId === headSha && r.state === 'CHANGES_REQUESTED'
+      && typeof r.user === 'string' && r.user) {
+      logins.add(r.user);
+    }
+  }
+  return [...logins];
 }
