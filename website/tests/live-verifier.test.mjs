@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
-import {verifyLive} from '../scripts/verify-live.mjs';
+import {verifyLive, verifyDeploymentReceipt} from '../scripts/verify-live.mjs';
 
 const commit = '1'.repeat(40);
 async function fixture(t, mutate = () => {}) {
@@ -110,4 +110,64 @@ test('a malformed propagation option falls back to a single attempt', async t =>
   const options = await fixture(t, (path, reply) => { if (path === '/app/app.js') reply.body = '/* previous release */'; });
   await assert.rejects(verifyLive({...options, propagation: {attempts: 'x', delayMs: -1}, sleep: async () => { sleeps++; }}), /Live bytes differ/);
   assert.equal(sleeps, 0);
+});
+// The build stamps deployment.json with the deploying run's own github_run_url,
+// so a second run can never byte-match the first run's receipt. On the
+// already-live path the receipt is validated instead of byte-compared; strict
+// new-deploy verification is unchanged.
+const runUrl = id => `https://github.com/synchronic1/AIPSTER/actions/runs/${id}`;
+const receipt = (runId, over = {}) => ({site: 'aipster-public-site', site_revision: 'r1',
+  git_commit: commit, github_run_url: runUrl(runId), source_manifest_sha256: 'fixture',
+  auth_deployed: false, ...over});
+async function alreadyLiveFixture(t, {localRun = '222', liveRun = '111', liveOver = {}, mutate} = {}) {
+  const options = await fixture(t, (path, reply) => {
+    if (path === '/deployment.json') reply.body = JSON.stringify(receipt(liveRun, liveOver));
+    if (mutate) mutate(path, reply);
+  });
+  await writeFile(join(options.dist, 'deployment.json'), JSON.stringify(receipt(localRun)));
+  return {...options, alreadyLive: true};
+}
+test('already-live accepts the deploying run receipt from a distinct run', async t => {
+  const result = await verifyLive(await alreadyLiveFixture(t));
+  assert.equal(result.verified, true);
+  assert.equal(result.already_live, true);
+  assert.equal(result.live_run_url, runUrl('111'));
+});
+test('already-live accepts when the receipt matches the local run', async t => {
+  const result = await verifyLive(await alreadyLiveFixture(t, {localRun: '111', liveRun: '111'}));
+  assert.equal(result.verified, true);
+});
+test('strict verification still rejects distinct-run receipt bytes', async t => {
+  await assert.rejects(verifyLive(await alreadyLiveFixture(t).then(({alreadyLive, ...rest}) => rest)),
+    /Live bytes differ: deployment\.json/);
+});
+test('strict verification still accepts identical receipt bytes', async t => {
+  const options = await alreadyLiveFixture(t, {localRun: '111', liveRun: '111'});
+  const {alreadyLive, ...rest} = options;
+  assert.equal((await verifyLive(rest)).verified, true);
+});
+for (const [name, liveOver] of [
+  ['wrong receipt SHA', {git_commit: '2'.repeat(40)}],
+  ['wrong receipt manifest', {source_manifest_sha256: 'other'}],
+  ['wrong receipt revision', {site_revision: 'r2'}],
+  ['wrong receipt site', {site: 'other-site'}],
+  ['foreign run URL', {github_run_url: 'https://github.com/someone/else/actions/runs/111'}],
+  ['malformed run URL', {github_run_url: 'not-a-url'}],
+  ['missing run URL', {github_run_url: undefined}],
+  ['unexpected receipt field', {extra: 1}],
+]) test(`already-live rejects ${name}`, async t => {
+  await assert.rejects(verifyLive(await alreadyLiveFixture(t, {liveOver})));
+});
+test('already-live still rejects changed static bytes', async t => {
+  const options = await alreadyLiveFixture(t, {mutate: (p, r) => { if (p === '/app/app.js') r.body = '/* tampered */'; }});
+  await assert.rejects(verifyLive(options), /Live bytes differ: app\/app\.js/);
+});
+test('already-live still enforces anonymous access denials', async t => {
+  const options = await alreadyLiveFixture(t, {mutate: (p, r) => { if (p === '/api/inventory') r.status = 200; }});
+  await assert.rejects(verifyLive(options));
+});
+test('receipt validation is done by the verifier, not a mirrored helper', async t => {
+  const local = receipt('222');
+  assert.equal(verifyDeploymentReceipt(receipt('111'), local, commit), runUrl('111'));
+  assert.throws(() => verifyDeploymentReceipt(receipt('111', {git_commit: '2'.repeat(40)}), local, commit));
 });
