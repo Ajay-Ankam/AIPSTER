@@ -65,6 +65,19 @@ HEARTBEAT_MIN_INTERVAL_SEC = 30  # above the 25s server window + skew
 MAX_ATTEMPTS_NETWORK = 5
 STATUS_STALE_SEC = 5 * 60
 PRIVATE_DIR_SETTLE_SEC = 2  # concurrent creator still normalizing its new directory
+# Capability reports (opt-in, --report-capabilities). The catalog treats a
+# snapshot older than 300s as stale (estimate.mjs TELEMETRY_FRESH_MS), so a
+# 240s cadence keeps one fresh with a heartbeat interval of margin. Each
+# report draws from the owner's shared hourly heartbeat budget (+15/h/node).
+CAPABILITY_INTERVAL_SEC = 240
+CAPABILITY_RETRY_SEC = 60
+CAPABILITY_SCHEMA_VERSION = 1
+# Config runtime kind -> reported runtime name. Named after the engine binary
+# (the dispatch lane's runtime_id is also "llama-server"). Reporting a name is
+# worker-declared evidence only; the catalog qualifies runtimes separately.
+CAPABILITY_RUNTIME_NAMES = {"llama_cpp": "llama-server", "ik_llama": "ik_llama-server"}
+CAPABILITY_FORMATS = ["gguf"]
+MAX_SAFE_INT = 2 ** 53 - 1
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -511,6 +524,135 @@ def send_heartbeat(api_base, resource_id, secret, usable):
     raise PairingError(status, err, msg)
 
 
+def _memory_bytes():
+    """(total, available) RAM bytes via psutil, or None when unmeasurable.
+
+    Imported lazily so this module stays standard-library-only: a
+    pairing-only frozen bundle without psutil simply does not report.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        memory = psutil.virtual_memory()
+        return int(memory.total), int(memory.available)
+    except Exception:
+        return None
+
+
+def _disk_bytes(path):
+    """(total, free) bytes for the volume holding `path`, or None."""
+    try:
+        usage = shutil.disk_usage(str(path))
+        return int(usage.total), int(usage.free)
+    except (OSError, ValueError):
+        return None
+
+
+def _reportable_runtimes(config_path):
+    """Runtimes this node can honestly claim, from its own worker config.
+
+    Conservative by design (never claims what it cannot see): mock runtimes
+    are not capacity, attach-mode readiness needs a live daemon probe, and a
+    managed runtime counts only when its engine executable resolves on PATH.
+    Unknown kinds and unreadable configs report nothing.
+    """
+    if not config_path:
+        return []
+    try:
+        from dendrite.config import load_config
+        config = load_config(Path(config_path))
+    except Exception:
+        return []
+    found = []
+    for runtime in getattr(config, "runtimes", []) or []:
+        name = CAPABILITY_RUNTIME_NAMES.get(getattr(runtime, "kind", ""))
+        if name is None or getattr(runtime, "mode", "") != "managed":
+            continue
+        executable = getattr(runtime, "executable", None)
+        if not executable or not shutil.which(str(executable)):
+            continue
+        if all(r["name"] != name for r in found):
+            found.append({"name": name, "formats": list(CAPABILITY_FORMATS)})
+    return found[:16]
+
+
+def _bounded_pair(total, avail):
+    """Clamp a (total, avail) measurement into the server's accepted shape."""
+    total = max(0, min(int(total), MAX_SAFE_INT))
+    avail = max(0, min(int(avail), total))
+    return total, avail
+
+
+def build_capability_report(config_path=None, data_dir=None):
+    """Build a node capability report, or None when it cannot be measured.
+
+    Shape matches validateCapabilityBody (website/src/worker.js): exactly
+    schema_version, os, arch, runtimes, mem, disk. GPU memory is omitted:
+    the available probe measures total VRAM only, and the server requires
+    avail <= total, so reporting free VRAM would be a guess.
+    """
+    memory = _memory_bytes()
+    disk = _disk_bytes(data_dir if data_dir else Path.home())
+    if memory is None or disk is None:
+        return None
+    ram_total, ram_avail = _bounded_pair(*memory)
+    disk_total, disk_avail = _bounded_pair(*disk)
+    return {
+        "schema_version": CAPABILITY_SCHEMA_VERSION,
+        "os": (platform.system() or "unknown")[:64],
+        "arch": (platform.machine() or "unknown")[:64],
+        "runtimes": _reportable_runtimes(config_path),
+        "mem": {"ramTotalBytes": ram_total, "ramAvailBytes": ram_avail},
+        "disk": {"totalBytes": disk_total, "availBytes": disk_avail},
+    }
+
+
+def send_capabilities(api_base, resource_id, secret, report):
+    """Post one capability report under the heartbeat key. Returns the body."""
+    base = check_api_base(api_base)
+    status, body, retry_after = post_json(
+        f"{base}/api/resources/{resource_id}/capabilities", report, secret)
+    err = body.get("code") or "CAPABILITIES_FAILED"
+    msg = body.get("error") or f"capability report failed (HTTP {status})"
+    if status == 200:
+        return body
+    if status == 401 and err in ("KEY_REVOKED", "KEY_EXPIRED"):
+        raise RePairRequired(status, err, msg)
+    if status == 404:
+        raise PairingError(status, err, "resource missing or key bound elsewhere; re-pair")
+    if status == 429:
+        raise PairingError(status, err, msg, retry_after)
+    raise PairingError(status, err, msg)
+
+
+def report_capabilities_step(meta, config_path, data_dir):
+    """One best-effort report inside the sender. Never raises.
+
+    Returns seconds until the next attempt. Failures are logged without
+    secrets and retried later; liveness is the heartbeat's job, so a
+    capability fault must never stop or delay the sender.
+    """
+    report = build_capability_report(config_path, data_dir)
+    if report is None:
+        print("capabilities: not measurable here (psutil or disk usage unavailable); not reported",
+              file=sys.stderr)
+        return CAPABILITY_INTERVAL_SEC
+    try:
+        result = send_capabilities(meta["api_base"], meta["resource_id"],
+                                   meta["heartbeat_key"], report)
+    except PairingError as exc:
+        if exc.status == 429:
+            wait = max(exc.retry_after or CAPABILITY_RETRY_SEC, HEARTBEAT_MIN_INTERVAL_SEC)
+        else:
+            wait = CAPABILITY_RETRY_SEC
+        print(f"capabilities: [{exc.code}] {exc}; retrying in {wait}s", file=sys.stderr)
+        return wait
+    print(f"capabilities ok: runtimes={len(report['runtimes'])} at={result.get('reportedAt')}")
+    return CAPABILITY_INTERVAL_SEC
+
+
 def pairing_files(data_dir):
     data = Path(data_dir)
     return {
@@ -859,6 +1001,7 @@ def cmd_heartbeat(args, loop):
             return EXIT_SENDER_RUNNING
     failures = 0
     first_beat = True
+    next_capability_at = 0.0  # monotonic; opt-in reports go out after a successful beat
     if loop and hasattr(sys.stdout, "reconfigure"):
         # Supervised senders pipe stdout to the tray log: line-buffer so
         # each beat lands promptly instead of sitting in the block buffer.
@@ -952,6 +1095,12 @@ def cmd_heartbeat(args, loop):
                                     "heartbeatAt": result.get("heartbeatAt"),
                                     "note": "reachability only; not inference-ready"}, meta)
             print(f"heartbeat ok: usable={usable} at={result.get('heartbeatAt')}")
+            # After the beat, never before: the report moves heartbeat_at
+            # server-side, and the next beat is >= HEARTBEAT_MIN_INTERVAL_SEC
+            # away, clear of the 25s window.
+            if getattr(args, "report_capabilities", False) and time.monotonic() >= next_capability_at:
+                next_capability_at = time.monotonic() + report_capabilities_step(
+                    meta, args.config, data_dir)
             if not loop:
                 return EXIT_OK
             time.sleep(interval)
@@ -961,6 +1110,47 @@ def cmd_heartbeat(args, loop):
         # cleanup, so prompt GC timing must not matter.
         if sender_guard is not None:
             sender_guard.release()
+
+
+def cmd_capabilities(args):
+    """Build, and unless --dry-run post, one capability report."""
+    try:
+        data_dir = Path(args.data_dir) if args.data_dir else default_data_dir()
+    except PairingError as exc:
+        print(f"capabilities: [{exc.code}] {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if args.dry_run:
+        # Local preview only: no pairing state read, no network, no secrets.
+        report = build_capability_report(args.config, data_dir if data_dir.exists() else None)
+        if report is None:
+            print("capabilities: not measurable here (psutil or disk usage unavailable)", file=sys.stderr)
+            return EXIT_USAGE
+        print(json.dumps(report, indent=2))
+        return EXIT_OK
+    try:
+        with pair_lock(data_dir):
+            meta = load_pairing(data_dir)
+    except PairingError as exc:
+        print(f"capabilities: [{exc.code}] {exc}", file=sys.stderr)
+        return EXIT_USAGE if exc.status is None else EXIT_NETWORK
+    report = build_capability_report(args.config, data_dir)
+    if report is None:
+        print("capabilities: not measurable here (psutil or disk usage unavailable)", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        result = send_capabilities(meta["api_base"], meta["resource_id"],
+                                   meta["heartbeat_key"], report)
+    except RePairRequired as exc:
+        print(f"capabilities: [{exc.code}] sender key is dead; pair again with a new code",
+              file=sys.stderr)
+        return EXIT_REPAIR_REQUIRED
+    except PairingError as exc:
+        print(f"capabilities failed [{exc.code}]: {exc}", file=sys.stderr)
+        if exc.status is None or exc.status == 429 or exc.status >= 500:
+            return EXIT_NETWORK
+        return EXIT_PAIRING_REJECTED
+    print(f"capabilities ok: runtimes={len(report['runtimes'])} at={result.get('reportedAt')}")
+    return EXIT_OK
 
 
 def cmd_status(args):
@@ -1049,9 +1239,18 @@ def build_parser():
     beat = sub.add_parser("heartbeat-once", help="post a single heartbeat")
     beat.add_argument("--config", default=None, help="worker config for the usable-bit policy")
     beat.add_argument("--interval", type=int, default=HEARTBEAT_INTERVAL_SEC)
+    beat.add_argument("--report-capabilities", action="store_true",
+                      help="also post one node capability report after the beat (opt-in)")
     loop = sub.add_parser("heartbeat-loop", help="post heartbeats until stopped (one sender per data dir; a second loop exits SENDER_RUNNING)")
     loop.add_argument("--config", default=None, help="worker config for the usable-bit policy")
     loop.add_argument("--interval", type=int, default=HEARTBEAT_INTERVAL_SEC)
+    loop.add_argument("--report-capabilities", action="store_true",
+                      help=f"also post node capability reports every {CAPABILITY_INTERVAL_SEC}s (opt-in)")
+    caps = sub.add_parser("capabilities-once",
+                          help="post one node capability report (RAM, disk, real runtimes)")
+    caps.add_argument("--config", default=None, help="worker config for runtime discovery")
+    caps.add_argument("--dry-run", action="store_true",
+                      help="print the report without sending it (no pairing or network needed)")
     sub.add_parser("status", help="show pairing state (never secrets)")
     sub.add_parser("unpair", help="forget local pairing (server key untouched)")
     # Inference job runner (lane L3). Kept in its own module so every other
@@ -1091,6 +1290,8 @@ def main(argv=None):
             return cmd_heartbeat(args, loop=False)
         if args.command == "heartbeat-loop":
             return cmd_heartbeat(args, loop=True)
+        if args.command == "capabilities-once":
+            return cmd_capabilities(args)
         if args.command == "status":
             return cmd_status(args)
         if args.command == "unpair":
