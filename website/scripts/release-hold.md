@@ -15,9 +15,22 @@ Peter resolves PR84.
   evidence is stale ⇒ re-review. Missing/ambiguous metadata fails closed.
 - Blocking findings must be fixed and re-reviewed at the exact new head.
   Tracked notes need explicit disposition + evidence.
-- AI-review evidence states model, reviewer id, a SEPARATE author, exact
-  SHA, report, and a unanimous test run. Quota/error outcomes never count;
-  AI evidence can never assert native GitHub human approval.
+- AI-review evidence states model, reviewing-agent id, attested
+  source-author agent id, a SEPARATE author, exact SHA, report, and a
+  unanimous test run. Quota/error outcomes never count; AI evidence can
+  never assert native GitHub human approval. String fields and report
+  paths alone authenticate nothing: a structured body binds only when
+  posted by a proven-trusted publisher (pinned owner, OWNER
+  association, or endpoint-proven admin/maintain, resolved fresh —
+  including marker-less reporters). A proved outsider's body is ignored
+  entirely (no evidence, no wedge); unknown standing fails closed.
+  Independence is attested agent-to-agent: reviewer and source-author
+  must be different agent identities even when the PR GitHub author
+  login differs, and the GitHub poster is recorded as publisher but
+  never substituted as the source agent. This is maintainer-attested
+  report provenance, NOT cryptographic proof of model execution:
+  production receipts must carry actual known agent IDs (fixtures use
+  explicit distinct fake IDs).
 - Release additionally requires explicit maintainer acceptance of that
   exact-head evidence (both auto and manual paths — no manual bypass).
   One maintainer suffices; no second-human lockout is added.
@@ -29,27 +42,35 @@ Peter resolves PR84.
   current state of one object, so a DISMISSED record never clears a
   different still-unresolved object, even a newer one by the same
   publisher. A plain COMMENTED never resolves, and a different
-  publisher's PASS never erases another author's block. A structured
-  HOLD block stops the gate until a later same-reviewer APPROVED
-  carrying a valid structured PASS (report/model/tests bound to this
-  head, reviewer distinct from the author) supersedes it — native
-  approval alone never erases a HOLD or revives an older PASS, and
-  publisher identity alone is never re-review evidence (one maintainer
-  may post several agents' reports). Stale other-head records neither
-  block nor pass. Proven-absent outsiders have no blocking power;
-  unknown standing, unattributable signals, and ambiguous order fail
-  closed.
-- Tracked nonblocking limitation (outsider structured-HOLD wedge): the
-  HOLD-block path checks no standing, so any commenter posting a
-  well-formed HOLD block wedges that head's gate — a safe-direction
-  refusal only, never a release, and harder to trigger accidentally
-  than it sounds (exact block schema + head SHA required). This is NOT
-  fixed by the dismissal/supersession corrections above and is NOT
-  expanded into a new permissions scheme here. Recovery limits, honestly:
-  the same commenter posts a superseding clean APPROVED, or the head
-  moves (stale records go inert), or a maintainer dismisses that exact
-  review object on GitHub (direct dismissal clears it). There is no
-  owner override that clears someone else's unresolved review block.
+  publisher's PASS never erases another author's block. Native state
+  (APPROVED/COMMENTED/CHANGES_REQUESTED/DISMISSED) resolves blocking as
+  above; structured evidence (PASS/HOLD blocks) additionally
+  authenticates through the publisher before it is even parsed — a
+  proved outsider's structured body is ignored, unknown standing fails
+  closed. A structured HOLD block stops the gate until a later
+  same-reviewer APPROVED carrying a valid structured PASS
+  (report/model/tests bound to this head, reviewer distinct from the
+  attested author) supersedes it — native approval alone never erases
+  a HOLD or revives an older PASS, and publisher identity alone is
+  never re-review evidence (one maintainer may post several agents'
+  reports). Stale other-head records neither block nor pass.
+  Proven-absent outsiders have no blocking power; unknown standing,
+  unattributable signals, and ambiguous order fail closed.
+- Tracked nonblocking limitation (structured-HOLD wedge, narrowed):
+  proved-outsider HOLD/malformed bodies are now ignored entirely (no
+  wedge — fixed above, no permissions-scheme expansion). What remains
+  is unknown-standing publishers: a well-formed HOLD block whose
+  standing cannot be proven still fails closed and wedges that head's
+  gate — a safe-direction refusal only, never a release. Recovery
+  limits, honestly: the same commenter posts a superseding clean
+  APPROVED, or the head moves (stale records go inert), or a maintainer
+  dismisses that exact review object on GitHub (direct dismissal clears
+  it). There is no owner override clearing another reviewer's
+  unresolved block. Related honest limits: old probes and reports using
+  author-less evidence blocks now fail closed by design (the `author:`
+  attestation is required); the custom context string alone does not
+  authenticate its publisher — trust rests on status-write holders plus
+  the one-time canary, both unproven live.
 - HOLD is cumulative over ancestry: a hold on H covers H and descendants
   for DEPLOY, so a later unrelated main commit cannot bypass it. Unknown
   ancestry ⇒ covered. Only a listed maintainer with a reason can clear;

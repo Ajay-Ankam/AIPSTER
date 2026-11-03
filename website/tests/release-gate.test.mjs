@@ -13,6 +13,7 @@ const OTHER = 'c'.repeat(40);
 const HOLD_SHA = 'd'.repeat(40);
 
 const BLOCK = ['RELEASE-EVIDENCE', 'reviewer: 948a',
+  'author: fixture-source-agent',
   'model: muse-spark-1.3-contributor', 'sha: ' + HEAD, 'verdict: PASS',
   'report: REVIEW-X.md', 'tests: 22/22', 'blocking: none'].join('\n');
 const MARKER_BODY = BLOCK + '\nRELEASE-ACCEPT ' + HEAD;
@@ -94,7 +95,7 @@ test('bindEvidence needs APPROVED/COMMENTED, distinct reviewer, bound head', () 
   assert.equal(bound.length, 1);
   assert.equal(bound[0].reviewId, 1);
   assert.throws(() => bindEvidence({pr, reviews: [normReview({state: 'CHANGES_REQUESTED'})]}), /bound to the current head/);
-  assert.throws(() => bindEvidence({pr, reviews: [normReview({body: MARKER_BODY.replace('reviewer: 948a', 'reviewer: author1')})]}), /distinct/);
+  assert.throws(() => bindEvidence({pr, reviews: [normReview({body: MARKER_BODY.replace('reviewer: 948a', 'reviewer: fixture-source-agent')})]}), /different agent/);
   assert.throws(() => bindEvidence({pr, reviews: [normReview({body: 'nice ' + HEAD})]}), /bound to the current head/);
 });
 
@@ -265,6 +266,7 @@ test('fresh structured PASS by a later agent report supersedes a HOLD', () => {
   // Same GitHub publisher posts a different agent's fresh re-review:
   // valid structured PASS (report/model/tests) at this head.
   const block2 = ['RELEASE-EVIDENCE', 'reviewer: agent-2',
+    'author: fixture-source-agent',
     'model: muse-spark-1.3-contributor', 'sha: ' + HEAD, 'verdict: PASS',
     'report: REVIEW-Y.md', 'tests: 3/3', 'blocking: none',
     'RELEASE-ACCEPT ' + HEAD].join('\n');
@@ -276,6 +278,54 @@ test('fresh structured PASS by a later agent report supersedes a HOLD', () => {
     baseRepo: 'synchronic1/AIPSTER'};
   assert.deepEqual(bindEvidence({pr, reviews}).map((b) => b.reviewId),
     [20, 22]);
+});
+
+// FIX-016: structured evidence authenticates through the publisher, not
+// through string fields. A proved outsider's invented PASS supplies no
+// evidence; their HOLD/malformed bodies wedge nothing; unknown standing
+// fails closed; only trusted publishers bind.
+const OUTSIDER_PASS = ['RELEASE-EVIDENCE', 'reviewer: claimed-independent-agent',
+  'author: fixture-source-agent',
+  'model: muse-spark-1.3-contributor', 'sha: ' + HEAD, 'verdict: PASS',
+  'report: invented-fixture-report.md', 'tests: 1/1', 'blocking: none'].join('\n');
+test('proved-outsider invented PASS supplies no evidence (controller case)', () => {
+  const outsider = normReview({id: 2, user: 'fixture-outsider',
+    association: 'NONE', state: 'COMMENTED', body: OUTSIDER_PASS,
+    submittedAt: T1});
+  // Owner acceptance marker only — no owner evidence of its own, exactly
+  // the controller counterexample shape.
+  const ownerMarker = normReview({id: 1, submittedAt: T0,
+    body: 'RELEASE-ACCEPT ' + HEAD});
+  assert.throws(() => mergeEligible(gateInput({reviews: [ownerMarker, outsider],
+    permissions: {synchronic1: 'admin', 'fixture-outsider': 'read'}})),
+  /No independent review evidence/);
+});
+test('proved-outsider HOLD and malformed bodies wedge nothing', () => {
+  const holdBody = BLOCK.replace('blocking: none', 'blocking: needs-fix');
+  const outsiderHold = normReview({id: 2, user: 'fixture-outsider',
+    association: 'NONE', state: 'COMMENTED', body: holdBody,
+    submittedAt: T1});
+  const outsiderGarbage = normReview({id: 3, user: 'fixture-outsider',
+    association: 'NONE', state: 'COMMENTED',
+    body: 'RELEASE-EVIDENCE\nreviewer: x', submittedAt: T2});
+  const perms = {'fixture-outsider': 'read'};
+  assert.equal(mergeEligible(gateInput({reviews: [passAt(), outsiderHold],
+    permissions: perms})).ok, true);
+  assert.equal(mergeEligible(gateInput({reviews: [passAt(), outsiderGarbage],
+    permissions: perms})).ok, true);
+});
+test('unknown-standing evidence publisher fails closed', () => {
+  const mystery = normReview({id: 2, user: 'mystery', association: 'NONE',
+    state: 'COMMENTED', body: BLOCK, submittedAt: T1});
+  assert.throws(() => mergeEligible(gateInput({reviews: [passAt(), mystery]})),
+    /Unverified evidence publisher/);
+});
+test('self-review at agent identity refuses despite different GitHub logins', () => {
+  const selfBody = BLOCK.replace('reviewer: 948a',
+    'reviewer: fixture-source-agent');
+  assert.throws(() => mergeEligible(gateInput({reviews: [normReview({
+    body: selfBody, submittedAt: T0})]})),
+  /different agent/);
 });
 test('structured HOLD blocks until a later same-reviewer approval', () => {
   const holdBody = BLOCK.replace('blocking: none', 'blocking: needs-fix');
@@ -502,6 +552,48 @@ test('unrelated dismissal cannot clear a live blocker (merge path)', async () =>
     /review 10/);
   assert(seen.some((p) => p.startsWith('collaborators/helper/permission')),
     'blocker standing must be read, not assumed');
+});
+test('orchestration refuses outsider evidence, fetches reporter standing', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T10:01:00Z';
+  const ownerAccept = reviewDoc({author_association: 'OWNER',
+    body: 'RELEASE-ACCEPT ' + HEAD, submitted_at: T0});
+  const outsiderReport = {id: 2, user: {login: 'fixture-outsider'},
+    author_association: 'NONE', state: 'COMMENTED', commit_id: HEAD,
+    body: OUTSIDER_PASS, submitted_at: T1};
+  const routes = {'pulls/86': prDoc(),
+    'pulls/86/reviews': [ownerAccept, outsiderReport],
+    'pulls/86/files': [{filename: 'website/x.html'}],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    'collaborators/948a/permission': {permission: 'read'},
+    'collaborators/fixture-outsider/permission': {permission: 'read'}};
+  const {seen, request} = mockRequest(routes);
+  await assert.rejects(runGateEvaluation({request, n: 86, holds: {}}),
+    /No independent review evidence/);
+  assert(seen.some((p) => p.startsWith('collaborators/fixture-outsider/permission')),
+    'marker-less reporter standing must be read, not assumed');
+});
+test('trusted marker-less report binds after fresh standing proof', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T10:01:00Z';
+  const ownerAccept = reviewDoc({author_association: 'OWNER',
+    submitted_at: T0});
+  // Marker-less structured PASS from a collaborator: binds only after
+  // the endpoint proves standing.
+  const reporterPass = {id: 2, user: {login: 'helper'},
+    author_association: 'COLLABORATOR', state: 'APPROVED', commit_id: HEAD,
+    body: BLOCK, submitted_at: T1};
+  const routes = {'pulls/86': prDoc(),
+    'pulls/86/reviews': [ownerAccept, reporterPass],
+    'pulls/86/files': [{filename: 'website/x.html'}],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    'collaborators/948a/permission': {permission: 'read'},
+    'collaborators/helper/permission': {permission: 'admin'}};
+  const {seen, request} = mockRequest(routes);
+  const {verdict} = await runGateEvaluation({request, n: 86, holds: {}});
+  assert.equal(verdict.ok, true);
+  assert(seen.some((p) => p.startsWith('collaborators/helper/permission')),
+    'reporter standing must be read before binding');
 });
 test('publishHeadStatus uses POST statuses/{sha}', async () => {
   const posts = [];

@@ -172,7 +172,12 @@ export function resolveMaintainer({login, association, permission}) {
 // an arbitrary SHA mention is NOT evidence. `blocking` must read exactly
 // `none` — blocking findings cannot pass via disposition prose; they need
 // a fix plus new exact-head review evidence. A HOLD verdict is an
-// informative refusal, never a pass.
+// informative refusal, never a pass. `reviewer` (reviewing-agent
+// identity) and `author` (source-author agent identity, as attested by
+// the trusted publisher) are both required: agent-level self-review is
+// rejected at bind time even when the PR GitHub author login differs.
+// This is maintainer-attested report provenance, NOT cryptographic proof
+// of model execution.
 export function parseEvidenceBlock(body, headSha) {
   assertSha(headSha, 'Head SHA');
   if (typeof body !== 'string' || !body.includes('RELEASE-EVIDENCE')) return null;
@@ -182,14 +187,15 @@ export function parseEvidenceBlock(body, headSha) {
   };
   const fail = (why) => { throw new Error(`Malformed evidence block (${why})`); };
   const reviewer = get('reviewer');
+  const author = get('author');
   const model = get('model');
   const sha = get('sha');
   const verdict = get('verdict');
   const report = get('report');
   const tests = get('tests');
   const blocking = get('blocking');
-  if (!reviewer || !model || !sha || !verdict || !report || !tests || !blocking) {
-    fail('missing reviewer/model/sha/verdict/report/tests/blocking');
+  if (!reviewer || !author || !model || !sha || !verdict || !report || !tests || !blocking) {
+    fail('missing reviewer/author/model/sha/verdict/report/tests/blocking');
   }
   // Stale evidence is SKIPPED (null), never fatal: after a head move, old
   // reviews stay in history while fresh evidence supersedes them. Only a
@@ -204,7 +210,7 @@ export function parseEvidenceBlock(body, headSha) {
   if (verdict.trim().toUpperCase() !== 'PASS') {
     throw new Error(`Review verdict is ${verdict} in ${report} — not evidence of pass`);
   }
-  return {reviewer, model, sha, report,
+  return {reviewer, author, model, sha, report,
     tests: {passed: Number(tm[1]), total: Number(tm[2])}};
 }
 
@@ -270,7 +276,7 @@ export function resolveReviewState({reviews, headSha, permissions}) {
   for (const r of same) {
     if (!r.user) {
       if (r.state === 'CHANGES_REQUESTED'
-        || (holdSignalOf(r.body, headSha) === 'hold'
+        || (typeof r.body === 'string' && r.body.includes('RELEASE-EVIDENCE')
           && (r.state === 'APPROVED' || r.state === 'COMMENTED'))) {
         throw new Error('Unattributable blocking review at this head: refusing');
       }
@@ -290,21 +296,27 @@ export function resolveReviewState({reviews, headSha, permissions}) {
     }
     return records.slice().sort(compareOrder);
   };
-  const standingOf = (login, association) => {
-    if (resolveMaintainer({login, association,
-      permission: permissions?.[login]}).maintainer) {
-      return 'proven';
-    }
-    // Proven absent only when the endpoint itself reported a
-    // non-qualifying level: anything else (gap, unknown association) is
-    // unknown, and unknown blocking fails closed.
-    return (permissions && typeof permissions[login] === 'string')
-      ? 'absent' : 'unknown';
-  };
   for (const [, records] of byAuthor) {
     const ordered = orderGroup(records);
     let block = null;
     for (const r of ordered) {
+      // Structured signals authenticate through the publisher first: a
+      // proved outsider's body is ignored entirely (no evidence, no
+      // wedge); unknown standing fails closed; only proven-trusted
+      // bodies are parsed at all.
+      let signal = 'none';
+      if ((r.state === 'APPROVED' || r.state === 'COMMENTED')
+        && typeof r.body === 'string' && r.body.includes('RELEASE-EVIDENCE')) {
+        const publisher = classifyStanding({login: r.user,
+          association: r.association, permissions});
+        if (publisher === 'absent') {
+          signal = 'ignored';
+        } else if (publisher === 'unknown') {
+          throw new Error(`Unverified evidence publisher ${r.user} at this head: refusing`);
+        } else {
+          signal = holdSignalOf(r.body, headSha);
+        }
+      }
       if (r.state === 'CHANGES_REQUESTED') {
         block = {by: r.user, via: 'changes-requested', reviewId: r.id,
           association: r.association};
@@ -312,8 +324,7 @@ export function resolveReviewState({reviews, headSha, permissions}) {
         // Genuine superseding approval clears a native CR outright, but
         // a structured HOLD needs a valid structured PASS in the
         // approving record — otherwise the HOLD stands.
-        if (!block || block.via !== 'hold-block'
-          || holdSignalOf(r.body, headSha) === 'clean') {
+        if (!block || block.via !== 'hold-block' || signal === 'clean') {
           block = null;
         }
       } else if (r.state === 'DISMISSED') {
@@ -321,15 +332,15 @@ export function resolveReviewState({reviews, headSha, permissions}) {
         // an unrelated dismissed object clears nothing.
         if (block && block.reviewId === r.id) block = null;
       }
-      if ((r.state === 'APPROVED' || r.state === 'COMMENTED')
-        && holdSignalOf(r.body, headSha) === 'hold') {
+      if (signal === 'hold') {
         block = {by: r.user, via: 'hold-block', reviewId: r.id,
           association: r.association};
       }
     }
     if (!block) continue;
     if (block.via === 'hold-block') return {blocked: block};
-    const standing = standingOf(block.by, block.association);
+    const standing = classifyStanding({login: block.by,
+      association: block.association, permissions});
     if (standing === 'absent') continue;
     if (standing === 'unknown') {
       return {blocked: {...block, via: 'changes-requested-unverified'}};
@@ -339,45 +350,83 @@ export function resolveReviewState({reviews, headSha, permissions}) {
   return {blocked: null};
 }
 
+// Publisher standing shared by review-state resolution and evidence
+// binding: 'proven' (pinned owner, OWNER association, or endpoint-proven
+// admin/maintain), 'absent' (the endpoint itself reported a
+// non-qualifying level), or 'unknown' (gap — fail closed). Standing can
+// never be caller-asserted.
+export function classifyStanding({login, association, permissions}) {
+  if (resolveMaintainer({login, association,
+    permission: permissions?.[login]}).maintainer) {
+    return 'proven';
+  }
+  return (permissions && typeof permissions[login] === 'string')
+    ? 'absent' : 'unknown';
+}
+
 // A HOLD-bearing record is dead only when a later same-reviewer APPROVED
 // at the same head supersedes it with a valid structured PASS body
 // (report/model/tests bound to this head — order decidable and strictly
-// later). A plain native APPROVED, a COMMENTED, a malformed block, or a
-// different reviewer's record leaves the HOLD in force: publisher
-// identity alone is never re-review evidence.
-function holdSuperseded(record, reviews, headSha) {
+// later) from a proven-trusted publisher. A plain native APPROVED, a
+// COMMENTED, a malformed block, an untrusted publisher, or a different
+// reviewer's record leaves the HOLD in force: publisher identity alone
+// is never re-review evidence.
+function holdSuperseded(record, reviews, headSha, permissions) {
   for (const q of reviews || []) {
     if (!q || q.user !== record.user || q.commitId !== headSha) continue;
     if (q.state !== 'APPROVED') continue;
     if (compareOrder(record, q) !== -1) continue;
+    if (classifyStanding({login: q.user, association: q.association,
+      permissions}) !== 'proven') {
+      continue;
+    }
     if (holdSignalOf(q.body, headSha) === 'clean') return true;
   }
   return false;
 }
 
 // Independent evidence: APPROVED/COMMENTED only (CHANGES_REQUESTED never
-// counts), bound to the CURRENT head, reviewer agent distinct from the
-// author (the poster may be the maintainer publishing the agent's report —
-// recorded as publisher), evaluated through the shared evidence policy.
-// A structured HOLD still fails closed unless a later same-reviewer
-// APPROVED carrying a valid structured PASS at this head superseded it
-// (see resolveReviewState): native approval alone never revives old PASS.
-export function bindEvidence({pr, reviews}) {
+// counts), bound to the CURRENT head, and only from proven-trusted
+// publishers — string fields and report paths alone authenticate
+// nothing. The GitHub poster is recorded as publisher, but independence
+// is attested agent-to-agent: the block's reviewing-agent identity must
+// differ from its attested source-author agent identity (the GitHub PR
+// author login is never substituted as the source agent). Evaluated
+// through the shared evidence policy. A structured HOLD still fails
+// closed unless a later same-reviewer APPROVED carrying a valid
+// structured PASS at this head superseded it (see resolveReviewState):
+// native approval alone never revives old PASS.
+export function bindEvidence({pr, reviews, permissions}) {
   assert(pr && typeof pr.author === 'string', 'PR author is required');
   const bound = [];
   for (const r of reviews || []) {
     if (r.state !== 'APPROVED' && r.state !== 'COMMENTED') continue;
+    if (typeof r.body !== 'string' || !r.body.includes('RELEASE-EVIDENCE')) {
+      continue;
+    }
+    // Trusted-publisher gate BEFORE parsing/binding: a proved
+    // outsider's body is ignored entirely (no evidence, no wedge);
+    // unknown standing fails closed; only proven-trusted bodies parse.
+    if (!r.user) {
+      throw new Error('Unattributable evidence publisher at this head: refusing');
+    }
+    const publisher = classifyStanding({login: r.user,
+      association: r.association, permissions});
+    if (publisher === 'absent') continue;
+    if (publisher === 'unknown') {
+      throw new Error(`Unverified evidence publisher ${r.user} at this head: refusing`);
+    }
     if (r.commitId === pr.headSha && holdSignalOf(r.body, pr.headSha) === 'hold'
-      && holdSuperseded(r, reviews, pr.headSha)) {
+      && holdSuperseded(r, reviews, pr.headSha, permissions)) {
       continue;
     }
     const block = parseEvidenceBlock(r.body, pr.headSha);
     if (!block) continue;
-    assert(block.reviewer !== pr.author,
-      `Evidence reviewer ${block.reviewer} must be distinct from the author`);
+    assert(block.reviewer !== block.author,
+      `Evidence reviewer ${block.reviewer} must be a different agent than the source author ${block.author}`);
     const record = evaluateReviewEvidence({sha: block.sha,
       reviewer: {model: block.model, reviewerId: block.reviewer},
-      author: pr.author, report: block.report, tests: block.tests,
+      author: block.author, report: block.report, tests: block.tests,
       status: 'pass', findings: [], sourceRepo: pr.baseRepo}, pr.headSha);
     bound.push({...record, reviewId: r.id, publisher: r.user});
   }
@@ -420,7 +469,7 @@ function commonGates({pr, reviews, permissions, dispatchActor,
   assertSha(headSha, 'Head SHA');
   assert(pr.baseRef === 'main' && pr.baseRepo === CANONICAL_REPO,
     'Only PRs against canonical main are eligible');
-  const evidence = bindEvidence({pr, reviews});
+  const evidence = bindEvidence({pr, reviews, permissions});
   const acceptance = resolveAcceptance({reviews, headSha, permissions,
     dispatchActor, dispatchActorAssociation});
   assert(acceptance, 'No maintainer acceptance for this head (author prose is not acceptance)');
@@ -630,14 +679,21 @@ export function markerAuthors(reviews, headSha) {
     .map(r => r.user).filter(Boolean);
 }
 
-// Every login whose standing the evaluator may need: acceptance authors
-// plus same-head blocking authors (CHANGES_REQUESTED). Resolved with
-// fresh supported endpoint reads; fail-closed gaps, never invented.
+// Every login whose standing the evaluator may need: acceptance
+// authors, same-head blocking authors (CHANGES_REQUESTED), and same-head
+// structured-evidence publishers — including marker-less reports, whose
+// standing must be proven before anything they carry can bind. Resolved
+// with fresh supported endpoint reads; fail-closed gaps, never invented.
 export function standingLogins(reviews, headSha) {
   const logins = new Set(markerAuthors(reviews, headSha));
   for (const r of reviews || []) {
-    if (r && r.commitId === headSha && r.state === 'CHANGES_REQUESTED'
-      && typeof r.user === 'string' && r.user) {
+    if (!r || r.commitId !== headSha || typeof r.user !== 'string'
+      || !r.user) {
+      continue;
+    }
+    if (r.state === 'CHANGES_REQUESTED') logins.add(r.user);
+    if ((r.state === 'APPROVED' || r.state === 'COMMENTED')
+      && typeof r.body === 'string' && r.body.includes('RELEASE-EVIDENCE')) {
       logins.add(r.user);
     }
   }

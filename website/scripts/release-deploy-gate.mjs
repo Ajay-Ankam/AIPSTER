@@ -56,14 +56,16 @@ export async function evaluateDeployGate({git, request, fetchChecks,
         `Associated PR for ${sha} is not merged to canonical main`);
       const pr = await fetchPR(request, assoc.number ?? assoc.id);
       const reviews = await fetchReviews(request, pr.number);
-      const evidence = bindEvidence({pr, reviews});
-      // Fresh standing for this PR's acceptance authors plus same-head
-      // blocking authors (supported endpoint reads, fail-closed gaps).
-      // Fresh reads take precedence over the caller map: caller booleans
-      // can be stale, never authoritative.
+      // Fresh standing first: acceptance authors, same-head blocking
+      // authors, and structured-evidence publishers (supported endpoint
+      // reads, fail-closed gaps). Fresh reads take precedence over the
+      // caller map: caller booleans can be stale, never authoritative.
+      // Evidence binding below needs the fresh map — a proved outsider's
+      // body must be ignorable before anything is parsed.
       const fresh = await resolvePermissionsFor({request,
         logins: standingLogins(reviews, pr.headSha)});
       permissions = {...(permissions || {}), ...fresh};
+      const evidence = bindEvidence({pr, reviews, permissions});
       assert(second === pr.headSha,
         `Merge ${sha} does not integrate reviewed head ${pr.headSha}`);
       const acceptance = resolveAcceptance({reviews: reviews,

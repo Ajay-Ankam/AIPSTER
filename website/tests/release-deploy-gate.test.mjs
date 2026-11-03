@@ -15,6 +15,7 @@ const MERGE2 = 'd'.repeat(40);
 const HOLD_SHA = LIVE;
 
 const blockFor = (head) => ['RELEASE-EVIDENCE', 'reviewer: 948a',
+  'author: fixture-source-agent',
   'model: muse-spark-1.3-contributor', 'sha: ' + head, 'verdict: PASS',
   'report: REVIEW-X.md', 'tests: 12/12', 'blocking: none'].join('\n');
 const markerFor = (head) => blockFor(head) + '\nRELEASE-ACCEPT ' + head;
@@ -93,14 +94,16 @@ test('fresh endpoint standing wins over stale caller claims', async () => {
     assert.equal(out.ok, true);
     assert.equal(out.prs[0].acceptedBy, 'helper');
   }
-  // A caller-claimed admin the endpoint reports as read must not accept.
+  // A caller-claimed admin the endpoint reports as read must not accept:
+  // the proved-outsider records are ignored at binding, so the gate
+  // refuses with no evidence rather than manufacturing acceptance.
   {
     const {request} = mockRequest(baseRoutes({
       'pulls/90/reviews': [collab(HEAD1)],
       'pulls/91/reviews': [collab(HEAD2)],
       'collaborators/helper/permission': {permission: 'read'}}));
     await assert.rejects(evaluateDeployGate({...gateInput(), request,
-      permissions: {helper: 'admin'}}), /No maintainer acceptance/);
+      permissions: {helper: 'admin'}}), /No independent review evidence/);
   }
 });
 test('same-head CHANGES_REQUESTED blocks deploy until same-author approval', async () => {
@@ -135,6 +138,24 @@ test('unrelated dismissal cannot clear a live blocker (deploy path)', async () =
     'collaborators/helper/permission': {permission: 'admin'}}));
   await assert.rejects(evaluateDeployGate({...gateInput(), request}),
     /review 10/);
+});
+test('outsider evidence never binds on the deploy path', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T10:01:00Z';
+  const outsiderPass = ['RELEASE-EVIDENCE', 'reviewer: claimed-independent-agent',
+    'author: fixture-source-agent',
+    'model: muse-spark-1.3-contributor', 'sha: ' + HEAD1, 'verdict: PASS',
+    'report: invented-fixture-report.md', 'tests: 1/1', 'blocking: none'].join('\n');
+  const ownerAccept = reviewDoc(HEAD1, {body: 'RELEASE-ACCEPT ' + HEAD1,
+    submitted_at: T0});
+  const outsiderReport = reviewDoc(HEAD1, {id: 2, user: {login: 'fixture-outsider'},
+    author_association: 'NONE', state: 'COMMENTED', body: outsiderPass,
+    submitted_at: T1});
+  const {request} = mockRequest(baseRoutes({
+    'pulls/90/reviews': [ownerAccept, outsiderReport],
+    'collaborators/fixture-outsider/permission': {permission: 'read'}}));
+  await assert.rejects(evaluateDeployGate({...gateInput(), request}),
+    /No independent review evidence/);
 });
 test('fork-origin PR merged canonically is releasable', async () => {
   const {request} = mockRequest(baseRoutes({'pulls/90': prDoc(90, HEAD1, true)}));
