@@ -51,20 +51,45 @@ recorded distinctly from independent review.
 
 ## Gate wiring (implemented, advisory until installed)
 
-- `.github/workflows/release-gate.yml` (new): enforcement job
-  `release-gate` runs ONLY on `pull_request_target` (base workflow
-  version — a PR cannot alter these steps); refresh job
-  `release-gate-refresh` runs on `pull_request_review` and is never a
-  required context, so a hostile YAML edit can never satisfy it. Both
-  check out the base ref explicitly and evaluate the head from API
-  metadata only. Stale evidence blocks are skipped (superseded without
-  deleting history); malformed data fails closed. Worker-applicable heads
-  additionally require installer CI at the PR head. Review-triggered runs
-  are refresh-only (their YAML is PR-versioned — documented limitation);
-  enforcement rests on target runs plus the deploy-time gate. No
-  status-write permission exists or is needed — job conclusions ARE the
-  checks. Unresolved live check: confirm the target-run `release-gate`
-  context attaches to the PR head on first live run (see RESULT).
+- `.github/workflows/release-gate.yml`: enforcement job `release-gate`
+  runs ONLY on `pull_request_target` (base workflow version — a PR cannot
+  alter these steps). NO review triggers and NO shared job names exist in
+  this file: review-version YAML is PR-controlled, so any required check
+  reachable from it would be forgeable by rename-back, and no rename can
+  fix that. The file checks out the base ref explicitly and evaluates the
+  head from API metadata only. Stale evidence blocks are skipped
+  (superseded without deleting history); malformed data fails closed.
+  Worker-applicable heads additionally require worker + installer CI at
+  the PR head. Residual liveness gap: a review submitted after the last
+  target run stays unevaluated until the next wake-up (see publish draft
+  and deploy-time backstop below) — documented, not claimed away.
+- `.github/workflows/release-gate-publish.yml` (DRAFT, INERT until
+  activated): trusted-base/default evaluator emitting explicit exact-head
+  commit statuses under the DISTINCT context
+  `aipster-release-gate/head` (never a native job name). Triggers:
+  `pull_request_target` + 15-minute `schedule`; every run re-reads
+  repository/PR/head/reviews/checks/holds fresh, emits
+  pending → error/failure/success with a stale-head race re-check, and
+  executes no untrusted code, artifacts, or caches. Activation requires
+  ALL of: uncommenting the narrow `statuses: write` job permission,
+  setting `vars.RELEASE_GATE_PUBLISH_ACTIVE=true`, and installing the
+  ruleset for that context — each with explicit action-time confirmation.
+  Until then it publishes nothing. No App, webhook, token, or service.
+- Deploy workflow step (authorized current-workflow edit, one step):
+  `public-site-production-deploy.yml` runs
+  `website/scripts/release-deploy-gate.mjs` after preflight and before
+  deploy. It inspects the ENTIRE first-parent live..target range: merges
+  get evidence on each PR's own head + per-PR head CI (site always,
+  worker/installer when that PR touches worker paths) + second-parent
+  integration proof; REGULAR mainline commits (direct/squash/rebase) are
+  refused outright — ancestry in a later branch proves nothing about
+  review coverage, and this evaluator documents squash/rebase as
+  unsupported without changing any remote merge method. Trusted holds
+  file; merged-main CI covers site plus conditional worker only
+  (installer at a merge target would deadlock every deploy: verified
+  asymmetry, kept). Git exit codes are honest (exit 1 = proven
+  non-ancestry; anything else throws). A refusal fails the job before
+  deploy.
 - Deploy workflow step (authorized current-workflow edit, one step):
   `public-site-production-deploy.yml` runs
   `website/scripts/release-deploy-gate.mjs` after preflight and before

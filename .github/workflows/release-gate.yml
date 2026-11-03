@@ -1,46 +1,36 @@
 # Merge-eligibility gate for release-relevant PRs (advisory until installed).
 #
-# Trust architecture (read before changing triggers): `pull_request` runs
-# the workflow file from the proposed merge, so a PR could alter the gate
-# itself — enforcement runs therefore come from `pull_request_target`
-# (base workflow version: a PR cannot alter these steps). The workflow
-# still checks out the base ref explicitly and evaluates the head from API
-# metadata only, so no fork/head code ever executes.
-# `pull_request_review` runs are best-effort refresh, NOT enforcement: a
-# review-version run executes PR-controlled YAML, so no step inside it can
-# prove its own integrity (a self-check would be theater against a hostile
-# edit). The untrusted-fork threat model is NOT downgraded: refresh runs
-# use the separate, never-required job `release-gate-refresh`, so a hostile
-# YAML edit can never satisfy the required `release-gate` context. Real
-# enforcement rests on (1) target runs at every head change and (2) the
+# Trust architecture: ONLY `pull_request_target` appears here because it
+# runs the base workflow version — a PR cannot alter these steps. There
+# are deliberately NO pull_request_review triggers in this file: review
+# runs execute PR-controlled YAML, so any required check sharing this
+# file's job names would be forgeable by rename-back, and no rename can
+# fix that. Review/CI freshness between pushes is covered by (1) target
+# re-runs at every head change, (2) the scheduled trusted evaluator in
+# release-gate-publish.yml (still a PROPOSAL until activated), and (3) the
 # deploy-time gate on main, which re-evaluates review state at release and
-# therefore catches post-merge dismissal. No path filter: README and all
+# therefore catches post-merge dismissal. Residual liveness gap (a review
+# submitted after the last target run stays unevaluated until the next
+# wake-up) is documented, not claimed away. No path filter: README and all
 # other PRs get a verdict, so no PR waits forever on a required check.
-# The job name `release-gate` is the proposed required-check context;
-# until the branch ruleset in release-hold.md is installed by the
-# controller, a red gate is advisory and does not block GitHub UI merges.
-# Token is read-only; no fork code, artifacts, or caches are ever executed.
-# No status-write permission is requested or needed — the job conclusion
-# IS the check. (If reviewer-comment reporting is ever added, it needs
-# issues:write/pull-requests:write proposed separately.)
+# Until the branch ruleset is installed by the controller, a red gate is
+# advisory and does not block GitHub UI merges. Token is read-only; no
+# fork code, artifacts, or caches are ever executed. This file requests no
+# status-write permission.
 name: Release gate
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
 permissions:
   contents: read
   checks: read
   pull-requests: read
 jobs:
-  # Enforcement job: runs ONLY from the trusted base workflow version
-  # (pull_request_target). Its check run is the required `release-gate`
-  # context. It never shares a name with the refresh job below, so a
-  # PR-controlled YAML edit can never satisfy the required context.
+  # Enforcement job: runs ONLY from the trusted base workflow version.
+  # Its check run is the required `release-gate` context. No other job in
+  # this file shares the name, and no PR-controlled event is defined here.
   release-gate:
     name: release-gate
-    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -84,63 +74,6 @@ jobs:
           } catch (err) {
             await fs.appendFile(process.env.GITHUB_STEP_SUMMARY,
               '## RELEASE GATE — NOT eligible\n\n' + String(err && err.message || err) + '\n');
-            console.error('GATE REFUSAL: ' + (err && err.message || err));
-            process.exit(1);
-          }"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-  # Refresh job: best-effort re-evaluation on review submit/edit/dismiss.
-  # Deliberately a DIFFERENT job/check name (`release-gate-refresh`) that
-  # is never listed in the required checks, so a PR-controlled YAML edit
-  # can never satisfy the `release-gate` context. Steps duplicated
-  # explicitly (no YAML anchors) for schema safety.
-  release-gate-refresh:
-    name: release-gate-refresh
-    if: github.event_name == 'pull_request_review'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 verified 2026-10-26
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-          ref: ${{ github.base_ref }} # TRUSTED BASE CODE ONLY — never the PR head
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6, same pin as public-site checks
-        with:
-          node-version: '24'
-          package-manager-cache: false
-      - name: Refresh merge eligibility from GitHub metadata
-        run: |
-          node --input-type=module -e "
-          import assert from 'node:assert/strict';
-          import fs from 'node:fs/promises';
-          import {fetchPR, fetchReviews, fetchPRFiles, mergeEligible, parseHoldsFile} from './website/scripts/release-gate.mjs';
-          import {fetchAllCheckRuns, isWorkerApplicable} from './website/scripts/release-preflight.mjs';
-          const repo = process.env.GITHUB_REPOSITORY;
-          assert.equal(repo, 'synchronic1/AIPSTER');
-          async function api(path) {
-            const res = await fetch('https://api.github.com/repos/' + repo + '/' + path, {headers: {
-              Authorization: 'Bearer ' + process.env.GH_TOKEN, Accept: 'application/vnd.github+json',
-              'X-GitHub-Api-Version': '2022-11-28'}, signal: AbortSignal.timeout(15000), redirect: 'error'});
-            assert(res.ok, 'Metadata API returned HTTP ' + res.status + ' for ' + path);
-            return res.json();
-          }
-          try {
-            const n = process.env.PR_NUMBER;
-            const pr = await fetchPR(api, n);
-            const [reviews, files, checks] = await Promise.all([fetchReviews(api, n),
-              fetchPRFiles(api, n), fetchAllCheckRuns(api, pr.headSha)]);
-            const holds = parseHoldsFile(JSON.parse(
-              await fs.readFile('.github/release-holds.json', 'utf8')));
-            const verdict = mergeEligible({pr, reviews, holdMap: holds, checks,
-              workerApplicable: isWorkerApplicable(files), headSha: pr.headSha});
-            await fs.appendFile(process.env.GITHUB_STEP_SUMMARY,
-              '## RELEASE GATE REFRESH — eligible\n\n' + JSON.stringify(verdict) + '\n');
-            console.log(JSON.stringify(verdict));
-          } catch (err) {
-            await fs.appendFile(process.env.GITHUB_STEP_SUMMARY,
-              '## RELEASE GATE REFRESH — NOT eligible\n\n' + String(err && err.message || err) + '\n');
             console.error('GATE REFUSAL: ' + (err && err.message || err));
             process.exit(1);
           }"

@@ -2,8 +2,9 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {assertNoCodeFetch, bindEvidence, fetchAssociatedPRs,
   fetchPR, fetchPRFiles, fetchPermission, fetchReviews, holdRelationTo,
-  mergeEligible, parseEvidenceBlock, parseHoldsFile,
-  requireCheckPass, resolveAcceptance, resolveMaintainer} from '../scripts/release-gate.mjs';
+  mergeEligible, parseEvidenceBlock, parseHoldsFile, publishHeadStatus,
+  requireCheckPass, resolveAcceptance, resolveMaintainer,
+  runGateEvaluation} from '../scripts/release-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
 const NEXT = 'b'.repeat(40);
@@ -220,6 +221,45 @@ test('holds file parses; malformed entries fail', () => {
   assert.throws(() => parseHoldsFile({version: 2, holds: {}}), /version/);
   assert.throws(() => parseHoldsFile({version: 1, holds: {[HOLD_SHA]: {}}}),
     /Malformed/);
+});
+
+test('runGateEvaluation races fresh; moved head discarded', async () => {
+  const ownerReview = reviewDoc({author_association: 'OWNER'});
+  const routes = {'pulls/86': prDoc(),
+    'pulls/86/reviews': [ownerReview],
+    'pulls/86/files': [{filename: 'website/x.html'}],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}};
+  const {request} = mockRequest(routes);
+  const {verdict, pr} = await runGateEvaluation({request, n: 86, holds: {}});
+  assert.equal(verdict.ok, true);
+  assert.equal(pr.headSha, HEAD);
+  let calls = 0;
+  const moving = mockRequest({'pulls/86': () => prDoc(
+    calls++ === 0 ? {} : {head: {sha: OTHER, ref: 'x',
+      repo: {full_name: 'synchronic1/AIPSTER'}}}),
+    'pulls/86/reviews': [ownerReview],
+    'pulls/86/files': [],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}});
+  await assert.rejects(runGateEvaluation({request: moving.request, n: 86, holds: {}}),
+    /moved during evaluation/);
+});
+test('publishHeadStatus posts explicit distinct contexts only', async () => {
+  const posts = [];
+  const request = async (path, init) => {
+    posts.push({path, init});
+    return {id: 1, state: init.body.state};
+  };
+  await publishHeadStatus({request, headSha: HEAD, state: 'pending',
+    context: 'aipster-release-gate/head', description: 're-reading'});
+  assert.equal(posts[0].path, `commits/${HEAD}/statuses`);
+  assert.equal(posts[0].init.method, 'POST');
+  assert.equal(posts[0].init.body.context, 'aipster-release-gate/head');
+  await assert.rejects(publishHeadStatus({request, headSha: HEAD,
+    state: 'bogus', context: 'aipster-release-gate/head'}), /pending\/success/);
+  await assert.rejects(publishHeadStatus({request, headSha: HEAD,
+    state: 'success', context: 'release-gate-refresh'}), /distinct context/);
+  await assert.rejects(publishHeadStatus({request, headSha: 'zzz',
+    state: 'success', context: 'aipster-release-gate/head'}), /40-hex/);
 });
 
 // no code fetched across the whole exercised surface

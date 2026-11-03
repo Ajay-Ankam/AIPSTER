@@ -48,12 +48,18 @@ const assoc = (n) => ({number: n, state: 'closed', merged_at: '2026-11-03T00:00:
   merge_commit_sha: n === 90 ? MERGE1 : MERGE2,
   base: {ref: 'main', repo: {full_name: 'synchronic1/AIPSTER'}}});
 
+const installerCheckFor = (sha) => ({id: 12, name: 'Build and qualify Windows installer',
+  head_sha: sha, status: 'completed', conclusion: 'success', app: {slug: 'github-actions'}});
+const workerCheckFor = (sha) => ({id: 7, name: 'mock-install', head_sha: sha,
+  status: 'completed', conclusion: 'success', app: {slug: 'github-actions'}});
 function baseRoutes(over = {}) {
   return {[`commits/${MERGE1}/pulls`]: [assoc(90)],
     [`commits/${MERGE2}/pulls`]: [assoc(91)],
     'pulls/90': prDoc(90, HEAD1), 'pulls/91': prDoc(91, HEAD2),
     'pulls/90/reviews': [reviewDoc(HEAD1)],
     'pulls/91/reviews': [reviewDoc(HEAD2)],
+    'pulls/90/files': [{filename: 'website/public/x.html'}],
+    'pulls/91/files': [{filename: 'website/public/y.html'}],
     [`commits/${TARGET}/check-runs`]: {check_runs: [siteCheck(TARGET)]}, ...over};
 }
 const git = (over = {}) => ({commitsInRange: () => [MERGE2, MERGE1],
@@ -63,6 +69,7 @@ const git = (over = {}) => ({commitsInRange: () => [MERGE2, MERGE1],
 function gateInput(over = {}) {
   const {request} = mockRequest(baseRoutes());
   return {git: git(), request, fetchChecks: async () => [siteCheck(TARGET)],
+    fetchHeadChecks: async (sha) => [siteCheck(sha)],
     liveSha: LIVE, targetSha: TARGET, mode: 'auto', holds: {}, ...over};
 }
 
@@ -126,17 +133,28 @@ test('already-live is a noop; manual dispatch actor accepted', async () => {
   await assert.rejects(evaluateDeployGate({...gateInput(), request, mode: 'manual'}),
     /No maintainer acceptance/);
 });
-test('squash-mixed range fails on unbound direct content', async () => {
-  const S = 'e'.repeat(40).replace(/e/g, '9');
+test('every regular first-parent commit is refused, even with later ancestry', async () => {
+  const S = '9'.repeat(40);
+  // S sits below a reviewed merge (it WOULD be an ancestor of the head):
+  // ancestry proves nothing about review coverage, so it still refuses.
   const mixed = git({commitsInRange: () => [MERGE2, S, MERGE1],
-    isAncestor: () => false});
+    isAncestor: () => true});
   await assert.rejects(evaluateDeployGate({...gateInput(), git: mixed}),
     /Unbound mainline commit/);
-  const bound = git({commitsInRange: () => [MERGE2, S, MERGE1],
-    isAncestor: (a) => a === S});
-  const out = await evaluateDeployGate({...gateInput(), git: bound});
-  assert.equal(out.ok, true);
-  assert.deepEqual(out.covered, [{sha: S, merge: MERGE2}]);
+});
+test('worker PR heads require worker+installer CI; target needs no installer', async () => {
+  const workerFiles = {'pulls/90/files': [{filename: 'local-worker/x.py'}]};
+  const {request} = mockRequest(baseRoutes(workerFiles));
+  const noInstaller = {...gateInput(), request,
+    fetchHeadChecks: async (sha) => [siteCheck(sha), workerCheckFor(sha)]};
+  await assert.rejects(evaluateDeployGate(noInstaller), /installer/i);
+  const full = mockRequest(baseRoutes(workerFiles));
+  const out = await evaluateDeployGate({...gateInput(), request: full.request,
+    fetchHeadChecks: async (sha) => [siteCheck(sha), workerCheckFor(sha),
+      installerCheckFor(sha)],
+    git: git({changedFiles: () => ['local-worker/x.py']}),
+    fetchChecks: async () => [siteCheck(TARGET), workerCheckFor(TARGET)]});
+  assert.equal(out.ok, true); // installer absent at target is correct
 });
 test('realGit on a tiny repo: first-parent range, exit codes, unknown throws', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-'));
@@ -175,6 +193,8 @@ test('git and API failures fail closed', async () => {
   const {request} = mockRequest({[`commits/${MERGE2}/pulls`]: [assoc(91)],
     [`commits/${MERGE1}/pulls`]: [assoc(90)],
     'pulls/91': prDoc(91, HEAD2),
-    'pulls/91/reviews': [reviewDoc(HEAD2)]}, ['pulls/90']);
-  await assert.rejects(evaluateDeployGate({...gateInput(), request}), /401/);
+    'pulls/91/reviews': [reviewDoc(HEAD2)],
+    'pulls/91/files': [{filename: 'website/public/y.html'}]}, ['pulls/90']);
+  await assert.rejects(evaluateDeployGate({...gateInput(), request,
+    fetchHeadChecks: async (sha) => [siteCheck(sha)]}), /401/);
 });

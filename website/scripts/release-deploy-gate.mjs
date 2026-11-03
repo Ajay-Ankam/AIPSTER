@@ -15,72 +15,76 @@ import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {CANONICAL_REPO, MAIN_CHECK_NAME, WORKER_CHECK_NAME,
   isWorkerApplicable} from './release-preflight.mjs';
-import {bindEvidence, fetchAssociatedPRs, fetchPR, fetchReviews,
-  parseHoldsFile, requireCheckPass, resolveAcceptance} from './release-gate.mjs';
+import {bindEvidence, fetchAssociatedPRs, fetchPR, fetchPRFiles,
+  fetchReviews, parseHoldsFile, requireCheckPass, resolveAcceptance,
+  INSTALLER_CHECK_NAME} from './release-gate.mjs';
 
 const SHA_RE = /^[a-f0-9]{40}$/;
 
 export async function evaluateDeployGate({git, request, fetchChecks,
-  liveSha, targetSha, mode, dispatchActor, dispatchActorAssociation,
-  holds, permissions}) {
+  fetchHeadChecks, liveSha, targetSha, mode, dispatchActor,
+  dispatchActorAssociation, holds, permissions}) {
   assert(SHA_RE.test(liveSha || ''), 'An exact live SHA is required');
   assert(SHA_RE.test(targetSha || ''), 'An exact target SHA is required');
   assert(mode === 'auto' || mode === 'manual', 'Mode must be auto or manual');
   if (liveSha === targetSha) return {ok: true, noop: 'already-live'};
   assert(holds && typeof holds === 'object', 'Trusted holds map is required');
-  // Entire first-parent live..target range: merge commits AND direct
-  // commits are all inspected. A regular (non-merge) commit — direct
-  // push, squash, or rebase content — releases ONLY when rigorously bound:
-  // contained in an enumerated merge's second-parent history. Anything
-  // else fails closed. No merge method is disabled; unbound content simply
-  // cannot release.
+  // Entire first-parent live..target range is inspected. Regular
+  // (non-merge) commits — direct pushes, squash or rebase content — are
+  // UNSUPPORTED by this initial evaluator and always refused: ancestry in
+  // a later branch proves nothing about review coverage, and no
+  // association equivalence is invented for them. Remote merge methods are
+  // NOT changed; such content simply cannot release here (a strict
+  // merge-base refinement is a documented later option, not this gate).
   const range = git.commitsInRange(liveSha, targetSha);
   assert(Array.isArray(range) && range.length > 0,
     'Empty range without equality: refetch main (fail closed)');
-  const merges = [];
-  const regulars = [];
+  const evaluated = [];
   for (const sha of range) {
     assert(SHA_RE.test(sha || ''), 'Range returned a non-SHA');
-    if (git.secondParent(sha) === null) regulars.push(sha);
-    else merges.push(sha);
-  }
-  const roots = new Map();
-  const evaluated = [];
-  for (const merge of merges) {
-    const associated = await fetchAssociatedPRs(request, merge);
+    const second = git.secondParent(sha);
+    assert(second !== null,
+      `Unbound mainline commit ${sha}: direct/squash/rebase content is unsupported by this evaluator (no remote methods changed; this content cannot release)`);
+    const associated = await fetchAssociatedPRs(request, sha);
     assert(associated.length > 0,
-      `Merge ${merge} has no associated pull request to canonical main`);
+      `Merge ${sha} has no associated pull request to canonical main`);
     for (const assoc of associated) {
       assert(assoc.base?.ref === 'main'
         && assoc.base?.repo?.full_name === CANONICAL_REPO,
-        `Associated PR for ${merge} is not merged to canonical main`);
+        `Associated PR for ${sha} is not merged to canonical main`);
       const pr = await fetchPR(request, assoc.number ?? assoc.id);
       const reviews = await fetchReviews(request, pr.number);
       const evidence = bindEvidence({pr, reviews});
-      const second = git.secondParent(merge);
       assert(second === pr.headSha,
-        `Merge ${merge} does not integrate reviewed head ${pr.headSha}`);
-      roots.set(merge, second);
+        `Merge ${sha} does not integrate reviewed head ${pr.headSha}`);
       const acceptance = resolveAcceptance({reviews: reviews,
         headSha: pr.headSha, permissions, dispatchActor,
         dispatchActorAssociation});
       assert(acceptance,
         `No maintainer acceptance for PR ${pr.number} head ${pr.headSha}`);
-      evaluated.push({merge, number: pr.number, head: pr.headSha,
+      // Per-PR head CI: the installer workflow is PR-only, so installer
+      // results exist only at the head — re-verify them here rather than
+      // trusting target CI alone. Merged-main CI below covers site plus
+      // conditional worker only (installer at a merge target would
+      // deadlock every deploy: verified requirement asymmetry, kept).
+      assert(typeof fetchHeadChecks === 'function',
+        'Per-PR head check fetcher is required (no silent target-only CI)');
+      const headChecks = await fetchHeadChecks(pr.headSha);
+      requireCheckPass(headChecks, MAIN_CHECK_NAME, pr.headSha,
+        `PR ${pr.number} head`);
+      const files = await fetchPRFiles(request, pr.number);
+      if (isWorkerApplicable(files)) {
+        requireCheckPass(headChecks, WORKER_CHECK_NAME, pr.headSha,
+          `PR ${pr.number} head touches worker-covered paths, so`);
+        requireCheckPass(headChecks, INSTALLER_CHECK_NAME, pr.headSha,
+          `PR ${pr.number} head touches worker-covered paths, so its`);
+      }
+      evaluated.push({merge: sha, number: pr.number, head: pr.headSha,
         evidence: evidence.length, acceptedBy: acceptance.by, via: acceptance.via});
     }
   }
   assert(evaluated.length > 0,
     'No merge with bound PR evidence in range: unassociated main pushes cannot release');
-  const coveredBy = [];
-  for (const sha of regulars) {
-    let bound = false;
-    for (const [merge, root] of roots) {
-      if (git.isAncestor(sha, root)) { bound = true; coveredBy.push({sha, merge}); break; }
-    }
-    assert(bound,
-      `Unbound mainline commit ${sha}: direct/squash/rebase content with no reviewed PR merge cannot release`);
-  }
   // Fresh trusted hold governs before any production step: any active hold
   // on an ancestor-or-self of the target (proven by git, never assumed)
   // blocks both paths. Unknown git outcomes throw (fail closed).
@@ -100,7 +104,6 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       'The release touches worker-covered paths, so');
   }
   return {ok: true, mode, live: liveSha, target: targetSha, prs: evaluated,
-    covered: coveredBy,
     residualRace: 'Recheck main immediately before the irreversible step.'};
 }
 
@@ -158,6 +161,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     return res.json();
   }
   const {fetchCheckRunsAll} = await import('./release-gate.mjs');
+  const fetchHeadChecks = (sha) => fetchCheckRunsAll(api, sha);
   // Best-effort standing for the dispatch actor: the read token usually
   // cannot read collaborator permission (fail closed to the pinned owner /
   // OWNER association inside resolveAcceptance via permissions map gaps).
@@ -173,7 +177,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     }
   }
   const verdict = await evaluateDeployGate({git: realGit(root), request: api,
-    fetchChecks: (sha) => fetchCheckRunsAll(api, sha), liveSha,
+    fetchChecks: (sha) => fetchCheckRunsAll(api, sha),
+    fetchHeadChecks, liveSha,
     targetSha, mode, dispatchActor: process.env.DISPATCH_ACTOR || null,
     dispatchActorAssociation: null, holds, permissions});
   console.log(JSON.stringify(verdict));

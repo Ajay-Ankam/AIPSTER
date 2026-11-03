@@ -297,6 +297,41 @@ export function mergeEligible(input) {
 // dispatching an older known-good SHA is NOT a supported rollback path —
 // recovery ships a new restoring head through the same gate.)
 
+// Full evaluation orchestration for one PR number: fresh reads, worker
+// applicability from its changed files, merge verdict, then a stale-head
+// race check (the head is re-read and must be unchanged) before anything
+// may be published. Events are wake-ups, never authority: every output
+// derives from data fetched inside this call.
+export async function runGateEvaluation({request, n, holds}) {
+  const pr = await fetchPR(request, n);
+  const [reviews, files, checks] = await Promise.all([
+    fetchReviews(request, n), fetchPRFiles(request, n),
+    fetchCheckRunsAll(request, pr.headSha)]);
+  const verdict = mergeEligible({pr, reviews, holdMap: holds, checks,
+    workerApplicable: isWorkerApplicable(files), headSha: pr.headSha});
+  const fresh = await fetchPR(request, n);
+  assert.equal(fresh.headSha, pr.headSha,
+    'PR head moved during evaluation (stale race): discard this verdict and re-run');
+  return {verdict, pr};
+}
+
+// Explicit exact-head STATUS publication under a caller-chosen DISTINCT
+// context (never a native job name — job names prove nothing about
+// authenticity or head binding). States: pending while re-reading,
+// error on transport failure, failure for refusal, success only after a
+// race-checked eligible verdict. `request` must support (path, init) here.
+export async function publishHeadStatus({request, headSha, state, context,
+  description}) {
+  assert(['pending', 'success', 'error', 'failure'].includes(state),
+    'Status state must be pending/success/error/failure');
+  assertSha(headSha, 'Status head SHA');
+  assert(typeof context === 'string' && context.length > 0
+    && !/release-gate-refresh/.test(context),
+    'Status context must be an explicit distinct context');
+  return request(`commits/${headSha}/statuses`, {method: 'POST',
+    body: {state, context, description: description || '', target_url: ''}});
+}
+
 // Holds file read from a trusted canonical-main checkout (base checkout
 // for the merge gate, release-tip checkout for deploy — never a PR head).
 // Shape: {version: 1, holds: {sha: {sha, active, reason, setBy, at?}}}.
