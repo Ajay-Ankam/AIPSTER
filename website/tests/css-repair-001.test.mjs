@@ -36,7 +36,11 @@ test('topology stacks to one column inside the sidebar layout at 1024px (PR88 fi
   const min = grid[1].match(/minmax\(\s*(\d+)px/);
   assert.ok(min, '.topo-map must keep a minmax minimum for the node column');
   const needed = fixed + Number(min[1]);
-  assert.ok(needed > 700, `topo minimum should exceed the ~670px available at 1024px (got ${needed}px)`);
+  // Fit boundary: panel content at 1024px is viewport - 352px (48 main pad +
+  // 208 sidebar + 48 column gap + 48 card pad). The grid must provably NOT fit,
+  // so the stacking rule below is required rather than decorative.
+  const available = 1024 - 352;
+  assert.ok(needed > available, `topo minimum (${needed}px) must exceed the ${available}px available at 1024px`);
   // A stacking rule must cover 1024px while the sidebar rail is active (>=960px).
   const stacked = [...css.matchAll(/@media[^{]*max-width\s*:\s*([\d.]+)px[^{]*{([\s\S]*?)(?=@media|$)/g)]
     .filter((m) => /#view-app[^{]*\.topo-map\s*{[^}]*grid-template-columns\s*:\s*1fr/.test(m[2])
@@ -53,4 +57,13 @@ test('landing header stacks at 768px (PR88 finding 2)', () => {
   assert.ok(stacked.length > 0, '.app-topbar must stack to a column under a breakpoint');
   const width = Math.max(...stacked.map((m) => Number(m[1])));
   assert.ok(width >= 768, `header stacking breakpoint must cover 768px (got ${width}px)`);
+  // The split must preserve the old <=760px rendering: the 760 block keeps its
+  // non-header rules, so only the header trigger widened.
+  const small = [...css.matchAll(/@media[^{]*max-width\s*:\s*([\d.]+)px[^{]*{([\s\S]*?)(?=@media|$)/g)]
+    .filter((m) => Number(m[1]) === 760);
+  assert.ok(small.length > 0, 'the 760px block must still exist');
+  for (const selector of ['.wrap', '.sponsors-line', '.app-card']) {
+    assert.ok(small.some((m) => m[2].includes(selector)),
+      `the 760px block must still contain ${selector} (pre-existing mobile rendering preserved)`);
+  }
 });

@@ -38,7 +38,7 @@
             <div class="topo-link" aria-hidden="true"><i></i><span>Request to node</span></div>
             <ul class="topo-nodes">
               <li class="topo-node online"><header><div><span class="topo-dot" aria-hidden="true"></span><strong>fixture-workstation-with-a-very-long-hostname-for-overflow-probing-001</strong></div><b>online</b></header>
-                <p class="topo-host">fixture-node-id-0001-very-long-identifier-string-for-overflow-probing · local · DEMO</p>
+                <p class="topo-host">fixture-node-0001-long-identifier-for-overflow-probe · local · DEMO</p>
                 <dl class="ev"><div><dt>CPU</dt><dd>16-core x86_64 with an unusually long processor description string</dd></div><div><dt>GPU</dt><dd>none recorded</dd></div><div><dt>Last seen</dt><dd>12s ago</dd></div></dl>
                 <p class="muted">heartbeat seen (reachability only · not ready to run)</p>
                 <div class="topo-caps"><span class="muted">Capabilities (declared):</span> <span class="topo-chip">text-generation-with-an-extremely-long-capability-label-for-overflow</span> <span class="topo-chip">vision</span> <span class="topo-chip">embeddings</span></div>
@@ -54,6 +54,11 @@
           <div class="topo-return"><span>Heartbeat returns: reachability only (live)</span><span>Result returns: usage totals only</span><span>Request lanes: architectural · dispatch availability unverified here</span></div>
           <footer class="topo-legend"><span><i class="sw-request"></i>Request (architectural)</span><span><i class="sw-heartbeat"></i>Heartbeat</span><span><i class="sw-result"></i>Result (architectural: usage totals only)</span><span><i class="sw-unsupported"></i>Resident / Cached / Unprovisioned (unsupported)</span></footer>
           <p class="muted">SYNTHETIC FIXTURE data above. snapshot time unknown.</p>
+          <p class="muted">HISTORICAL NOTE (not a rendered node): the before-fix screenshots used the
+          69-char identifier “fixture-node-id-0001-very-long-identifier-string-for-overflow-probing”,
+          which exceeds the app’s 64-char id validation and would be rejected by the shipped UI.
+          The live fixture above now uses a 52-char id; the over-length string is recorded here
+          for overflow-reference only.</p>
         </div></div>
       </section>
     </section>
