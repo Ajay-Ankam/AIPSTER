@@ -19,9 +19,9 @@
 @media (prefers-color-scheme:dark) {
   :root {
     --paper:#0f1715; --surface:#16211e; --sunken:#0b1210; --ink:#e6eeea; --ink-2:#a4b6af;
-    --line:#26352f; --control:#5f756c; --accent:#f2b887; --on-accent:#14201c; --accent-soft:var(--accent-soft);
+    --line:#26352f; --control:#5f756c; --accent:#f2b887; --on-accent:#14201c; --accent-soft:#23342c;
     --copper:#f2b887; --focus:#f2b887;
-    --ok:#7cc4a4; --ok-bg:#15302a; --warn:#e8b04f; --warn-bg:#2d2414; --warn-line:var(--warn-line); --bad:#f08a80; --bad-bg:#3a1c1a;
+    --ok:#7cc4a4; --ok-bg:#15302a; --warn:#e8b04f; --warn-bg:#2d2414; --warn-line:#d9b24c; --bad:#f08a80; --bad-bg:#3a1c1a;
     --shadow-overlay:0 10px 30px rgb(0 0 0 / .5);
   }
 }
@@ -257,4 +257,9 @@ a.btn.secondary, button.btn.secondary { background:transparent; color:var(--acce
 .bench-cell small{display:block;color:var(--muted);font-size:.74rem;margin-top:.2rem}
 .bench-track.sm{min-height:1rem}
 @media (max-width:860px){ .topo-map{grid-template-columns:1fr;gap:.55rem} .topo-map .topo-nodes{grid-column:auto;grid-row:auto} .bench-lane-grid{grid-template-columns:1fr} .topo-link{height:2.7rem} .topo-link:before{top:0;bottom:0;left:50%;right:auto;border-top:0;border-left:2px solid var(--accent)} .topo-link:after{content:"↓";top:.85rem;right:auto;left:calc(50% - .45rem)} .topo-link span{position:absolute;top:.6rem;left:calc(50% + .7rem);right:.2rem;white-space:normal;text-align:left} .topo-return{grid-column:auto} .topo-nodes{grid-template-columns:1fr} }
+/* PR88 finding 1: with the 13rem sidebar rail active (viewport >= 960px), the
+   five-column topology needs ~788px but only ~670px fit at 1024px, so it
+   overflows the card. Stack it the same vertical way until 1140px, where the
+   panel content again fits the full row (viewport - 352px >= 788px). */
+@media (min-width:960px) and (max-width:1140px){ #view-app .topo-map{grid-template-columns:1fr;gap:.55rem} #view-app .topo-map .topo-nodes{grid-column:auto;grid-row:auto} #view-app .bench-lane-grid{grid-template-columns:1fr} #view-app .topo-link{height:2.7rem} #view-app .topo-link:before{top:0;bottom:0;left:50%;right:auto;border-top:0;border-left:2px solid var(--accent)} #view-app .topo-link:after{content:"↓";top:.85rem;right:auto;left:calc(50% - .45rem)} #view-app .topo-link span{position:absolute;top:.6rem;left:calc(50% + .7rem);right:.2rem;white-space:normal;text-align:left} #view-app .topo-return{grid-column:auto} #view-app .topo-nodes{grid-template-columns:1fr} }
 @media (max-width:640px){ .ev dt{min-width:7rem;} .bench .ev dt{min-width:0;} .bench .ev div{display:block;} .bench .ev dd{margin:.15rem 0 0;} }

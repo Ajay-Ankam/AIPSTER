@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!-- CSS-REPAIR-001 synthetic probe (SYNTHETIC FIXTURE ONLY). -->
+<!-- Exercises --accent-soft / --warn-line consumers from website/public/app/styles.css -->
+<!-- (selected tab, .topo-icon, .demo, .reveal) and dumps computed values as JSON. -->
+<!-- PR88 finding 3: the dark-theme block redefines each token as itself, which is -->
+<!-- invalid at computed-value time per CSS Custom Properties 1. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CSS-REPAIR-001 dark-token probe (synthetic)</title>
+<link rel="stylesheet" href="/app/styles.css">
+<style>
+/* Probe-only tokens (never shipped): demonstrate engine behavior for a
+   self-referencing custom property, the exact pattern in the dark block. */
+#cssr001-selfref { --cssr001-cycle: var(--cssr001-cycle); background: var(--cssr001-cycle); }
+#cssr001-healthy { --cssr001-plain: rgb(9, 80, 60); background: var(--cssr001-plain); }
+</style>
+</head>
+<body>
+<main>
+  <p class="muted">SYNTHETIC FIXTURE probe css-repair-001-dark: static elements only. No sign-in, no network data.</p>
+  <nav class="tabs" role="tablist" aria-label="Probe tabs">
+    <button role="tab" aria-selected="true" id="cssr001-selected-tab">Overview</button>
+    <button role="tab" aria-selected="false">My Compute</button>
+  </nav>
+  <div class="card">
+    <div class="topo-stage"><span class="topo-icon" id="cssr001-icon" aria-hidden="true">→</span><div><b>Browser session</b><small>probe</small></div></div>
+  </div>
+  <div class="card demo" id="cssr001-demo">Demo workspace: simulated data, clearly labeled.</div>
+  <div class="card reveal" id="cssr001-reveal"><code>probe-code</code></div>
+  <div id="cssr001-selfref">self-reference engine probe</div>
+  <div id="cssr001-healthy">healthy control probe</div>
+  <pre id="cssr001-results" class="cardtext">pending…</pre>
+</main>
+<script>
+const cs = (el, prop) => getComputedStyle(el).getPropertyValue(prop).trim();
+const out = {
+  synthetic: true,
+  darkMedia: matchMedia('(prefers-color-scheme: dark)').matches,
+  rootAccentSoft: cs(document.documentElement, '--accent-soft'),
+  rootWarnLine: cs(document.documentElement, '--warn-line'),
+  selectedTabBackground: getComputedStyle(document.getElementById('cssr001-selected-tab')).backgroundColor,
+  topoIconBackground: getComputedStyle(document.getElementById('cssr001-icon')).backgroundColor,
+  demoBorderColor: getComputedStyle(document.getElementById('cssr001-demo')).borderLeftColor,
+  revealBackground: getComputedStyle(document.getElementById('cssr001-reveal')).backgroundColor,
+  selfrefBackground: getComputedStyle(document.getElementById('cssr001-selfref')).backgroundColor,
+  healthyBackground: getComputedStyle(document.getElementById('cssr001-healthy')).backgroundColor,
+};
+document.getElementById('cssr001-results').textContent = JSON.stringify(out, null, 2);
+document.title = 'CSS-REPAIR-001 dark probe: dark=' + out.darkMedia;
+</script>
+</body>
+</html>
