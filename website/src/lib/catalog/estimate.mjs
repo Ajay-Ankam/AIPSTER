@@ -144,6 +144,13 @@ export function evaluateCompatibility(input) {
   if (pick.block) blocks.push(pick.block);
   if (pick.unknown) unknowns.push(pick.unknown);
   const variant = pick.variant || null;
+  // The selector that was asked for, kept even when it fails to resolve. An
+  // unresolved `file` yields no variant, so fingerprinting only the resolved
+  // variant would give a bad selector the same key as "no selector at all":
+  // the compat cache would then serve one request's decision for the other,
+  // in either order (a missing file reusing an estimated-compatible result,
+  // or a valid request being poisoned by the bad one).
+  const requestedFile = typeof settings.file === 'string' && settings.file.length > 0 ? settings.file : null;
   const quant = variant ? variant.quant : asset.quant;
   const weightsBytes = variant ? num(variant.bytes) : num(asset.totalBytes);
   if (!pick.block && !pick.unknown && weightsBytes === 0) {
@@ -263,7 +270,7 @@ export function evaluateCompatibility(input) {
       adapter: input.adapterAsset ? `${input.adapterAsset.id}@${input.adapterAsset.revision || 'unpinned'}` : null,
       base: input.adapterAsset && input.baseAsset ? `${input.baseAsset.id}@${input.baseAsset.revision || 'unpinned'}` : null,
       node: input.nodeId,
-      file: variant ? variant.file : null,
+      file: variant ? variant.file : requestedFile,
       runtime: settings.runtime,
       context,
       concurrency,

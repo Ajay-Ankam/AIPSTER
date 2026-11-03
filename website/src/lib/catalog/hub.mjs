@@ -94,7 +94,10 @@ function inferFormat(siblings) {
 
 // GGUF quant from a file name: the LAST quant token before `.gguf`, so model
 // names that happen to contain a token never win. Unknown stays unknown.
-const GGUF_QUANT_TOKEN = /(IQ\d_(?:XXS|XS|NL|S|M|L)|Q\d_K_(?:XL|S|M|L)|Q\d_K|Q\d_\d(?:_\d_\d)?|BF16|F16|F32)(?![A-Z0-9])/gi;
+// FP16 is spelled both ways on the Hub: `-f16` and `-fp16`. Only F16 used to
+// be listed, so `model-fp16.gguf` parsed as unknown, and an unknown quant
+// skips the node's quantization restriction entirely.
+const GGUF_QUANT_TOKEN = /(IQ\d_(?:XXS|XS|NL|S|M|L)|Q\d_K_(?:XL|S|M|L)|Q\d_K|Q\d_\d(?:_\d_\d)?|BF16|FP16|F16|F32)(?![A-Z0-9])/gi;
 export function ggufQuant(relpath) {
   const name = String(relpath).split('/').pop().replace(/(-\d{5}-of-\d{5})?\.gguf$/i, '');
   const all = name.match(GGUF_QUANT_TOKEN);
@@ -111,19 +114,35 @@ export function ggufVariants(files) {
   for (const f of files) {
     if (!/\.gguf$/i.test(f.relpath)) continue;
     const shard = GGUF_SHARD.exec(f.relpath);
-    const key = shard ? f.relpath.replace(GGUF_SHARD, '.gguf') : f.relpath;
-    const g = groups.get(key) || { file: key, relpaths: [], bytes: 0, sized: true, expected: shard ? Number(shard[2]) : 1 };
+    const name = shard ? f.relpath.replace(GGUF_SHARD, '.gguf') : f.relpath;
+    // A standalone file and a split set can share a base name. Key them apart
+    // so the split group never absorbs the standalone artifact: merged, the
+    // group holds three members against an expected count of one or two, so
+    // its size collapses to unknown and even an explicitly selected, fully
+    // sized standalone file stops planning.
+    const key = `${shard ? 'split' : 'single'}:${name}`;
+    const g = groups.get(key) || { name, split: Boolean(shard), relpaths: [], bytes: 0, sized: true, expected: shard ? Number(shard[2]) : 1 };
     g.relpaths.push(f.relpath);
     g.bytes += f.bytes;
     if (!(f.bytes > 0)) g.sized = false;
     groups.set(key, g);
   }
-  return [...groups.values()].slice(0, MAX_GGUF_VARIANTS).map((g) => ({
-    file: g.file,
-    quant: ggufQuant(g.file),
-    bytes: g.sized && g.relpaths.length === g.expected ? g.bytes : 0,
-    shards: g.relpaths.length,
-  }));
+  const list = [...groups.values()];
+  const standalone = new Set(list.filter((g) => !g.split).map((g) => g.name));
+  return list.slice(0, MAX_GGUF_VARIANTS).map((g) => {
+    // Keep the synthesized base name as the selector unless a standalone file
+    // already owns that name; then select the split set by its real first
+    // shard, so the two remain distinct and both name a file that exists.
+    const file = g.split && standalone.has(g.name)
+      ? (g.relpaths.find((p) => /-00001-of-\d{5}\.gguf$/i.test(p)) || g.relpaths[0])
+      : g.name;
+    return {
+      file,
+      quant: ggufQuant(file),
+      bytes: g.sized && g.relpaths.length === g.expected ? g.bytes : 0,
+      shards: g.relpaths.length,
+    };
+  });
 }
 
 function inferQuant(repo, siblings) {

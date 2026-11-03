@@ -207,3 +207,67 @@ test('API: plan signs the selected file and deploy re-evaluates the same file', 
   assert.equal(bad.status, 400, bad.text);
   assert.equal(bad.json.code, 'BAD_FILE');
 });
+
+// --- regressions for the unresolved PR83 review findings ---
+
+test('regression: the fp16 spelling is recognized, not unknown', () => {
+  // `model-fp16.gguf` used to parse as unknown while `-f16` parsed as F16.
+  assert.equal(ggufQuant('model-fp16.gguf'), 'FP16');
+  assert.equal(ggufQuant('model-FP16.gguf'), 'FP16');
+  assert.equal(ggufQuant('m-f16.gguf'), 'F16', 'the F16 spelling still works');
+  assert.equal(ggufQuant('m-BF16.gguf'), 'BF16');
+  assert.equal(ggufQuant('model.gguf'), 'unknown');
+});
+
+test('regression: an FP16 file is blocked by a node that only reports Q4_K_M', () => {
+  // An unknown quant skips the node's quantization restriction entirely, so
+  // the parser gap above silently bypassed QUANT_NOT_REPORTED.
+  const asset = {
+    id: 'fixture-org/fp16-only', revision: REV, format: 'gguf', quant: 'unknown',
+    totalBytes: 2364 * MiB,
+    variants: ggufVariants([{ relpath: 'model-fp16.gguf', bytes: 2364 * MiB }]),
+  };
+  assert.equal(asset.variants[0].quant, 'FP16');
+  const d = evaluate(asset);
+  assert.ok(codes(d).includes('QUANT_NOT_REPORTED'), JSON.stringify(codes(d)));
+  assert.equal(d.state, 'blocked');
+});
+
+test('regression: a standalone file and a split set with one base name stay distinct', () => {
+  // Merged under one group key, three members against an expected two made
+  // bytes 0, so even the explicitly selected, fully sized standalone file
+  // reported WEIGHTS_SIZE_UNKNOWN.
+  const v = ggufVariants([
+    { relpath: 'm-Q4_K_M.gguf', bytes: 700 },
+    { relpath: 'm-Q4_K_M-00001-of-00002.gguf', bytes: 300 },
+    { relpath: 'm-Q4_K_M-00002-of-00002.gguf', bytes: 200 },
+  ]);
+  assert.equal(v.length, 2, 'one variant per artifact, not one merged group');
+  const single = v.find((x) => x.shards === 1);
+  const split = v.find((x) => x.shards === 2);
+  assert.equal(single.file, 'm-Q4_K_M.gguf');
+  assert.equal(single.bytes, 700, 'the standalone file keeps its real size');
+  assert.equal(split.file, 'm-Q4_K_M-00001-of-00002.gguf', 'the split set is named by its real first shard');
+  assert.equal(split.bytes, 500);
+  assert.equal(split.quant, 'Q4_K_M');
+
+  const asset = { id: 'org/mixed', revision: REV, format: 'gguf', quant: 'unknown', totalBytes: 1200, variants: v };
+  const d = evaluate(asset, 'm-Q4_K_M.gguf');
+  assert.ok(!codes(d).includes('WEIGHTS_SIZE_UNKNOWN'), JSON.stringify(codes(d)));
+});
+
+test('regression: an unresolved selector is part of the fingerprint', () => {
+  // Without the requested selector in the key, a no-file request and a bad
+  // selector fingerprint identically while their decisions differ.
+  const asset = { id: 'org/multi', revision: REV, format: 'gguf', quant: 'unknown', totalBytes: 1000, variants: [
+    { file: 'a-Q4_K_M.gguf', quant: 'Q4_K_M', bytes: 400 },
+    { file: 'a-Q8_0.gguf', quant: 'Q8_0', bytes: 600 },
+  ] };
+  const unselected = evaluate(asset);
+  const missing = evaluate(asset, 'missing.gguf');
+  assert.equal(unselected.fingerprint.file, null);
+  assert.equal(missing.fingerprint.file, 'missing.gguf');
+  assert.notEqual(JSON.stringify(unselected.fingerprint), JSON.stringify(missing.fingerprint));
+  assert.ok(codes(missing).includes('VARIANT_NOT_FOUND'));
+  assert.ok(!codes(unselected).includes('VARIANT_NOT_FOUND'));
+});
