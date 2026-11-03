@@ -10,7 +10,7 @@ import { parse } from 'parse5';
 
 const ROOT = resolve(import.meta.dirname, '..', '..');
 const PUBLIC = resolve(ROOT, 'website', 'public');
-const EXPECTED_SHA256 = '4dd3947e66cb6e70946f910d15388ba2fa6ba188b95579539a7066118b237109';
+const EXPECTED_SHA256 = '3002f79637332513c2cc60faf2610fab7e033c697f11552ba5a8282dde0f7ee7';
 
 function walk(node, visit) {
   visit(node);
@@ -39,14 +39,14 @@ function jpegSize(bytes) {
   return null;
 }
 
-test('published intro video is the exact requested 38-second cut', async () => {
-  const bytes = await readFile(resolve(PUBLIC, 'assets/aipster-intro-mix.mp4'));
-  assert.equal(bytes.length, 8686991);
+test('published intro video is the exact requested 40-second v0.2 web encode', async () => {
+  const bytes = await readFile(resolve(PUBLIC, 'assets/aipster-intro-v0-2.mp4'));
+  assert.equal(bytes.length, 4319307);
   assert.equal(createHash('sha256').update(bytes).digest('hex'), EXPECTED_SHA256);
 });
 
 test('poster is a JPEG frame extracted from the cut', async () => {
-  const bytes = await readFile(resolve(PUBLIC, 'assets/aipster-intro-mix-poster.jpg'));
+  const bytes = await readFile(resolve(PUBLIC, 'assets/aipster-intro-v0-2-poster.jpg'));
   assert.equal(bytes[0], 0xff);
   assert.equal(bytes[1], 0xd8);
   assert.equal(bytes.at(-2), 0xff);
@@ -56,25 +56,25 @@ test('poster is a JPEG frame extracted from the cut', async () => {
 });
 
 test('captions cover the actual voiceover in order', async () => {
-  const vtt = await readFile(resolve(PUBLIC, 'assets/aipster-intro-mix.vtt'), 'utf8');
+  const vtt = await readFile(resolve(PUBLIC, 'assets/aipster-intro-v0-2.vtt'), 'utf8');
   assert.ok(vtt.startsWith('WEBVTT\n'));
   const blocks = vtt.replace(/^WEBVTT\n+/, '').trim().split(/\n{2,}/);
   const cues = blocks.map(block => {
     const [timing, ...lines] = block.split('\n');
     return { timing, text: lines.join(' ') };
   });
-  assert.equal(cues.length, 9);
+  assert.equal(cues.length, 8);
   let previousEnd = -1;
   for (const cue of cues) {
     const match = /^(\d\d):(\d\d):(\d\d)\.(\d\d\d) --> (\d\d):(\d\d):(\d\d)\.(\d\d\d)$/.exec(cue.timing);
     assert.ok(match, `bad cue timing: ${cue.timing}`);
     const start = (+match[1]) * 3600 + (+match[2]) * 60 + (+match[3]) + (+match[4]) / 1000;
     const endt = (+match[5]) * 3600 + (+match[6]) * 60 + (+match[7]) + (+match[8]) / 1000;
-    assert.ok(start > previousEnd && endt > start && endt <= 38, `cue order: ${cue.timing}`);
+    assert.ok(start > previousEnd && endt > start && endt <= 40, `cue order: ${cue.timing}`);
     previousEnd = endt;
   }
   const transcript = cues.map(cue => cue.text).join(' ').replace(/\s+/g, ' ');
-  assert.equal(transcript, "They could take your AI away. What if more of that power belonged to us? Our vision for AIPSTER is simple. Your computers in a personal mesh, connected to other people's meshes, sharing compute and GPUs. More control over the intelligence we depend on. Don't let the data centers be the only ones that have the power to compute. AI is for everyone.");
+  assert.equal(transcript, "They could take your AI away. What if more of that power belonged to us? Our vision for AIPSTER: peer-to-peer AI inference across personal meshes, sharing compute and GPUs—less dependence on any single provider. Experimental recursive self-improvement, designed to optimize routing and inference. Don't let the data centers be the only ones that have the power to compute. AI is for everyone.");
   assert.ok(vtt.includes("Don't let the data centers be the only\nones that have the power to compute."));
 });
 
@@ -85,16 +85,16 @@ test('homepage player is user-click, metadata-only and captioned', async () => {
   const video = videos[0];
   assert.notEqual(attr(video, 'controls'), undefined);
   assert.equal(attr(video, 'preload'), 'metadata');
-  assert.equal(attr(video, 'poster'), '/assets/aipster-intro-mix-poster.jpg');
+  assert.equal(attr(video, 'poster'), '/assets/aipster-intro-v0-2-poster.jpg');
   assert.equal(attr(video, 'autoplay'), undefined);
   assert.equal(attr(video, 'muted'), undefined);
   assert.notEqual(attr(video, 'playsinline'), undefined);
 
-  const sources = tags(html, 'source').filter(node => attr(node, 'src') === '/assets/aipster-intro-mix.mp4');
+  const sources = tags(html, 'source').filter(node => attr(node, 'src') === '/assets/aipster-intro-v0-2.mp4');
   assert.equal(sources.length, 1);
   assert.equal(attr(sources[0], 'type'), 'video/mp4');
 
-  const tracks = tags(html, 'track').filter(node => attr(node, 'src') === '/assets/aipster-intro-mix.vtt');
+  const tracks = tags(html, 'track').filter(node => attr(node, 'src') === '/assets/aipster-intro-v0-2.vtt');
   assert.equal(tracks.length, 1);
   assert.equal(attr(tracks[0], 'kind'), 'captions');
   assert.equal(attr(tracks[0], 'srclang'), 'en');
@@ -102,7 +102,7 @@ test('homepage player is user-click, metadata-only and captioned', async () => {
   // available but off by default so both sets of text do not overlap.
   assert.equal(attr(tracks[0], 'default'), undefined);
 
-  const vtt = await readFile(resolve(PUBLIC, 'assets/aipster-intro-mix.vtt'), 'utf8');
+  const vtt = await readFile(resolve(PUBLIC, 'assets/aipster-intro-v0-2.vtt'), 'utf8');
   const transcript = vtt.replace(/^WEBVTT\n+/, '').trim().split(/\n{2,}/)
     .map(block => block.split('\n').slice(1).join(' ')).join(' ').replace(/\s+/g, ' ');
   assert.ok(html.replace(/\s+/g, ' ').includes(transcript), 'visible transcript matches the captions');
@@ -110,9 +110,9 @@ test('homepage player is user-click, metadata-only and captioned', async () => {
 
 test('README thumbnail links to the public watch location', async () => {
   const readme = await readFile(resolve(ROOT, 'README.md'), 'utf8');
-  assert.ok(readme.includes('website/public/assets/aipster-intro-mix-poster.jpg'));
+  assert.ok(readme.includes('website/public/assets/aipster-intro-v0-2-poster.jpg'));
   assert.ok(readme.includes('https://aipster.net/#hackathon-video'));
-  assert.ok(readme.includes('https://aipster.net/assets/aipster-intro-mix.mp4'));
+  assert.ok(readme.includes('https://aipster.net/assets/aipster-intro-v0-2.mp4'));
   assert.match(readme.replace(/\s+/g, ' '), /not proof of working live inference/);
 });
 
@@ -157,8 +157,8 @@ test('the cut is the top main card, not a lower progress section', async () => {
 
 test('served media headers declare video, caption and poster types', async () => {
   const headers = await readFile(resolve(PUBLIC, '_headers'), 'utf8');
-  assert.match(headers, /\/assets\/aipster-intro-mix\.mp4\s+Content-Type: video\/mp4/);
-  assert.match(headers, /\/assets\/aipster-intro-mix\.vtt\s+Content-Type: text\/vtt/);
-  assert.match(headers, /\/assets\/aipster-intro-mix-poster\.jpg\s+Content-Type: image\/jpeg/);
+  assert.match(headers, /\/assets\/aipster-intro-v0-2\.mp4\s+Content-Type: video\/mp4/);
+  assert.match(headers, /\/assets\/aipster-intro-v0-2\.vtt\s+Content-Type: text\/vtt/);
+  assert.match(headers, /\/assets\/aipster-intro-v0-2-poster\.jpg\s+Content-Type: image\/jpeg/);
   assert.ok(headers.includes('no-transform'));
 });
