@@ -177,10 +177,14 @@ recorded distinctly from independent review.
   from any other workflow, including a PR-controlled spoof on a
   same-repo branch, never substitutes. The suite join uses the
   supported Actions workflow-runs listing; unknown/failed listings
-  fail closed. Reading it needs `actions: read` on the gate workflows
-  — an UNAPPLIED approval-gated proposal (all three pin
-  contents/checks/pull-requests read only); until granted, producer
-  checks fail closed. The check-suite join itself remains a
+  fail closed. Reading it needs `actions: read` added to the existing
+  top-level `permissions:` block of each gate-touching workflow —
+  `release-gate.yml`, `release-gate-publish.yml`, and
+  `public-site-production-deploy.yml` (single `deploy` job; there is no
+  step-level permission to change) — an UNAPPLIED approval-gated
+  proposal (all three blocks currently pin contents/checks/
+  pull-requests read only); until granted, producer checks fail
+  closed. The check-suite join itself remains a
   live-unverified residual until the first real canary run. The legacy
   preflight path still matches CI by name only (out of scope, no
   redesign); this gate's refusal stands in front of production
