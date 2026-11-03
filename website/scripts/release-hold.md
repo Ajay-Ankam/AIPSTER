@@ -1,101 +1,139 @@
 # Release HOLD + review-evidence policy (code, not settings)
 
-Owner: safeguards lane. Pure policy module `release-hold.mjs` + focused
-suite `tests/release-hold.test.mjs` (auto-run by the existing `npm test`
-glob; no workflow change). This code enforces nothing in the GitHub UI by
-itself — enforcement needs the proposed settings below, which are NOT
-applied here. Production stays held until Peter resolves PR84.
+Owner: safeguards lane. Pure policy modules (`release-hold.mjs`:
+evidence/HOLD/decision primitives; `release-gate.mjs`: trusted GitHub
+metadata reader + merge/auto/manual decisions) with focused suites
+(`tests/release-hold.test.mjs`, `tests/release-gate.test.mjs`,
+auto-run by the existing `npm test` glob; no existing workflow edited).
+`release-gate.yml` is NEW and advisory until installed below. This code
+enforces nothing in the GitHub UI by itself. Production stays held until
+Peter resolves PR84.
 
 ## Semantics
 
 - Exact head: every verdict names one full 40-hex SHA. New head ⇒ old
   evidence is stale ⇒ re-review. Missing/ambiguous metadata fails closed.
 - Blocking findings must be fixed and re-reviewed at the exact new head.
-  Tracked notes need explicit disposition + evidence (accepted residuals
-  stay visible, never silent).
+  Tracked notes need explicit disposition + evidence.
 - AI-review evidence states model, reviewer id, a SEPARATE author, exact
   SHA, report, and a unanimous test run. Quota/error outcomes never count;
   AI evidence can never assert native GitHub human approval.
 - Release additionally requires explicit maintainer acceptance of that
   exact-head evidence (both auto and manual paths — no manual bypass).
   One maintainer suffices; no second-human lockout is added.
-- HOLD is cumulative over ancestry: a hold on H covers H and descendants,
-  so a later unrelated main commit cannot bypass it. Unknown ancestry ⇒
-  covered. Only a listed maintainer with a reason can clear; anything else
-  is refused and the hold stands.
-- Irreversible step rechecks authoritative data (main SHA, ancestry,
-  checks) first; the residual race (main moves between evaluation and
-  deploy) is documented in every receipt — the deploy step re-verifies
-  the SHA itself, as the workflow already does with rev-parse.
+- HOLD is cumulative over ancestry: a hold on H covers H and descendants
+  for DEPLOY, so a later unrelated main commit cannot bypass it. Unknown
+  ancestry ⇒ covered. Only a listed maintainer with a reason can clear;
+  anything else is refused and the hold stands. For MERGE, holds block
+  only the exact held head (targeted do-not-merge), so release holds do
+  not freeze merging.
+- Irreversible step rechecks authoritative data first; the residual race
+  (main moves between evaluation and deploy) is documented in every
+  receipt — the deploy step re-verifies the SHA itself.
 
-## Evidence registry format (proposed convention, committed file)
+## Identity without extra permissions (fork-safe)
 
-`website/release-evidence.json` (to be created by the maintainer, not
-here): `{ "<sha>": { reviewers: [{model, reviewerId, report, tests:
-{passed, total}, status, findings: [{id, severity, disposition:
-{decision, evidence, by}}]}], maintainerAcceptance: {by, sha, at},
-hold: {active, reason, setBy} } }`. Absent entry ⇒ fail closed.
+Holder/acceptor standing is resolved from GitHub-computed
+`author_association` (OWNER/MEMBER/COLLABORATOR) on submitted review
+objects plus a SHA-bound `RELEASE-ACCEPT` data marker — never from
+caller strings or PR-author prose. This avoids a collaborators read that
+`GITHUB_TOKEN` cannot grant, keeping the gate least-privilege
+(read-only contents/checks/pull-requests).
+`prevent_self_review` is consciously NOT relied on: the gate reads review
+authorship itself, so GitHub's self-approval counting can never lock the
+sole maintainer out of their own PRs. Author≠reviewer is enforced only
+for independent-review evidence; a maintainer may explicitly accept
+(including self-authored work) through the marker, and that acceptance is
+recorded distinctly from independent review.
+
+## Gate wiring (implemented, advisory until installed)
+
+- `.github/workflows/release-gate.yml` (new): on `pull_request`, checks
+  out the BASE ref (trusted base code, `persist-credentials: false`),
+  fetches PR/reviews/files/check-runs via API, reads
+  `.github/release-holds.json` from the base checkout, evaluates
+  `mergeEligible`, and fails the `release-gate` job with reasons.
+  It never checks out the head; no fork code runs; no secrets beyond the
+  read-only token. No existing workflow was edited.
+- `.github/release-holds.json` (new, seeded): versioned holds map. The
+  seed carries the PR84 hold on `45c9eb7…` — seeded state requiring
+  maintainer confirmation before it is relied on (see RESULT).
+- Production-path decisions (`autoDeployReady`, `manualDeployReady`) are
+  implemented and tested; wiring them into the deploy workflow is a
+  future one-line call deliberately left for controller approval (that
+  WOULD be a current-workflow edit, out of scope here).
+
+## Evidence registry format (proposed convention)
+
+`website/release-evidence.json` (maintainer-created, not here):
+`{ "<sha>": { reviewers: [...], maintainerAcceptance: {by, sha, at},
+hold: {...} } }`. A registry committed alongside a candidate can never
+self-attest that candidate — the gate therefore binds evidence through
+live API review objects (commit-bound, association-checked), not files.
 
 ## Proposed settings payloads (for controller approval — NOT applied)
 
-1. Branch ruleset for `main` (replace `RULESET_ID` after creation):
-   `{ "name": "aipster-release-gate", "target": "branch", "conditions":
-   {"ref_name": {"include": ["refs/heads/main"]}}, "rules": [
-   {"type": "required_status_checks", "parameters": {"required_status_checks":
-   [{"context": "release-gate", "integration_id": null}],
-   "strict_required_status_checks_policy": true}},
-   {"type": "pull_request", "parameters": {"required_approving_review_count": 0,
-   "dismiss_stale_pull_request_approvals_on_push": true}} ] }`.
-   Limitation: `release-gate` check does not exist yet; a follow-up
-   workflow must compute `deploymentDecision` on trusted base code and
-   report it. Until then, UI merges are NOT enforced by local code.
-2. Environment `production`: required reviewers `["synchronic1"]`,
-   no auto-merge. Already exists per workflow (`environment: production`);
-   confirm single-maintainer reviewer, do not add a second human.
-3. Hold storage: the registry file above (auditable, survives merges).
-   Alternative (rejected for now): a repo variable — writable via API by
-   anyone with the token, no history. File keeps hold changes reviewable.
-4. Security-sensitive note: any privileged gate workflow must use
-   `persist-credentials: false`, read-only `GITHUB_TOKEN`, pinned action
-   SHAs, no `pull_request_target` checkout of fork code, no
-   issue-comment commands. Current deploy workflow already follows this
-   for its gate steps; the future `release-gate` workflow must copy it.
+Ruleset (real schema; verify `actor_id` at apply time):
+`POST /repos/synchronic1/AIPSTER/rulesets`
+```json
+{
+  "name": "aipster-release-gate",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
+  "rules": [
+    {"type": "required_status_checks", "parameters": {
+      "required_status_checks": [{"context": "release-gate"}],
+      "strict_required_status_checks_policy": true}},
+    {"type": "pull_request", "parameters": {
+      "required_approving_review_count": 0,
+      "dismiss_stale_pull_request_approvals_on_push": true,
+      "require_code_owner_review": false,
+      "require_last_push_approval": false,
+      "required_review_thread_resolution": false}}
+  ],
+  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]
+}
+```
+Notes: `required_approving_review_count: 0` + admin-role bypass keep the
+sole maintainer recoverable (no lockout). `actor_id 5` = admin role per
+docs example — re-confirm at apply time. Bootstrap order (no nonexistent
+check required): merge the gate workflow → let it run once on a PR so
+the `release-gate` context exists → then install the ruleset.
+Environment `production`: confirm single-maintainer reviewer, no second
+human. Security-sensitive hygiene for any privileged gate change:
+`persist-credentials: false`, read-only token, pinned SHAs, no
+`pull_request_target` fork checkout, no issue-comment commands.
 
-## Fork safety (inspected, current code)
+## Fork safety (inspected)
 
-- Auto path: event gate rejects non-push, non-main, fork repos, and
-  unknown suites BEFORE checkout; preflight re-verifies SHA, main
-  equality, canonical repo, merged-PR-to-main, and applicable checks.
-- Manual path: `reviewed_sha` is maintainer-supplied; checkout uses
-  `persist-credentials: false`, and `npm ci/test/build` run with no
-  secret envs (Cloudflare token only in the deploy step env). Residual:
-  a malicious SHA would execute its scripts pre-validation without
-  secrets — acceptable only because dispatch itself is the maintainer's
-  explicit act; the proposed `release-gate` check closes this by
-  validating evidence BEFORE any checkout runs untrusted code.
-- `GITHUB_TOKEN` stays read-only (`contents: read, checks: read,
-  pull-requests: read`); no PAT/App/secret added here.
+Auto path: event gate rejects non-push/non-main/fork repos before
+checkout; preflight re-verifies SHA, main equality, canonical repo,
+merged-PR association, applicable checks. Gate workflow: base checkout
+only, metadata JSON only, read-only token — fork heads appear solely as
+SHA strings. Manual path: dispatch is the maintainer's explicit act;
+reviewed SHA must equal the rechecked main tip inside the gate (no older
+SHA, no fork commit).
 
 ## Preserved behavior
 
 Green-main workflow behavior, cumulative migration hold, exact CI
-provenance (`rev-parse HEAD`, never event fields), duplicate-deploy
-suppression (already-live receipt validation), serialized releases
-(`public-site-production` concurrency, no cancel), live-off flags
-(`INFERENCE_ENABLED` default-off), postdeploy smoke (`verify:live`).
-No automatic rollback and no unknown migrations — deliberately absent.
+provenance, duplicate-deploy suppression, serialized releases, live-off
+flags, postdeploy smoke. No automatic rollback, no unknown migrations.
 
-## Bootstrap / rollback preserving the current hold
+## Bootstrap / rollback preserving the current hold (CORRECTED)
+
+Earlier instructions to dispatch an older known-good SHA were wrong:
+`release-preflight` requires target == current main, so that path
+cannot deploy. The supported explicit recovery:
 
 1. Confirm live receipt (`deployment.json`): known-good revision is
    `git_commit 8bcd4c7` (brief-provided; re-read live before acting).
-2. Record it: `knownGoodReceipt({receipt, expectedCommit: '8bcd4c7…'})`
-   must pass — deterministic shape check, no fetch inside.
-3. To roll back: manual `workflow_dispatch` with `reviewed_sha` =
-   the known-good full SHA, after maintainer acceptance is recorded;
-   the deploy path re-verifies SHA + receipt field-by-field
-   (already-live semantics), never byte-compares across runs.
-4. To roll forward later: new exact-head evidence + acceptance + no
-   covering hold, then dispatch. The PR84 hold stays active until Peter
-   resolves it — clearing it early is refused by `clearHold` unless a
-   listed maintainer records a reason.
+   `knownGoodReceipt` checks the shape deterministically (no fetch inside).
+2. To recover: open a PR that restores the known-good tree, pass the full
+   gate (fresh exact-head evidence + acceptance + no covering hold), merge,
+   then release the NEW head normally (auto or manual dispatch).
+   Limits: recovery takes a full review cycle; nothing auto-opens; the
+   PR84 hold stays active until Peter resolves it.
+3. To roll forward later: same gate, then dispatch. Rollback-by-dispatch
+   of an old SHA is unsupported and will fail closed — do not attempt it.
