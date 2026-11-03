@@ -2,13 +2,13 @@
 # wildcard rule below, because Cloudflare appends every matching rule rather
 # than replacing values. The Worker forwards Range requests unchanged to
 # env.ASSETS; that layer currently answers them with a full 200 response.
-/assets/aipster-intro-mix.mp4
+/assets/aipster-intro-v0-2.mp4
   Content-Type: video/mp4
 
-/assets/aipster-intro-mix-poster.jpg
+/assets/aipster-intro-v0-2-poster.jpg
   Content-Type: image/jpeg
 
-/assets/aipster-intro-mix.vtt
+/assets/aipster-intro-v0-2.vtt
   Content-Type: text/vtt
 
 /*
