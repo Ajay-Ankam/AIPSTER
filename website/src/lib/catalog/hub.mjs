@@ -144,7 +144,9 @@ export function ggufVariants(files) {
   // silently takes the first), and can leave a whole set unreachable, so
   // disambiguate: the entry that names one of its own files keeps it; any
   // other claimant moves to its own lowest-numbered unclaimed shard. A set
-  // with no unclaimed shard keeps size unknown and fails closed downstream.
+  // with no unclaimed shard is dropped from the emitted variants — its
+  // artifact was unreachable by an unambiguous name, the shared selector
+  // keeps resolving to the owning entry, and no duplicate is ever emitted.
   const groupKey = (p) => `${p.g.split ? 'split' : 'single'}:${p.g.name}`;
   const byFile = new Map();
   for (const p of preferred) {
@@ -154,7 +156,7 @@ export function ggufVariants(files) {
   }
   const taken = new Set(preferred.map((p) => p.file));
   const resolved = new Map(preferred.map((p) => [p, p.file]));
-  const zeroed = new Set();
+  const dropped = new Set();
   for (const claimants of byFile.values()) {
     if (claimants.length < 2) continue;
     const ordered = [...claimants].sort((a, b) => {
@@ -167,19 +169,19 @@ export function ggufVariants(files) {
     for (const loser of ordered.slice(1)) {
       const spare = [...loser.g.relpaths].sort().find((p) => !taken.has(p));
       if (spare === undefined) {
-        zeroed.add(loser);
+        dropped.add(loser);
         continue;
       }
       taken.add(spare);
       resolved.set(loser, spare);
     }
   }
-  return preferred.map((p) => {
+  return preferred.filter((p) => !dropped.has(p)).map((p) => {
     const file = resolved.get(p);
     return {
       file,
       quant: ggufQuant(file),
-      bytes: zeroed.has(p) || !(p.g.sized && p.g.relpaths.length === p.g.expected) ? 0 : p.g.bytes,
+      bytes: !(p.g.sized && p.g.relpaths.length === p.g.expected) ? 0 : p.g.bytes,
       shards: p.g.relpaths.length,
     };
   });
