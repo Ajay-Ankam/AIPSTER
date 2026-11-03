@@ -18,6 +18,7 @@ desktop); see screenshots.py + BUILD-REPORT.md.
 Usage:
   python packaging/windows/qualify.py [--app-dir packaging/windows/build/freeze/app]
 """
+import hashlib
 import json
 import os
 import secrets
@@ -90,6 +91,236 @@ def wait_gone(path, timeout=180):
     while Path(path).exists() and time.monotonic() < deadline:
         time.sleep(0.5)
     return not Path(path).exists()
+
+
+UNINSTALL_SYNC_TIMEOUT = 120
+UNINSTALL_COPY_NAME = "uninstall-observe.exe"
+HALTED_MARKER_NAME = "HALTED-unknown-uninstall.txt"
+_WORKER_IMAGE_NAMES = ("aipster-tray.exe", "aipster-worker.exe", "dendrite.exe")
+
+
+def uninstall_cmdline(exe_path, target_dir, extra=()):
+    """Verbatim synchronous uninstall command line (single string).
+
+    Official NSIS 3.2.2 semantics: `_?=<dir>` sets $INSTDIR and disables
+    the temp-copy detachment (so the caller's wait observes the real exit
+    code). It MUST be the last parameter and MUST NOT contain quotes,
+    even when the path contains spaces (the rest of the line is the dir).
+    Python's argv-list form would quote a spaced value and mis-target, so
+    the command line is assembled verbatim and passed as one string
+    (shell=False passes strings through untouched). Raises instead of
+    mis-targeting on relative or quote-containing paths.
+    """
+    extra = list(extra or ())
+    target = os.fspath(target_dir)
+    if not os.path.isabs(target):
+        raise SystemExit(f"refusing non-absolute uninstall target: {target!r}")
+    exe = os.fspath(exe_path)
+    if '"' in target or '"' in exe or any('"' in p for p in extra):
+        raise SystemExit("refusing uninstall command containing quotes")
+    switches = " ".join([f'"{exe}"', "/S"] + [
+        f'"{p}"' if (" " in p or p == "") else p for p in extra])
+    return f"{switches} _?={target}"
+
+
+def _stage_owned_copy(src, copy, label):
+    """Byte-copy src to copy, creating the destination leaf exclusively.
+
+    O_CREAT|O_EXCL fails when the destination name already exists --
+    whether a plain file, symlink, junction, or any other leaf -- so
+    staging never writes through a pre-existing link and never replaces
+    unknown files. Raises SystemExit on any setup failure without
+    launching anything and without deleting the pre-existing leaf.
+    """
+    try:
+        fd = os.open(copy, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise SystemExit(f"{label}: owned-copy destination already exists; "
+                         f"refusing to write through it: {copy}")
+    except OSError as exc:
+        raise SystemExit(f"{label}: owned copy failed: {exc}")
+    try:
+        dst = os.fdopen(fd, "wb")
+    except OSError as exc:
+        os.close(fd)
+        raise SystemExit(f"{label}: owned copy failed: {exc}")
+    try:
+        with dst, open(src, "rb") as fh:
+            shutil.copyfileobj(fh, dst, 1 << 20)
+    except OSError as exc:
+        _drop_owned_copy(copy)
+        raise SystemExit(f"{label}: owned copy failed: {exc}")
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sync_uninstall_owned(target, work, env, label="uninstall",
+                         extra=(), timeout=UNINSTALL_SYNC_TIMEOUT):
+    """Owned-copy synchronous uninstall with an observed exit code.
+
+    Copies target/uninstall.exe to a scratch dir OUTSIDE the removal
+    target (verified byte-identical by sha256), runs
+    `<copy> /S [extra] _?=<target>`, then removes the copy by exact path.
+    The running image lives outside the target, so nothing inside is
+    locked by the check itself: the real exit code is observed (no
+    detachment), and the target's own uninstall.exe is deleted by the run
+    (true self-delete). Raises SystemExit without launching anything on
+    setup errors (missing exe, unverifiable copy). Returns (proc, detail);
+    proc is None only on timeout (the stdlib run() reaps the child before
+    raising) or launch failure (recorded, never raised). Never retries and
+    never kills by name: only the owned copy path is cleaned up.
+    """
+    target = Path(target)
+    src = target / "uninstall.exe"
+    if not src.is_file():
+        raise SystemExit(f"{label}: {src} is missing")
+    probe_dir = work / "uninstall-owned-copy"
+    copy = probe_dir / UNINSTALL_COPY_NAME
+    try:
+        resolved_target = target.resolve()
+        resolved_copy = copy.resolve()
+    except OSError as exc:
+        raise SystemExit(f"{label}: cannot canonicalize paths: {exc}")
+    if resolved_copy == resolved_target or resolved_target in resolved_copy.parents:
+        raise SystemExit(f"{label}: owned copy must live outside the removal target")
+    cmd = uninstall_cmdline(copy, target, extra)  # raises before anything is staged
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    if probe_dir.is_symlink() or probe_dir.resolve().parent != Path(work).resolve():
+        # A pre-existing link at the scratch dir would redirect the staged
+        # copy outside owned scratch (resolve() follows symlinks and
+        # junctions alike): refuse without staging, launching, or deleting.
+        raise SystemExit(f"{label}: scratch dir is not an owned directory: {probe_dir}")
+    proc = None
+    detail = f"{label}: never launched"
+    staged = False
+    try:
+        _stage_owned_copy(src, copy, label)
+        staged = True
+        if not (copy.is_file()
+                and copy.stat().st_size == src.stat().st_size
+                and _file_sha256(copy) == _file_sha256(src)):
+            raise SystemExit(f"{label}: owned copy failed verification")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                                  timeout=timeout, cwd=str(probe_dir))
+            detail = f"{label}: observed exit {proc.returncode}"
+        except subprocess.TimeoutExpired:
+            detail = f"{label}: timed out after {timeout}s (stdlib reaps the child)"
+        except OSError as exc:
+            detail = f"{label}: launch failed: {exc}"
+    except OSError as exc:
+        raise SystemExit(f"{label}: owned copy failed: {exc}")
+    finally:
+        # Only remove a copy this run actually staged: never delete a
+        # pre-existing occupant leaf that exclusive creation refused.
+        drop = _drop_owned_copy(copy) if staged else "not staged"
+    return proc, f"{detail}; copy cleanup: {drop}"
+
+
+def _drop_owned_copy(copy):
+    """Remove exactly the owned copy path; report, never raise."""
+    try:
+        copy.unlink()
+        return "removed"
+    except FileNotFoundError:
+        return "already gone"
+    except OSError as exc:
+        return f"NOT removed: {exc}"
+
+
+def worker_images_running():
+    """Read-only tasklist snapshot of worker image names.
+
+    Returns (running, unknown). No kills, no changes; a query failure is
+    reported as unknown, never as clean.
+    """
+    running, unknown = [], []
+    for image in _WORKER_IMAGE_NAMES:
+        try:
+            proc = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH", "/FI", f"IMAGENAME eq {image}"],
+                capture_output=True, text=True, timeout=30)
+        except Exception as exc:
+            unknown.append(f"{image}: {exc}")
+            continue
+        if proc.returncode != 0:
+            unknown.append(f"{image}: tasklist rc={proc.returncode}")
+            continue
+        if any(line.strip().lower().startswith(f'"{image}"')
+               for line in proc.stdout.splitlines()):
+            running.append(image)
+    return running, unknown
+
+
+def uninstall_cycle(target, work, env, label, extra=()):
+    """One ordinary uninstall with deterministic completion evidence.
+
+    Synchronous owned-copy run with an observed exit. On an observed
+    exit 2 with no live worker image and no unknown query, retries ONCE:
+    the first child is verified terminated (observed exit, stdlib-reaped)
+    and the uninstaller documents an idempotent retry path (the failure
+    matrix proves retry-after-partial exits 0). A live or unknown worker
+    state, a timeout, or a launch failure returns after the first attempt
+    with diagnostics — never starts a second uninstall over an unknown
+    state. Returns (proc, log); callers apply the unchanged assertions to
+    the final state. Both attempts are logged.
+    """
+    first, detail = sync_uninstall_owned(target, work, env, label=label, extra=extra)
+    log = [f"attempt1: {detail}"]
+    if first is None:
+        return None, "; ".join(log)
+    if first.returncode != 2:
+        return first, "; ".join(log)
+    running, unknown = worker_images_running()
+    if running or unknown:
+        log.append(f"no retry: worker images running={running} unknown={unknown}")
+        return first, "; ".join(log)
+    second, detail2 = sync_uninstall_owned(target, work, env,
+                                           label=label + " retry", extra=extra)
+    log.append(f"attempt2: {detail2}")
+    return second, "; ".join(log)
+
+
+def detached_uninstall_cycle(target, env, label, timeout=180):
+    """One ordinary (detached) uninstall with bounded completion evidence.
+
+    Launches target/uninstall.exe /S — the real user path, where exit 0
+    means spawned, not done — and polls for the uninstaller's
+    disappearance. Returns (launcher_ok, completed, log). On timeout or
+    any unknown outcome the caller must FAIL that cycle, skip its
+    target-state assertions, never retry or launch another
+    installer/uninstaller against that target (the temp copy may still
+    be alive), and drop the target from any cleanup list. No sync
+    fallback may convert this ordinary-path failure into a pass.
+    Read-only diagnostics (payload listing, worker-image snapshot) are
+    included in the log; nothing is touched.
+    """
+    target = Path(target)
+    try:
+        proc = subprocess.run([str(target / "uninstall.exe"), "/S"],
+                              capture_output=True, text=True, env=env,
+                              timeout=60)
+    except subprocess.TimeoutExpired:
+        return False, False, f"{label}: launcher itself timed out (unknown state)"
+    except OSError as exc:
+        return False, False, f"{label}: launch failed: {exc}"
+    if proc.returncode != 0:
+        return False, False, (f"{label}: launcher exit {proc.returncode}: "
+                              f"{(proc.stderr or '')[-500:]}")
+    if wait_gone(target / "uninstall.exe", timeout=timeout):
+        return True, True, f"{label}: detached uninstall completed"
+    running, unknown = worker_images_running()
+    left = sorted(p.name for p in target.iterdir()) if target.exists() else []
+    return True, False, (f"{label}: completion unobserved after {timeout}s; "
+                         f"payload left={left}; "
+                         f"uninstall.exe present={(target / 'uninstall.exe').exists()}; "
+                         f"worker images running={running} unknown={unknown}")
 
 
 def reg_value(root, path, name):
@@ -454,6 +685,162 @@ class TrayLab:
                     proc.kill()
                 except Exception:
                     pass
+
+
+# --------------------------------------- frozen preflight qualification
+PREFLIGHT_COMMANDS = ("delivery-check", "runtime-plan")
+PREFLIGHT_TIMEOUT = 15
+
+PREFLIGHT_MOCK_CONFIG = (
+    '[node]\nid = "preflight-mock"\nhost = "127.0.0.1"\nport = {port}\nstate_dir = "state"\n'
+    '\n[[runtimes]]\nid = "mock"\nkind = "mock"\ngpu_layers = 0\n'
+    '\n[[models]]\nid = "mock-summary"\nruntime = "mock"\ncapabilities = ["summarize"]\n'
+)
+
+PREFLIGHT_READY_CONFIG = (
+    '[node]\nid = "preflight-real"\nhost = "127.0.0.1"\nport = {port}\nstate_dir = "state"\n'
+    '\n[[runtimes]]\nid = "cpu"\nkind = "ik_llama"\nmode = "managed"\n'
+    'executable = "llama-server"\nthreads = 2\ngpu_layers = 0\n'
+    '\n[[models]]\nid = "m"\nruntime = "cpu"\ncapabilities = ["summarize"]\npath = "{model}"\n'
+)
+
+
+def preflight_argv(worker_exe, command, args):
+    """Frozen preflight invocation; only read-only commands are allowlisted."""
+    if command not in PREFLIGHT_COMMANDS:
+        raise SystemExit(f"preflight refuses non-read-only command: {command}")
+    return [str(worker_exe), command, *args]
+
+
+def preflight_env(work, name, extra_path=None):
+    """Scrubbed env with an isolated synthetic data dir (never a real store)."""
+    data = work / name
+    private_fixture_directory(data)
+    env = scrubbed_env()
+    env["AIPSTER_WORKER_DATA"] = str(data)
+    if extra_path is not None:
+        env["PATH"] = str(extra_path) + os.pathsep + env["PATH"]
+    return env, data
+
+
+def preflight_verdict(proc, *, expect_exit, markers=(), label=""):
+    """Validate one frozen preflight result.
+
+    Detects wrong exits (missing bundled imports surface as tracebacks
+    with nonzero exits), malformed output (missing markers), and
+    tracebacks anywhere in the output. Returns (ok, detail).
+    """
+    if proc is None:
+        return False, f"{label}: timed out after {PREFLIGHT_TIMEOUT}s"
+    text = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != expect_exit:
+        return False, f"{label}: exit {proc.returncode}, want {expect_exit}: {text[:300]}"
+    missing = [m for m in markers if m not in text]
+    if missing:
+        return False, f"{label}: missing output markers {missing}: {text[:300]}"
+    if "Traceback" in text:
+        return False, f"{label}: traceback in output (bundled import failure?)"
+    return True, ""
+
+
+def preflight_matrix(app_dir, work):
+    """Bounded frozen-exe preflight: delivery-check + runtime-plan only.
+
+    Read-only console commands against synthetic temp config/data with a
+    scrubbed env. Starts no daemon/tray/server, provisions nothing
+    outside work/, binds no ports. Every command has an explicit 15 s
+    timeout; unexpected provisioning (new files, sender lock) and
+    tracebacks fail the check.
+    """
+    app_dir = Path(app_dir)
+    worker_exe = app_dir / "aipster-worker.exe"
+    if not worker_exe.is_file():
+        raise SystemExit(f"preflight: {worker_exe} is missing")
+    lab = work / "preflight"
+    lab.mkdir(parents=True, exist_ok=True)
+    port = free_port()
+
+    bin_dir = lab / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "llama-server.exe").write_bytes(b"not-an-engine")
+    model = lab / "m.gguf"
+    model.write_bytes(b"GGUF" + b"\x00" * 64)
+    mock_cfg = lab / "mock.toml"
+    mock_cfg.write_text(PREFLIGHT_MOCK_CONFIG.format(port=port), encoding="utf-8")
+    ready_cfg = lab / "ready.toml"
+    ready_cfg.write_text(
+        PREFLIGHT_READY_CONFIG.format(port=port, model=model.as_posix()),
+        encoding="utf-8")
+
+    def run(command, args, env):
+        try:
+            return subprocess.run(preflight_argv(worker_exe, command, args),
+                                  capture_output=True, text=True, env=env,
+                                  timeout=PREFLIGHT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def note(name, proc, **expect):
+        ok, detail = preflight_verdict(proc, label=name, **expect)
+        check(name, ok, detail)
+
+    # delivery-check on a ready synthetic store: exit 0, nothing provisioned.
+    env, data = preflight_env(work, "preflight-ready", extra_path=bin_dir)
+    (data / "config.toml").write_text(ready_cfg.read_text(encoding="utf-8"),
+                                      encoding="utf-8")
+    before = sorted(p.name for p in data.iterdir())
+    ready = run("delivery-check",
+                ["--app-dir", str(app_dir), "--data-dir", str(data)], env)
+    note("frozen delivery-check ready exits 0 with ready markers", ready,
+         expect_exit=0, markers=("delivery-check: ready",))
+    after = sorted(p.name for p in data.iterdir())
+    check("frozen delivery-check provisions nothing in the data dir",
+          after == before and not (data / "sender.lock").exists(), ",".join(after))
+
+    # delivery-check on an absent data dir: blocked, and it stays absent.
+    ghost = work / "preflight-ghost"
+    if ghost.exists():
+        shutil.rmtree(ghost, ignore_errors=True)
+    absent = run("delivery-check",
+                 ["--app-dir", str(app_dir), "--data-dir", str(ghost)], env)
+    note("frozen delivery-check absent store blocked without provisioning", absent,
+         expect_exit=2, markers=("delivery-check: blocked", "config.toml"))
+    check("absent data dir still absent after delivery-check", not ghost.exists())
+
+    # delivery-check on a mock-only store: mock never counts as operational.
+    menv, mdata = preflight_env(work, "preflight-mock")
+    (mdata / "config.toml").write_text(mock_cfg.read_text(encoding="utf-8"),
+                                       encoding="utf-8")
+    mocked = run("delivery-check",
+                 ["--app-dir", str(app_dir), "--data-dir", str(mdata)], menv)
+    note("frozen delivery-check mock stays setup-required", mocked,
+         expect_exit=2, markers=("delivery-check: blocked", "setup required"))
+
+    # runtime-plan: ready keeps preflight scope, mock/missing fail closed.
+    penv, _ = preflight_env(work, "preflight-plan", extra_path=bin_dir)
+    plan_ready = run("runtime-plan", ["--config", str(ready_cfg)], penv)
+    note("frozen runtime-plan ready exits 0 with preflight scope", plan_ready,
+         expect_exit=0, markers=("status: ready", "preflight", "not verified (not run)"))
+    plan_mock = run("runtime-plan", ["--config", str(mock_cfg)], penv)
+    note("frozen runtime-plan mock stays setup-required", plan_mock,
+         expect_exit=2, markers=("setup-required",))
+    plan_missing = run("runtime-plan", ["--config", str(lab / "nope.toml")], penv)
+    note("frozen runtime-plan missing config exits 1 config-error", plan_missing,
+         expect_exit=1, markers=("config-error",))
+    bad = lab / "bad.toml"
+    bad.write_text("[[runtimes\nbroken = = =", encoding="utf-8")
+    plan_bad = run("runtime-plan", ["--config", str(bad), "--json"], penv)
+    try:
+        parsed = json.loads(plan_bad.stdout) if plan_bad is not None else {}
+        json_ok = parsed.get("status") == "config-error"
+    except ValueError:
+        json_ok = False
+    check("frozen runtime-plan malformed config is structured config-error",
+          plan_bad is not None and plan_bad.returncode == 1 and json_ok,
+          (plan_bad.stdout or "")[:200] if plan_bad is not None else "timed out")
+
+    check("preflight creates no sender.lock anywhere under work",
+          not list(work.rglob("sender.lock")))
 
 
 def tray_matrix(app_dir, work):
@@ -940,8 +1327,14 @@ def full_profile(setup):
     env["LOCALAPPDATA"] = str(home)
     created = []
     procs = []
+    state = {"halted": False}
 
     def _cleanup():
+        if state["halted"]:
+            # Authoritative in-memory halt: an unknown detached uninstall
+            # may still be live. Preserve the scratch root and diagnostics;
+            # never launch or clean up against it, marker or no marker.
+            return
         for proc in list(procs):
             try:
                 proc.terminate()
@@ -960,6 +1353,11 @@ def full_profile(setup):
                     wait_gone(existing, timeout=120)
             except Exception:
                 pass
+        halt_marker = work / HALTED_MARKER_NAME
+        if halt_marker.exists():
+            # An unknown detached uninstall may still be live: preserve
+            # the scratch root and diagnostics; never clean up against it.
+            return
         shutil.rmtree(work, ignore_errors=True)
 
     import atexit
@@ -1176,6 +1574,7 @@ def full_profile(setup):
     check("token value absent from console output", token_again not in output)
 
     pure_tests()
+    preflight_matrix(install, work)
     tray_matrix(install, work)
 
     proc = run_silent([str(setup), "/S", f"/D={install}"], env)
@@ -1185,72 +1584,132 @@ def full_profile(setup):
           and (home / "AIPSTER-Worker/qual-marker.txt").read_text(encoding="utf-8") == "preserve-me")
     unrelated = install / "unrelated-user-file.txt"
     unrelated.write_text("synthetic preserve-me")
-    proc = run_silent([str(install / "uninstall.exe"), "/S"], env)
-    check("silent uninstall exits 0", proc.returncode == 0, proc.stderr[-500:])
-    check("uninstall completes (async self-copy)", wait_gone(install / "uninstall.exe"))
-    check("uninstall removes payload but preserves unrelated user files",
-          not launcher.exists() and unrelated.exists()
-          and unrelated.read_text() == "synthetic preserve-me")
-    unrelated.unlink()
-    try:
-        install.rmdir()  # Empty test directory only; never recursive.
-    except FileNotFoundError:
-        pass  # Async uninstaller may have just removed the now-empty directory.
-    check("empty install directory can be removed", not install.exists())
-    check("Start Menu entry removed", not start_menu.exists())
-    check("desktop shortcut removed", not desktop_lnk.exists())
-    check("app registry removed", not reg_key_exists(winreg.HKEY_CURRENT_USER, APP_KEY))
-    check("Add/Remove entry removed", not reg_key_exists(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY))
-    check("Run key absent after uninstall",
-          reg_value(winreg.HKEY_CURRENT_USER, RUN_KEY, "AIPSTER-Worker") is None)
-    check("data dir preserved by uninstall",
-          (home / "AIPSTER-Worker/qual-marker.txt").exists()
-          and (home / "AIPSTER-Worker/api-token.txt").exists()
-          and (home / "AIPSTER-Worker/logs").is_dir())
-
-    install2 = work / "app2"
-    proc = run_silent([str(setup), "/S", "/AUTOSTART=1", f"/D={install2}"], env)
-    check("install with /AUTOSTART=1 exits 0", proc.returncode == 0, proc.stderr[-500:])
-    created.append(install2)
-    run_value = reg_value(winreg.HKEY_CURRENT_USER, RUN_KEY, "AIPSTER-Worker") or ""
-    check("Run key points at the installed tray",
-          str(install2) in run_value and run_value.endswith('aipster-tray.exe"'), run_value)
-    proc = run_silent([str(install2 / "uninstall.exe"), "/S"], env)
-    check("second uninstall exits 0", proc.returncode == 0, proc.stderr[-500:])
-    check("second uninstall completes (async self-copy)", wait_gone(install2))
-    check("Run key cleared by uninstall",
-          reg_value(winreg.HKEY_CURRENT_USER, RUN_KEY, "AIPSTER-Worker") is None)
-    check("second install dir removed", not install2.exists())
-
-    # /REMOVEDATA=1 removes the default data dir (marker proves it). Refuse
-    # when the real profile already holds data: never delete unknown files.
-    real_data = Path(os.environ["LOCALAPPDATA"]) / "AIPSTER-Worker"
-    preexisting = real_data.exists() and any(real_data.iterdir())
-    install3 = work / "app3"
-    proc = run_silent([str(setup), "/S", f"/D={install3}"], env)
-    check("third install exits 0", proc.returncode == 0, proc.stderr[-500:])
-    created.append(install3)
-    if preexisting:
-        skip("/REMOVEDATA removes data", "real profile already holds data; refusing to touch it")
-        proc = run_silent([str(install3 / "uninstall.exe"), "/S"], env)
-        check("third uninstall exits 0", proc.returncode == 0, proc.stderr[-500:])
-        check("third uninstall completes", wait_gone(install3))
+    launcher_ok, completed, how = detached_uninstall_cycle(
+        install, env, "silent uninstall")
+    check("silent uninstall exits 0", launcher_ok, how)
+    check("uninstall completes (async self-copy)", completed, how)
+    halted = not completed
+    halt_why = ("detached completion unknown; stopping all further "
+                "destructive work (shared HKCU singletons)")
+    # In-memory halt authority, set before any diagnostic write: cleanup
+    # consults this even if the marker write below fails.
+    state["halted"] = halted
+    if completed:
+        check("uninstall removes payload but preserves unrelated user files",
+              not launcher.exists() and unrelated.exists()
+              and unrelated.read_text() == "synthetic preserve-me")
+        unrelated.unlink()
+        try:
+            install.rmdir()  # Empty test directory only; never recursive.
+        except FileNotFoundError:
+            pass  # Async uninstaller may have just removed the now-empty directory.
+        check("empty install directory can be removed", not install.exists())
+        check("Start Menu entry removed", not start_menu.exists())
+        check("desktop shortcut removed", not desktop_lnk.exists())
+        check("app registry removed", not reg_key_exists(winreg.HKEY_CURRENT_USER, APP_KEY))
+        check("Add/Remove entry removed", not reg_key_exists(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY))
+        check("Run key absent after uninstall",
+              reg_value(winreg.HKEY_CURRENT_USER, RUN_KEY, "AIPSTER-Worker") is None)
+        check("data dir preserved by uninstall",
+              (home / "AIPSTER-Worker/qual-marker.txt").exists()
+              and (home / "AIPSTER-Worker/api-token.txt").exists()
+              and (home / "AIPSTER-Worker/logs").is_dir())
     else:
-        removal_marker = real_data / "qual-removal-marker.txt"
-        real_data.mkdir(parents=True, exist_ok=True)
-        removal_marker.write_text("remove-me", encoding="utf-8")
-        proc = run_silent([str(install3 / "uninstall.exe"), "/S", "/REMOVEDATA=1"], env)
-        check("uninstall with /REMOVEDATA=1 exits 0", proc.returncode == 0, proc.stderr[-500:])
-        check("removal uninstall completes", wait_gone(install3))
-        # Data removal runs after the app dir goes; poll the marker too.
-        check("data removal completes", wait_gone(removal_marker))
-        check("default data dir removed by /REMOVEDATA=1", not removal_marker.exists())
-        check("data dir fully gone when it held only the marker", not real_data.exists())
-    skip("uninstall data checkbox", "UI-only path; /REMOVEDATA=1 covers the code path headless")
-    uninstall_failure_matrix(setup, env, work, created, procs)
-    check("registry fully clean",
-          not reg_key_exists(winreg.HKEY_CURRENT_USER, APP_KEY)
-          and not reg_key_exists(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY))
+        unknown_note = ("detached completion unknown; no second launch "
+                        "against this target (temp copy may still be alive)")
+        skip("uninstall removes payload but preserves unrelated user files", unknown_note)
+        skip("empty install directory can be removed", unknown_note)
+        skip("Start Menu entry removed", unknown_note)
+        skip("desktop shortcut removed", unknown_note)
+        skip("app registry removed", unknown_note)
+        skip("Add/Remove entry removed", unknown_note)
+        skip("Run key absent after uninstall", unknown_note)
+        skip("data dir preserved by uninstall", unknown_note)
+        if install in created:
+            # Never launch against an unknown-running target again,
+            # including the atexit cleanup pass.
+            created.remove(install)
+            released = f"released {install} from atexit cleanup; "
+        else:
+            released = "nothing registered for atexit cleanup; "
+        # An on-disk marker records the stop reason for diagnosis. It is
+        # not the cleanup authority (see state["halted"]): a failed write
+        # still halts with the scratch preserved and a nonzero return.
+        try:
+            (work / HALTED_MARKER_NAME).write_text(
+                "detached uninstall outcome unknown; target may still be live; "
+                + released +
+                "no second launch or cleanup against it", encoding="utf-8")
+        except OSError as exc:
+            print(f"WARNING halt marker not written ({exc}); "
+                  "in-memory halt holds", flush=True)
+
+    if halted:
+        # An unknown detached uninstall may still be live: stop ALL
+        # further destructive work, including disjoint later installs
+        # that share the HKCU singleton registration. No retry, no sync
+        # fallback, no second launch.
+        skip("cycle 2 (AUTOSTART install + uninstall)", halt_why)
+        skip("cycle 3 (third/removal uninstall)", halt_why)
+        skip("uninstall failure matrix", halt_why)
+        skip("registry fully clean", halt_why)
+    else:
+        install2 = work / "app2"
+        proc = run_silent([str(setup), "/S", "/AUTOSTART=1", f"/D={install2}"], env)
+        check("install with /AUTOSTART=1 exits 0", proc.returncode == 0, proc.stderr[-500:])
+        created.append(install2)
+        run_value = reg_value(winreg.HKEY_CURRENT_USER, RUN_KEY, "AIPSTER-Worker") or ""
+        check("Run key points at the installed tray",
+              str(install2) in run_value and run_value.endswith('aipster-tray.exe"'), run_value)
+        proc, how = uninstall_cycle(install2, work, env, "second uninstall")
+        check("second uninstall exits 0",
+              proc is not None and proc.returncode == 0,
+              (proc.stderr[-500:] if proc is not None else how) + " | " + how)
+        check("second uninstall completes (observed sync exit)",
+              proc is not None and proc.returncode == 0
+              and not (install2 / "uninstall.exe").exists(), how)
+        check("Run key cleared by uninstall",
+              reg_value(winreg.HKEY_CURRENT_USER, RUN_KEY, "AIPSTER-Worker") is None)
+        check("second install dir removed", not install2.exists())
+
+        # /REMOVEDATA=1 removes the default data dir (marker proves it). Refuse
+        # when the real profile already holds data: never delete unknown files.
+        real_data = Path(os.environ["LOCALAPPDATA"]) / "AIPSTER-Worker"
+        preexisting = real_data.exists() and any(real_data.iterdir())
+        install3 = work / "app3"
+        proc = run_silent([str(setup), "/S", f"/D={install3}"], env)
+        check("third install exits 0", proc.returncode == 0, proc.stderr[-500:])
+        created.append(install3)
+        if preexisting:
+            skip("/REMOVEDATA removes data", "real profile already holds data; refusing to touch it")
+            proc, how = uninstall_cycle(install3, work, env, "third uninstall")
+            check("third uninstall exits 0",
+                  proc is not None and proc.returncode == 0,
+                  (proc.stderr[-500:] if proc is not None else how) + " | " + how)
+            check("third uninstall completes (observed sync exit)",
+                  proc is not None and proc.returncode == 0
+                  and not (install3 / "uninstall.exe").exists(), how)
+        else:
+            removal_marker = real_data / "qual-removal-marker.txt"
+            real_data.mkdir(parents=True, exist_ok=True)
+            removal_marker.write_text("remove-me", encoding="utf-8")
+            proc, how = uninstall_cycle(install3, work, env, "removal uninstall",
+                                        extra=("/REMOVEDATA=1",))
+            check("uninstall with /REMOVEDATA=1 exits 0",
+                  proc is not None and proc.returncode == 0,
+                  (proc.stderr[-500:] if proc is not None else how) + " | " + how)
+            check("removal uninstall completes (observed sync exit)",
+                  proc is not None and proc.returncode == 0
+                  and not (install3 / "uninstall.exe").exists(), how)
+            # Data removal runs after the app dir goes; poll the marker too.
+            check("data removal completes", wait_gone(removal_marker))
+            check("default data dir removed by /REMOVEDATA=1", not removal_marker.exists())
+            check("data dir fully gone when it held only the marker", not real_data.exists())
+        skip("uninstall data checkbox", "UI-only path; /REMOVEDATA=1 covers the code path headless")
+        uninstall_failure_matrix(setup, env, work, created, procs)
+        check("registry fully clean",
+              not reg_key_exists(winreg.HKEY_CURRENT_USER, APP_KEY)
+              and not reg_key_exists(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY))
     ports_closed = True
     for used in USED_PORTS:
         with socket.socket() as probe:
@@ -1259,7 +1718,11 @@ def full_profile(setup):
             except OSError:
                 ports_closed = False
     check("no listener left behind", ports_closed)
-    shutil.rmtree(work, ignore_errors=True)
+    if halted:
+        skip("work dir cleanup",
+             "preserving unknown-target scratch root for diagnosis")
+    else:
+        shutil.rmtree(work, ignore_errors=True)
     print(f"\n{len(FAILURES)} failure(s)" + (": " + ", ".join(FAILURES) if FAILURES else ""))
     return 1 if FAILURES else 0
 
@@ -1272,7 +1735,9 @@ def uninstall_failure_matrix(setup, env, work, created, procs):
     created are touched.
     """
     def sync_uninstall(target):
-        return run_silent([str(target / "uninstall.exe"), "/S", f"_?={target}"], env)
+        # Verbatim single-string form: an argv list would quote a spaced
+        # _?= target and mis-target (official NSIS 3.2.2: no quotes).
+        return run_silent(uninstall_cmdline(target / "uninstall.exe", target), env)
 
     def payload_left(target):
         return sorted(str(p.relative_to(target)) for p in target.rglob("*")
@@ -1432,6 +1897,7 @@ def coexist_profile(app_dir):
         detail = ""
     check("ICOs hold 7 PNG sizes incl. 16/32/48", icons_ok, detail)
     pure_tests()
+    preflight_matrix(app_dir, work)
     tray_matrix(app_dir, work)
     ports_closed = True
     for used in USED_PORTS:
