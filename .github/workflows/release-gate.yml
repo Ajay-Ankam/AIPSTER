@@ -1,22 +1,34 @@
 # Merge-eligibility gate for release-relevant PRs (advisory until installed).
 #
-# Trust boundary: this workflow evaluates the PR HEAD using GitHub metadata
-# only. It checks out the BASE ref (trusted base code) and never the PR
-# head — no fork code, artifacts, or caches are executed, and the token is
-# read-only (contents/checks/pull-requests read). The job name
-# `release-gate` is the proposed required-check context; until the branch
-# ruleset in release-hold.md is installed by the controller, a red gate is
-# advisory and does not block GitHub UI merges.
+# Trust architecture (read before changing triggers): `pull_request` runs
+# the workflow file from the proposed merge, so a PR could alter the gate
+# itself — enforcement runs therefore come from `pull_request_target`
+# (base workflow version: a PR cannot alter these steps). The workflow
+# still checks out the base ref explicitly and evaluates the head from API
+# metadata only, so no fork/head code ever executes.
+# `pull_request_review` runs are best-effort refresh, NOT enforcement: a
+# review-version run executes PR-controlled YAML, so no step inside it can
+# prove its own integrity (a self-check would be theater against a hostile
+# edit). Under the documented threat model — maintainer error, never a
+# hostile PR — refresh runs keep verdicts current on submit/edit/dismiss
+# (this closes the stale-green-on-dismissal hole for ordinary use), while
+# real enforcement rests on (1) target runs at every head change and (2)
+# the deploy-time gate on main, which re-evaluates review state at release
+# and therefore catches post-merge dismissal. No path filter: README and
+# all other PRs get a verdict, so no PR waits forever on a required check.
+# The job name `release-gate` is the proposed required-check context;
+# until the branch ruleset in release-hold.md is installed by the
+# controller, a red gate is advisory and does not block GitHub UI merges.
+# Token is read-only; no fork code, artifacts, or caches are ever executed.
+# No status-write permission is requested or needed — the job conclusion
+# IS the check. (If reviewer-comment reporting is ever added, it needs
+# issues:write/pull-requests:write proposed separately.)
 name: Release gate
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - 'local-worker/**'
-      - 'website/**'
-      - '.github/**'
-      - 'LICENSE'
-      - 'NOTICE'
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 permissions:
   contents: read
   checks: read

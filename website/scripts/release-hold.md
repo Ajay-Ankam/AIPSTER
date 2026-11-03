@@ -33,12 +33,15 @@ Peter resolves PR84.
 
 ## Identity without extra permissions (fork-safe)
 
-Holder/acceptor standing is resolved from GitHub-computed
-`author_association` (OWNER/MEMBER/COLLABORATOR) on submitted review
-objects plus a SHA-bound `RELEASE-ACCEPT` data marker — never from
-caller strings or PR-author prose. This avoids a collaborators read that
-`GITHUB_TOKEN` cannot grant, keeping the gate least-privilege
-(read-only contents/checks/pull-requests).
+Holder/acceptor standing is resolved as: pinned verified owner
+(`synchronic1`, live-confirmed sole collaborator) or OWNER association
+⇒ sufficient; otherwise the `collaborators/{user}/permission` endpoint
+(supported read permission only — no invented scopes) must report
+admin/maintain. Inaccessible endpoints and read/triage relationships fail
+closed (except the pinned owner); stale relationships never qualify.
+One-maintainer self-authored PR acceptance stays possible via the
+SHA-bound `RELEASE-ACCEPT` marker. Caller strings and PR-author prose
+never suffice; association alone authorizes nothing.
 `prevent_self_review` is consciously NOT relied on: the gate reads review
 authorship itself, so GitHub's self-approval counting can never lock the
 sole maintainer out of their own PRs. Author≠reviewer is enforced only
@@ -48,20 +51,33 @@ recorded distinctly from independent review.
 
 ## Gate wiring (implemented, advisory until installed)
 
-- `.github/workflows/release-gate.yml` (new): on `pull_request`, checks
-  out the BASE ref (trusted base code, `persist-credentials: false`),
-  fetches PR/reviews/files/check-runs via API, reads
-  `.github/release-holds.json` from the base checkout, evaluates
-  `mergeEligible`, and fails the `release-gate` job with reasons.
-  It never checks out the head; no fork code runs; no secrets beyond the
-  read-only token. No existing workflow was edited.
-- `.github/release-holds.json` (new, seeded): versioned holds map. The
-  seed carries the PR84 hold on `45c9eb7…` — seeded state requiring
-  maintainer confirmation before it is relied on (see RESULT).
-- Production-path decisions (`autoDeployReady`, `manualDeployReady`) are
-  implemented and tested; wiring them into the deploy workflow is a
-  future one-line call deliberately left for controller approval (that
-  WOULD be a current-workflow edit, out of scope here).
+- `.github/workflows/release-gate.yml` (new): `pull_request_target`
+  (base workflow version — a PR cannot alter these steps) plus
+  `pull_request_review` refresh runs, no path filter. Checks out the base
+  ref explicitly, evaluates the head from API metadata only, and fails the
+  `release-gate` job with reasons. Review-triggered runs are refresh-only
+  (their YAML is PR-versioned — documented limitation); enforcement rests
+  on target runs plus the deploy-time gate. No status-write permission
+  exists or is needed — the job conclusion IS the check.
+- Deploy workflow step (authorized current-workflow edit, one step):
+  `public-site-production-deploy.yml` runs
+  `website/scripts/release-deploy-gate.mjs` after preflight and before
+  deploy. It evaluates EVERY merge in live..target (evidence on each PR's
+  own head, second-parent integration proof, trusted holds file,
+  merged-main CI) in both modes. A refusal fails the job before deploy.
+- `.github/release-holds.json` (new, seeded): versioned holds map read
+  from the trusted release checkout. The seed carries the PR84 hold on
+  `45c9eb7…` — seeded state requiring maintainer confirmation (RESULT).
+
+## Environment required-human approval: NOT imposed (documented verdict)
+
+Green-main automation is the requested default, so no environment
+required-reviewer rule is proposed: it would pause every deploy on a
+human click (including urgent recovery), with no added assurance beyond
+the gate + ruleset + existing `production` environment scoping. Effect if
+ever enabled: all automatic and manual releases wait for an explicit
+approval, and an unavailable approver blocks recovery — keep it off
+unless Peter orders otherwise.
 
 ## Evidence registry format (proposed convention)
 
@@ -73,7 +89,8 @@ live API review objects (commit-bound, association-checked), not files.
 
 ## Proposed settings payloads (for controller approval — NOT applied)
 
-Ruleset (real schema; verify `actor_id` at apply time):
+Ruleset (real schema — field names verified against current REST docs;
+re-verify `actor_id` at apply time):
 `POST /repos/synchronic1/AIPSTER/rulesets`
 ```json
 {
@@ -87,7 +104,7 @@ Ruleset (real schema; verify `actor_id` at apply time):
       "strict_required_status_checks_policy": true}},
     {"type": "pull_request", "parameters": {
       "required_approving_review_count": 0,
-      "dismiss_stale_pull_request_approvals_on_push": true,
+      "dismiss_stale_reviews_on_push": true,
       "require_code_owner_review": false,
       "require_last_push_approval": false,
       "required_review_thread_resolution": false}}
