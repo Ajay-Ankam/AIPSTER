@@ -1,0 +1,114 @@
+{
+ "landing-desktop": [
+  {
+   "id": "color-contrast",
+   "impact": "serious",
+   "nodes": 7,
+   "sample": [
+    ".card-topline > .tiny-label",
+    ".card-footnote",
+    "article:nth-child(1) > .tiny-label"
+   ]
+  },
+  {
+   "id": "label-content-name-mismatch",
+   "impact": "serious",
+   "nodes": 2,
+   "sample": [
+    "header > .wordmark[href=\"/\"][aria-label=\"AIPSTER home\"]",
+    ".footer-grid > .wordmark[href=\"/\"][aria-label=\"AIPSTER home\"]"
+   ]
+  },
+  {
+   "id": "scrollable-region-focusable",
+   "impact": "serious",
+   "nodes": 2,
+   "sample": [
+    ".blog-trace",
+    ".changelog"
+   ]
+  }
+ ],
+ "404-desktop": [],
+ "admin-desktop": [],
+ "admin-demo-desktop": [],
+ "experiment-dsh-dgm-desktop": [],
+ "app-login-desktop": [],
+ "app-overview-desktop": [
+  {
+   "id": "color-contrast",
+   "impact": "serious",
+   "nodes": 3,
+   "sample": [
+    "li > header > b",
+    ".bench-lane > header > b",
+    "p:nth-child(3) > a"
+   ]
+  }
+ ],
+ "app-compute-desktop": [],
+ "app-shared-desktop": [],
+ "app-sharing-desktop": [],
+ "app-models-desktop": [],
+ "app-federation-desktop": [],
+ "app-keys-desktop": [],
+ "app-usage-desktop": [],
+ "app-advice-desktop": [],
+ "app-settings-desktop": [],
+ "landing-mobile": [
+  {
+   "id": "color-contrast",
+   "impact": "serious",
+   "nodes": 7,
+   "sample": [
+    ".card-topline > .tiny-label",
+    ".card-footnote",
+    "article:nth-child(1) > .tiny-label"
+   ]
+  },
+  {
+   "id": "label-content-name-mismatch",
+   "impact": "serious",
+   "nodes": 2,
+   "sample": [
+    "header > .wordmark[href=\"/\"][aria-label=\"AIPSTER home\"]",
+    ".footer-grid > .wordmark[href=\"/\"][aria-label=\"AIPSTER home\"]"
+   ]
+  },
+  {
+   "id": "scrollable-region-focusable",
+   "impact": "serious",
+   "nodes": 2,
+   "sample": [
+    ".blog-trace",
+    ".changelog"
+   ]
+  }
+ ],
+ "404-mobile": [],
+ "admin-mobile": [],
+ "admin-demo-mobile": [],
+ "experiment-dsh-dgm-mobile": [],
+ "app-login-mobile": [],
+ "app-overview-mobile": [
+  {
+   "id": "color-contrast",
+   "impact": "serious",
+   "nodes": 3,
+   "sample": [
+    "li > header > b",
+    ".bench-lane > header > b",
+    "p:nth-child(3) > a"
+   ]
+  }
+ ],
+ "app-compute-mobile": [],
+ "app-shared-mobile": [],
+ "app-sharing-mobile": [],
+ "app-models-mobile": [],
+ "app-federation-mobile": [],
+ "app-keys-mobile": [],
+ "app-usage-mobile": [],
+ "app-advice-mobile": [],
+ "app-settings-mobile": []
+}
