@@ -271,3 +271,70 @@ test('regression: an unresolved selector is part of the fingerprint', () => {
   assert.ok(codes(missing).includes('VARIANT_NOT_FOUND'));
   assert.ok(!codes(unselected).includes('VARIANT_NOT_FOUND'));
 });
+
+// --- regressions for the nested-shard selector collision (delta review) ---
+// A nested `-00001-of-NNNNN` set's base name can equal another set's renamed
+// first shard, which used to emit the same `file` twice: exact-match
+// selection silently took the first and the outer set was unreachable.
+
+function nestedMembers() {
+  return [
+    { relpath: 'm-Q4_K_M.gguf', bytes: 700 },
+    { relpath: 'm-Q4_K_M-00001-of-00002.gguf', bytes: 300 },
+    { relpath: 'm-Q4_K_M-00002-of-00002.gguf', bytes: 200 },
+    { relpath: 'm-Q4_K_M-00001-of-00002-00001-of-00002.gguf', bytes: 150 },
+    { relpath: 'm-Q4_K_M-00001-of-00002-00002-of-00002.gguf', bytes: 150 },
+  ];
+}
+
+test('regression: a nested split set keeps a unique exactly-selectable file', () => {
+  const v = ggufVariants(nestedMembers());
+  assert.equal(v.length, 3, 'one variant per artifact, no merged or duplicated group');
+  const files = v.map((x) => x.file);
+  assert.equal(new Set(files).size, 3, 'every variant is exactly selectable');
+  const by = Object.fromEntries(v.map((x) => [x.file, x]));
+  assert.equal(by['m-Q4_K_M.gguf'].bytes, 700);
+  assert.equal(by['m-Q4_K_M-00001-of-00002.gguf'].bytes, 500, 'the entry naming a real shard keeps it');
+  assert.equal(by['m-Q4_K_M-00001-of-00002-00001-of-00002.gguf'].bytes, 300, 'the nested set moves to its own real shard');
+  assert.ok(v.every((x) => x.quant === 'Q4_K_M'), 'quant still reads from the base name');
+  const asset = { id: 'org/nested', revision: REV, format: 'gguf', quant: 'unknown', totalBytes: 1500, variants: v };
+  for (const f of files) {
+    const got = selectVariant(asset, f);
+    assert.equal(got.variant && got.variant.file, f, `selector ${f} resolves to its own artifact`);
+  }
+  const d = evaluate(asset, 'm-Q4_K_M-00001-of-00002-00001-of-00002.gguf');
+  assert.ok(!codes(d).includes('WEIGHTS_SIZE_UNKNOWN'), JSON.stringify(codes(d)));
+  assert.equal(d.variant.file, 'm-Q4_K_M-00001-of-00002-00001-of-00002.gguf');
+});
+
+test('regression: nested grouping is independent of manifest order', () => {
+  const members = nestedMembers();
+  const orders = [members, [...members].reverse(), [members[2], members[0], members[4], members[1], members[3]]];
+  const key = (v) => JSON.stringify(v.map((x) => [x.file, x.bytes, x.shards, x.quant]).sort());
+  const first = key(ggufVariants(orders[0]));
+  for (const o of orders.slice(1)) assert.equal(key(ggufVariants(o)), first, 'same artifacts whatever order the Hub lists them');
+});
+
+test('regression: an incomplete nested set fails closed without breaking siblings', () => {
+  const v = ggufVariants([
+    { relpath: 'm-Q4_K_M.gguf', bytes: 700 },
+    { relpath: 'm-Q4_K_M-00001-of-00002.gguf', bytes: 300 },
+    { relpath: 'm-Q4_K_M-00002-of-00002.gguf', bytes: 200 },
+    { relpath: 'm-Q4_K_M-00001-of-00002-00002-of-00002.gguf', bytes: 150 },
+  ]);
+  const by = Object.fromEntries(v.map((x) => [x.file, x]));
+  assert.equal(Object.keys(by).length, 3, 'names stay unique even when a set is partial');
+  assert.equal(by['m-Q4_K_M-00001-of-00002-00002-of-00002.gguf'].bytes, 0, 'one member against an expected two is unknown, not small');
+  assert.equal(by['m-Q4_K_M-00001-of-00002.gguf'].bytes, 500, 'the complete sibling keeps its real size');
+});
+
+test('regression: exact-duplicate manifest entries fail closed, not double-counted', () => {
+  const v = ggufVariants([
+    { relpath: 'big-Q8_0-00001-of-00002.gguf', bytes: 300 },
+    { relpath: 'big-Q8_0-00002-of-00002.gguf', bytes: 200 },
+    { relpath: 'big-Q8_0-00001-of-00002.gguf', bytes: 300 },
+  ]);
+  assert.equal(v.length, 1);
+  assert.equal(v[0].bytes, 0, 'three members against an expected two is unknown, not a bigger model');
+  assert.equal(v[0].shards, 3);
+});
