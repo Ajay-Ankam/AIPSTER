@@ -169,15 +169,19 @@ h1,h2,h3{text-wrap:balance}
 
 @media(max-width:1099.98px){.app-card>.video-feature figcaption{padding:var(--space-5) var(--space-6)}}
 @media(max-width:1000px){.wrap{width:calc(100% - 64px)}.app-topbar{padding:var(--space-4) var(--space-5)}.app-grid{gap:var(--space-6);padding:var(--space-7) var(--space-6);grid-template-columns:1.1fr .9fr}.loop-card{padding:var(--space-5)}.overview-grid,.section-heading{gap:var(--space-5)}.footer-grid{grid-template-columns:1fr 1.4fr;gap:var(--space-5)}.footer-source{grid-column:1/-1;justify-self:start}.principles{gap:var(--space-5)}.progress-grid{gap:var(--space-6)}}
-@media(max-width:760px){
-.wrap{width:calc(100% - 32px)}
-.sponsors-line{padding:var(--space-2) var(--space-4);gap:var(--space-1) var(--space-3)}.sponsor-logos{gap:6px}.sponsor-chip{padding:4px 8px}.sponsor-logos img{height:18px}
-.app-card{margin-top:var(--space-4);border-radius:var(--radius-m)}
+/* PR88 finding 2: the row header (wordmark + badge + five nav links) needs more
+   than 768px, so the badge collides with the nav links. Stack it from 800px. */
+@media(max-width:800px){
 .app-topbar{position:relative;flex-direction:column;align-items:stretch;gap:var(--space-2);padding:var(--space-4)}
 .app-topbar nav{flex-wrap:wrap;gap:0;font-size:.875rem;margin-inline:calc(-1 * var(--space-2))}
 .app-topbar nav a{padding:var(--space-2)}
 .sign-in{position:absolute;top:var(--space-4);right:var(--space-4);margin:0;padding:6px var(--space-4)!important}
 .wordmark-logo{width:132px}
+}
+@media(max-width:760px){
+.wrap{width:calc(100% - 32px)}
+.sponsors-line{padding:var(--space-2) var(--space-4);gap:var(--space-1) var(--space-3)}.sponsor-logos{gap:6px}.sponsor-chip{padding:4px 8px}.sponsor-logos img{height:18px}
+.app-card{margin-top:var(--space-4);border-radius:var(--radius-m)}
 .app-card>.video-feature figcaption{padding:var(--space-4)}
 .app-grid{grid-template-columns:1fr;gap:var(--space-6);padding:var(--space-6) var(--space-4) var(--space-6)}
 .app-grid h1{margin-top:var(--space-4)}
