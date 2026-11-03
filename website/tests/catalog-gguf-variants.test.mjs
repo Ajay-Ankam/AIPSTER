@@ -328,6 +328,30 @@ test('regression: an incomplete nested set fails closed without breaking sibling
   assert.equal(by['m-Q4_K_M-00001-of-00002.gguf'].bytes, 500, 'the complete sibling keeps its real size');
 });
 
+test('regression: a no-spare nested collision emits no duplicate selector', () => {
+  // Depth-3 nesting where the loser's only shard is another partial group's
+  // synthetic selector: no unclaimed spare exists. Emitting the shared name
+  // twice would make exact-match selection order-dependent, so the
+  // unresolvable entry is dropped and every emitted selector stays unique.
+  const members = [
+    { relpath: 'm-Q4_K_M.gguf', bytes: 700 },
+    { relpath: 'm-Q4_K_M-00001-of-00002.gguf', bytes: 300 },
+    { relpath: 'm-Q4_K_M-00001-of-00002-00001-of-00002.gguf', bytes: 150 },
+    { relpath: 'm-Q4_K_M-00001-of-00002-00001-of-00002-00001-of-00002.gguf', bytes: 150 },
+  ];
+  const orders = [members, [...members].reverse(), [members[3], members[0], members[2], members[1]]];
+  const key = (v) => JSON.stringify(v.map((x) => [x.file, x.bytes, x.shards, x.quant]).sort());
+  const first = ggufVariants(orders[0]);
+  assert.equal(new Set(first.map((x) => x.file)).size, first.length, 'no duplicate selectors');
+  for (const o of orders.slice(1)) assert.equal(key(ggufVariants(o)), key(first), 'same resolved set whatever order the Hub lists them');
+  assert.equal(first.length, 3, 'four groups, one unresolvable entry dropped');
+  const asset = { id: 'org/nospare-nest', revision: REV, format: 'gguf', quant: 'unknown', totalBytes: 1300, variants: first };
+  const got = selectVariant(asset, 'm-Q4_K_M-00001-of-00002.gguf');
+  assert.equal(got.variant && got.variant.bytes, 0, 'the contested name resolves to the fail-closed entry, deterministically');
+  const d = evaluate(asset, 'm-Q4_K_M-00001-of-00002.gguf');
+  assert.ok(codes(d).includes('WEIGHTS_SIZE_UNKNOWN'), JSON.stringify(codes(d)));
+});
+
 test('regression: exact-duplicate manifest entries fail closed, not double-counted', () => {
   const v = ggufVariants([
     { relpath: 'big-Q8_0-00001-of-00002.gguf', bytes: 300 },
