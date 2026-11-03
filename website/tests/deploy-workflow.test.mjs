@@ -105,6 +105,16 @@ test('deploy and verify steps are skipped on hold or already-live', () => {
   assert(deploy.includes("steps.migration.outputs.hold != 'true' && steps.live.outputs.already != 'true'"));
 });
 
+test('preflight precedes wrangler deploy and live verification follows it', () => {
+  const texts = steps(deploy).map(b => b.header + '\n' + b.body);
+  const preflight = texts.findIndex(t => t.includes('release-preflight.mjs') && t.includes('Require the verified'));
+  const wrangler = texts.findIndex(t => t.includes('npx wrangler deploy'));
+  const verify = texts.findIndex(t => t.includes('npm run verify:live'));
+  assert(preflight >= 0 && wrangler >= 0 && verify >= 0, 'preflight, deploy and verify steps must exist');
+  assert(preflight < wrangler, 'the last recheck must run before any deployment');
+  assert(wrangler < verify, 'live verification must run after the deployment');
+});
+
 test('worker checks run on main with the same path filters as PRs', () => {
   assert(worker.includes('push:'), 'worker checks need a main push trigger');
   assert(worker.includes('branches: [main]'), 'push trigger is scoped to main');

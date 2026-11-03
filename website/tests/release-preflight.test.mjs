@@ -24,7 +24,7 @@ for (const [label, change] of [
 const autoSha = 'a'.repeat(40);
 const otherSha = 'b'.repeat(40);
 const mergedPR = (over = {}) => ({state: 'closed', merged_at: '2026-11-03T00:00:00Z',
-  merge_commit_sha: autoSha, ...over});
+  merge_commit_sha: autoSha, base: {ref: 'main', repo: {full_name: 'synchronic1/AIPSTER'}}, ...over});
 const siteCheck = (over = {}) => ({id: 7, name: 'Public site asset and build checks', head_sha: autoSha,
   status: 'completed', conclusion: 'success', app: {slug: 'github-actions'}, ...over});
 const workerCheck = (over = {}) => ({id: 9, name: 'mock-install', head_sha: autoSha,
@@ -66,7 +66,13 @@ for (const [label, change] of [
   ['direct push without merge evidence', v => {v.associatedPRs = [];}],
   ['open PR is not merge evidence', v => {v.associatedPRs = [{state: 'open', merged_at: null, merge_commit_sha: autoSha}];}],
   ['merged PR for another commit is not evidence', v => {v.associatedPRs = [mergedPR({merge_commit_sha: otherSha})];}],
-  ['merged PR without merge commit binding is not evidence', v => {v.associatedPRs = [{state: 'closed', merged_at: '2026-11-03T00:00:00Z'}];}],
+  ['merged PR without merge commit binding is not evidence', v => {v.associatedPRs = [{state: 'closed', merged_at: '2026-11-03T00:00:00Z', base: {ref: 'main', repo: {full_name: 'synchronic1/AIPSTER'}}}];}],
+  ['merged PR to another branch is not evidence', v => {v.associatedPRs = [mergedPR({base: {ref: 'unreviewed-integration', repo: {full_name: 'synchronic1/AIPSTER'}}})];}],
+  ['merged PR to a fork main is not evidence', v => {v.associatedPRs = [mergedPR({base: {ref: 'main', repo: {full_name: 'someone/AIPSTER'}}})];}],
+  ['missing PR base is not evidence', v => {v.associatedPRs = [mergedPR({base: undefined})];}],
+  ['missing base ref is not evidence', v => {v.associatedPRs = [mergedPR({base: {repo: {full_name: 'synchronic1/AIPSTER'}}})];}],
+  ['missing base repo is not evidence', v => {v.associatedPRs = [mergedPR({base: {ref: 'main'}})];}],
+  ['malformed base repo name is not evidence', v => {v.associatedPRs = [mergedPR({base: {ref: 'main', repo: {full_name: 'synchronic1/aipster'}}})];}],
   ['other revision CI', v => {v.checks[0].head_sha = otherSha; v.workerChecks[0].head_sha = otherSha;}],
   ['non-actions check source', v => {v.checks[0].app = {slug: 'someone-else'}; v.workerChecks[0].app = {slug: 'someone-else'};}],
 ]) test(`automatic release rejects ${label}`, () => {const value = autoGood(); change(value); assert.throws(() => validateAutoRelease(value));});

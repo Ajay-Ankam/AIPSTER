@@ -76,9 +76,14 @@ export function validateAutoRelease({headSha, builtSha, mainSha, ref, checks,
   assert(/^[a-f0-9]{40}$/.test(headSha || ''), 'An exact merged SHA is required');
   assert.equal(builtSha, headSha, 'Built commit differs from the verified commit');
   assert.equal(mainSha, headSha, 'Main changed after the release was selected');
+  // The associated PR must have been merged to canonical main itself: a merge
+  // made to another branch and then pushed to main carries the same commit but
+  // a different base, and must not satisfy the rule. Missing or malformed
+  // base information fails closed.
   const mergedPR = (associatedPRs || []).some(pr => pr && pr.state === 'closed'
-    && pr.merged_at && pr.merge_commit_sha === headSha);
-  assert(mergedPR, 'Automatic deploy requires a merged pull request for this exact commit; use manual dispatch');
+    && pr.merged_at && pr.merge_commit_sha === headSha
+    && pr.base?.ref === 'main' && pr.base?.repo?.full_name === CANONICAL_REPO);
+  assert(mergedPR, 'Automatic deploy requires a pull request merged to canonical main for this exact commit; use manual dispatch');
   const site = assertSuccessfulCheck(checks, MAIN_CHECK_NAME, headSha, 'The merged revision');
   if (workerApplicable) {
     const worker = assertSuccessfulCheck(workerChecks ?? checks, WORKER_CHECK_NAME, headSha,
@@ -134,7 +139,16 @@ export async function fetchAllCheckRuns(request, sha) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   // BUILT_SHA is measured with `git rev-parse HEAD` after checkout, never
   // copied from an event field, so the comparisons below are not tautological.
-  const builtSha = process.env.BUILT_SHA || process.env.GITHUB_SHA;
+  // In auto mode it is required explicitly: falling back to GITHUB_SHA would
+  // silently reintroduce the tautology N1 closed.
+  let builtSha;
+  if (process.env.RELEASE_MODE === 'auto') {
+    assert(/^[a-f0-9]{40}$/.test(process.env.BUILT_SHA || ''),
+      'Automatic release requires a measured BUILT_SHA');
+    builtSha = process.env.BUILT_SHA;
+  } else {
+    builtSha = process.env.BUILT_SHA || process.env.GITHUB_SHA;
+  }
   assert.equal(process.env.GITHUB_REPOSITORY, 'synchronic1/AIPSTER');
   assert(process.env.GH_TOKEN, 'GitHub read credential is required');
   assert(/^[a-f0-9]{40}$/.test(builtSha || ''));
