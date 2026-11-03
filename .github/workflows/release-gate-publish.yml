@@ -23,9 +23,10 @@
 #
 # Residual gaps stated plainly (not claimed away): schedule ticks lag head
 # changes by up to the interval; a review submitted after the last wake-up
-# stays unevaluated until the next one; if the target-run context does not
-# attach to the PR head on first live run, enforcement deadlocks and the
-# architecture must change before ruleset install.
+# stays unevaluated until the next one; if the published exact-head
+# context does not attach to the PR head on first live run (canary),
+# enforcement deadlocks and the architecture must change before ruleset
+# install. Native job names are advisory only and never required.
 name: Release gate publisher (PROPOSAL — inactive)
 on:
   pull_request_target:
@@ -59,10 +60,9 @@ jobs:
           node --input-type=module -e "
           import assert from 'node:assert/strict';
           import fs from 'node:fs/promises';
-          import {parseHoldsFile, publishHeadStatus, runGateEvaluation} from './website/scripts/release-gate.mjs';
+          import {PUBLISH_CONTEXT, listOpenPRs, parseHoldsFile, publishEvaluation} from './website/scripts/release-gate.mjs';
           const repo = process.env.GITHUB_REPOSITORY;
           assert.equal(repo, 'synchronic1/AIPSTER');
-          const CONTEXT = 'aipster-release-gate/head';
           async function api(path, init) {
             const res = await fetch('https://api.github.com/repos/' + repo + '/' + path, {headers: {
               Authorization: 'Bearer ' + process.env.GH_TOKEN, Accept: 'application/vnd.github+json',
@@ -76,30 +76,12 @@ jobs:
           }
           const numbers = process.env.PR_NUMBERS
             ? process.env.PR_NUMBERS.split(',').map((s) => s.trim()).filter(Boolean)
-            : (await api('pulls?state=open&base=main&per_page=30')).map((pr) => String(pr.number));
+            : await listOpenPRs({request: api});
           const holds = parseHoldsFile(JSON.parse(
             await fs.readFile('.github/release-holds.json', 'utf8')));
-          for (const n of numbers.slice(0, 30)) {
-            const first = await api('pulls/' + n).catch(() => null);
-            if (first && first.head && first.head.sha) {
-              await publishHeadStatus({request: api, headSha: first.head.sha,
-                state: 'pending', context: CONTEXT,
-                description: 'release gate re-reading current state'}).catch(() => null);
-            }
-            try {
-              const {verdict, pr} = await runGateEvaluation({request: api, n, holds});
-              await publishHeadStatus({request: api, headSha: pr.headSha,
-                state: 'success', context: CONTEXT,
-                description: 'eligible: ' + verdict.independentEvidence + ' evidence, ' + verdict.acceptedBy});
-            } catch (err) {
-              const sha = (await api('pulls/' + n).catch(() => null))?.head?.sha;
-              if (sha) {
-                await publishHeadStatus({request: api, headSha: sha,
-                  state: 'failure', context: CONTEXT,
-                  description: String(err && err.message || err).slice(0, 140)}).catch(() => null);
-              }
-              console.error('GATE REFUSAL for PR ' + n + ': ' + (err && err.message || err));
-            }
+          for (const n of numbers) {
+            await publishEvaluation({request: api, n, holds,
+              context: PUBLISH_CONTEXT});
           }
           "
         env:

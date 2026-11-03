@@ -24,9 +24,19 @@ Peter resolves PR84.
 - HOLD is cumulative over ancestry: a hold on H covers H and descendants
   for DEPLOY, so a later unrelated main commit cannot bypass it. Unknown
   ancestry ⇒ covered. Only a listed maintainer with a reason can clear;
-  anything else is refused and the hold stands. For MERGE, holds block
-  only the exact held head (targeted do-not-merge), so release holds do
-  not freeze merging.
+  anything else is refused and the hold stands. For MERGE, targeted
+  holds block only the exact held head — but an ACTIVE GLOBAL
+  (`blockMerges: true`) hold refuses EVERY ordinary merge: the PR84
+  directive is all-merges-and-deployments, so no relation pretense is
+  needed for global coverage. Inactive or non-global records behave as
+  targeted holds.
+- The hold registry (`.github/release-holds.json`) can never authorize
+  its own clearance: any ordinary evaluated PR touching that file —
+  modify, remove, or replace — fails closed. Clearance is a separately
+  approved owner-only operation (explicit maintainer decision recorded
+  out of band, applied with action-time confirmation); there is no
+  auto-clear marker. History is preserved by refusing, never by
+  rewriting it.
 - Irreversible step rechecks authoritative data first; the residual race
   (main moves between evaluation and deploy) is documented in every
   receipt — the deploy step re-verifies the SHA itself.
@@ -51,29 +61,34 @@ recorded distinctly from independent review.
 
 ## Gate wiring (implemented, advisory until installed)
 
-- `.github/workflows/release-gate.yml`: enforcement job `release-gate`
-  runs ONLY on `pull_request_target` (base workflow version — a PR cannot
-  alter these steps). NO review triggers and NO shared job names exist in
-  this file: review-version YAML is PR-controlled, so any required check
-  reachable from it would be forgeable by rename-back, and no rename can
-  fix that. The file checks out the base ref explicitly and evaluates the
-  head from API metadata only. Stale evidence blocks are skipped
-  (superseded without deleting history); malformed data fails closed.
-  Worker-applicable heads additionally require worker + installer CI at
-  the PR head. Residual liveness gap: a review submitted after the last
-  target run stays unevaluated until the next wake-up (see publish draft
-  and deploy-time backstop below) — documented, not claimed away.
+- `.github/workflows/release-gate.yml`: ADVISORY job
+  `release-gate-advisory` (renamed so it can never be mistaken for
+  enforcement — it must NEVER be a required check) runs ONLY on
+  `pull_request_target` (base workflow version — a PR cannot alter
+  these steps). It is a thin caller of the tested `runGateEvaluation`
+  orchestration: fresh reads, worker applicability from changed files,
+  verdict, stale-head race check. NO review triggers exist in this
+  file. Residual liveness gap: a review submitted after the last
+  target run stays unevaluated until the next wake-up (see publish
+  draft and deploy-time backstop below) — documented, not claimed away.
 - `.github/workflows/release-gate-publish.yml` (DRAFT, INERT until
   activated): trusted-base/default evaluator emitting explicit exact-head
-  commit statuses under the DISTINCT context
-  `aipster-release-gate/head` (never a native job name). Triggers:
-  `pull_request_target` + 15-minute `schedule`; every run re-reads
-  repository/PR/head/reviews/checks/holds fresh, emits
-  pending → error/failure/success with a stale-head race re-check, and
-  executes no untrusted code, artifacts, or caches. Activation requires
-  ALL of: uncommenting the narrow `statuses: write` job permission,
-  setting `vars.RELEASE_GATE_PUBLISH_ACTIVE=true`, and installing the
-  ruleset for that context — each with explicit action-time confirmation.
+  commit statuses under the single DISTINCT context
+  `aipster-release-gate/head` (constant `PUBLISH_CONTEXT`, used across
+  source, workflow, docs, and the ruleset proposal — never a native job
+  name). Thin caller of tested `listOpenPRs` + `publishEvaluation`:
+  pending first (a pending-write failure ABORTS before evaluation),
+  then evaluation, then success — or failure + the refusal on refusal.
+  A failed failure-write throws; nothing exits silent. Publication is
+  `POST statuses/{sha}`; a post-verdict head re-read refuses stale
+  success with an error status. Listing paginates and fails LOUDLY past
+  the cap instead of truncating. Triggers: `pull_request_target` +
+  15-minute `schedule`; every run re-reads
+  repository/PR/head/reviews/checks/holds fresh and executes no
+  untrusted code, artifacts, or caches. Activation requires ALL of:
+  uncommenting the narrow `statuses: write` job permission, setting
+  `vars.RELEASE_GATE_PUBLISH_ACTIVE=true`, and installing the ruleset
+  for that context — each with explicit action-time confirmation.
   Until then it publishes nothing. No App, webhook, token, or service.
 - Deploy workflow step (authorized current-workflow edit, one step):
   `public-site-production-deploy.yml` runs
@@ -84,26 +99,19 @@ recorded distinctly from independent review.
   integration proof; REGULAR mainline commits (direct/squash/rebase) are
   refused outright — ancestry in a later branch proves nothing about
   review coverage, and this evaluator documents squash/rebase as
-  unsupported without changing any remote merge method. Trusted holds
-  file; merged-main CI covers site plus conditional worker only
-  (installer at a merge target would deadlock every deploy: verified
-  asymmetry, kept). Git exit codes are honest (exit 1 = proven
-  non-ancestry; anything else throws). A refusal fails the job before
-  deploy.
-- Deploy workflow step (authorized current-workflow edit, one step):
-  `public-site-production-deploy.yml` runs
-  `website/scripts/release-deploy-gate.mjs` after preflight and before
-  deploy. It inspects the ENTIRE first-parent live..target range: merges
-  get evidence on each PR's own head + second-parent integration proof;
-  regular (direct/squash/rebase) commits release only when contained in a
-  merge's second-parent history, else fail closed (no merge method is
-  disabled). Trusted holds file, merged-main CI (site + worker/installer
-  conditionality) in both modes. Git exit codes are honest (exit 1 =
-  proven non-ancestry; anything else throws). A refusal fails the job
-  before deploy.
+  unsupported without changing any remote merge method. Fresh endpoint
+  standing is re-read per PR (fresh reads win over caller maps); the
+  range touching the hold registry fails closed; fresh trusted holds —
+  including any active GLOBAL hold — govern before any production step,
+  so a descendant with an unchanged registry stays held. Merged-main CI
+  covers site plus conditional worker only (installer at a merge target
+  would deadlock every deploy: verified asymmetry, kept). Git exit
+  codes are honest (exit 1 = proven non-ancestry; anything else
+  throws). A refusal fails the job before deploy.
 - `.github/release-holds.json` (new, seeded): versioned holds map read
-  from the trusted release checkout. The seed carries the PR84 hold on
-  `45c9eb7…` — seeded state requiring maintainer confirmation (RESULT).
+  from the trusted release checkout. The seed carries the PR84
+  all-merges-and-deployments hold on `45c9eb7…` with `blockMerges: true`
+  — seeded state requiring maintainer confirmation (RESULT).
 
 ## Environment required-human approval: NOT imposed (documented verdict)
 
@@ -136,7 +144,7 @@ re-verify `actor_id` at apply time):
   "conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
   "rules": [
     {"type": "required_status_checks", "parameters": {
-      "required_status_checks": [{"context": "release-gate"}],
+      "required_status_checks": [{"context": "aipster-release-gate/head"}],
       "strict_required_status_checks_policy": true}},
     {"type": "pull_request", "parameters": {
       "required_approving_review_count": 0,
@@ -148,15 +156,24 @@ re-verify `actor_id` at apply time):
   "bypass_actors": []
 }
 ```
-Notes: `required_approving_review_count: 0` keeps the sole maintainer
-recoverable (no lockout) with no bypass inventiveness — no `actor_id`
-is proposed here because the docs do not pin role IDs; resolve the admin
-role live at apply time (`GET` the ruleset suite / role endpoints first)
-and record the exact value in the apply receipt. Never paste an
-unverified numeric ID. Bootstrap order (no nonexistent check required):
-merge the gate workflow → let `release-gate` run once on a PR so the
-context exists (confirm it attaches to the PR head — unresolved live
-check, see RESULT) → then install the ruleset.
+Notes: the required context is the single `PUBLISH_CONTEXT`
+`aipster-release-gate/head` — the advisory `release-gate-advisory`
+native job is NEVER a required check. `required_approving_review_count:
+0` keeps the sole maintainer recoverable (no second-human lockout).
+Emergency-bypass design OPTION (not applied, needs action-time
+confirmation): a User bypass actor for verified `synchronic1`
+(ID 135072919) so the sole maintainer can recover if the publisher
+itself wedges a PR; default is no bypass. Never paste an unverified
+numeric ID — re-resolve the actor ID live at apply time and record the
+exact value in the apply receipt. Bootstrap order (no nonexistent check
+required): merge the publisher draft (still inert) → activate publishing
+→ run the explicit-head status canary on a PR head (`assertCanaryClean`:
+context present and passing ON the head, no competing legacy
+`release-gate` run) → then install the ruleset. The canary's
+PR-head attachment of `pull_request_target` outputs is an unresolved
+live check until run — see RESULT; nothing is installed beforehand.
+Narrowly scoped `statuses: write` on the publisher job and
+`vars.RELEASE_GATE_PUBLISH_ACTIVE=true` are likewise confirmation-gated.
 Environment `production`: confirm single-maintainer reviewer, no second
 human. Security-sensitive hygiene for any privileged gate change:
 `persist-credentials: false`, read-only token, pinned SHAs, no

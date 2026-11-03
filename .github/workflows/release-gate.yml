@@ -26,11 +26,12 @@ permissions:
   checks: read
   pull-requests: read
 jobs:
-  # Enforcement job: runs ONLY from the trusted base workflow version.
-  # Its check run is the required `release-gate` context. No other job in
-  # this file shares the name, and no PR-controlled event is defined here.
-  release-gate:
-    name: release-gate
+  # Advisory ONLY: runs ONLY from the trusted base workflow version, but
+  # this native job must NEVER be a required check. Enforcement reads
+  # the aipster-release-gate/head commit status. No PR-controlled event
+  # is defined here.
+  release-gate-advisory:
+    name: release-gate-advisory
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -48,8 +49,7 @@ jobs:
           node --input-type=module -e "
           import assert from 'node:assert/strict';
           import fs from 'node:fs/promises';
-          import {fetchPR, fetchReviews, fetchPRFiles, mergeEligible, parseHoldsFile} from './website/scripts/release-gate.mjs';
-          import {fetchAllCheckRuns, isWorkerApplicable} from './website/scripts/release-preflight.mjs';
+          import {parseHoldsFile, runGateEvaluation} from './website/scripts/release-gate.mjs';
           const repo = process.env.GITHUB_REPOSITORY;
           assert.equal(repo, 'synchronic1/AIPSTER');
           async function api(path) {
@@ -60,14 +60,10 @@ jobs:
             return res.json();
           }
           try {
-            const n = process.env.PR_NUMBER;
-            const pr = await fetchPR(api, n);
-            const [reviews, files, checks] = await Promise.all([fetchReviews(api, n),
-              fetchPRFiles(api, n), fetchAllCheckRuns(api, pr.headSha)]);
             const holds = parseHoldsFile(JSON.parse(
               await fs.readFile('.github/release-holds.json', 'utf8')));
-            const verdict = mergeEligible({pr, reviews, holdMap: holds, checks,
-              workerApplicable: isWorkerApplicable(files), headSha: pr.headSha});
+            const {verdict} = await runGateEvaluation(
+              {request: api, n: process.env.PR_NUMBER, holds});
             await fs.appendFile(process.env.GITHUB_STEP_SUMMARY,
               '## RELEASE GATE — eligible\n\n' + JSON.stringify(verdict) + '\n');
             console.log(JSON.stringify(verdict));

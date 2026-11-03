@@ -15,8 +15,9 @@ import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {CANONICAL_REPO, MAIN_CHECK_NAME, WORKER_CHECK_NAME,
   isWorkerApplicable} from './release-preflight.mjs';
-import {bindEvidence, fetchAssociatedPRs, fetchPR, fetchPRFiles,
-  fetchReviews, parseHoldsFile, requireCheckPass, resolveAcceptance,
+import {bindEvidence, fetchAssociatedPRs, fetchPR,
+  fetchPRFiles, fetchReviews, markerAuthors, parseHoldsFile,
+  requireCheckPass, resolveAcceptance, resolvePermissionsFor,
   INSTALLER_CHECK_NAME} from './release-gate.mjs';
 
 const SHA_RE = /^[a-f0-9]{40}$/;
@@ -55,6 +56,12 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       const pr = await fetchPR(request, assoc.number ?? assoc.id);
       const reviews = await fetchReviews(request, pr.number);
       const evidence = bindEvidence({pr, reviews});
+      // Fresh standing for this PR's marker authors (supported endpoint
+      // reads, fail-closed gaps). Fresh reads take precedence over the
+      // caller map: caller booleans can be stale, never authoritative.
+      const fresh = await resolvePermissionsFor({request,
+        logins: markerAuthors(reviews, pr.headSha)});
+      permissions = {...(permissions || {}), ...fresh};
       assert(second === pr.headSha,
         `Merge ${sha} does not integrate reviewed head ${pr.headSha}`);
       const acceptance = resolveAcceptance({reviews: reviews,
@@ -85,12 +92,23 @@ export async function evaluateDeployGate({git, request, fetchChecks,
   }
   assert(evaluated.length > 0,
     'No merge with bound PR evidence in range: unassociated main pushes cannot release');
-  // Fresh trusted hold governs before any production step: any active hold
-  // on an ancestor-or-self of the target (proven by git, never assumed)
-  // blocks both paths. Unknown git outcomes throw (fail closed).
+  // The range aggregate is computed once: it drives BOTH the hold-registry
+  // guard below and worker conditionality. A range touching the control
+  // file fails closed however it touches it (modify/remove/replace) —
+  // history is preserved by refusing, never by rewriting it.
+  const changed = git.changedFiles(liveSha, targetSha);
+  const {HOLD_REGISTRY_PATH} = await import('./release-gate.mjs');
+  assert(!changed.includes(HOLD_REGISTRY_PATH),
+    `Release range touches the hold registry (${HOLD_REGISTRY_PATH}): refused — clearance needs a separately approved owner operation`);
+  // Fresh trusted hold governs before any production step: any active
+  // GLOBAL hold, or any active hold on an ancestor-or-self of the target
+  // (proven by git, never assumed), blocks both paths. A descendant
+  // release with an UNCHANGED registry stays held. Unknown git outcomes
+  // throw (fail closed).
   const covering = [];
   for (const hold of Object.values(holds)) {
     if (!hold || !hold.active) continue;
+    if (hold.blockMerges === true) { covering.push(hold); continue; }
     if (hold.sha === targetSha) { covering.push(hold); continue; }
     if (git.isAncestor(hold.sha, targetSha)) covering.push(hold);
   }
@@ -98,7 +116,6 @@ export async function evaluateDeployGate({git, request, fetchChecks,
     `Release HOLD active: ${covering.map(h => h.sha + ' (' + h.reason + ')').join(', ')}`);
   const checks = await fetchChecks(targetSha);
   requireCheckPass(checks, MAIN_CHECK_NAME, targetSha, 'The release revision');
-  const changed = git.changedFiles(liveSha, targetSha);
   if (isWorkerApplicable(changed)) {
     requireCheckPass(checks, WORKER_CHECK_NAME, targetSha,
       'The release touches worker-covered paths, so');

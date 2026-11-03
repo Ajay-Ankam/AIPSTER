@@ -79,6 +79,30 @@ test('happy path evaluates every included PR', async () => {
   assert.deepEqual(out.prs.map(p => p.number), [91, 90]); // newest-first range order
   assert.equal(out.prs[0].acceptedBy, '948a');
 });
+test('fresh endpoint standing wins over stale caller claims', async () => {
+  const collab = (head) => reviewDoc(head, {user: {login: 'helper'},
+    author_association: 'COLLABORATOR'});
+  // Stale caller downgrade cannot veto a fresh endpoint-proven admin.
+  {
+    const {request} = mockRequest(baseRoutes({
+      'pulls/90/reviews': [collab(HEAD1)],
+      'pulls/91/reviews': [collab(HEAD2)],
+      'collaborators/helper/permission': {permission: 'admin'}}));
+    const out = await evaluateDeployGate({...gateInput(), request,
+      permissions: {helper: 'read'}});
+    assert.equal(out.ok, true);
+    assert.equal(out.prs[0].acceptedBy, 'helper');
+  }
+  // A caller-claimed admin the endpoint reports as read must not accept.
+  {
+    const {request} = mockRequest(baseRoutes({
+      'pulls/90/reviews': [collab(HEAD1)],
+      'pulls/91/reviews': [collab(HEAD2)],
+      'collaborators/helper/permission': {permission: 'read'}}));
+    await assert.rejects(evaluateDeployGate({...gateInput(), request,
+      permissions: {helper: 'admin'}}), /No maintainer acceptance/);
+  }
+});
 test('fork-origin PR merged canonically is releasable', async () => {
   const {request} = mockRequest(baseRoutes({'pulls/90': prDoc(90, HEAD1, true)}));
   const out = await evaluateDeployGate({...gateInput(), request});
@@ -186,6 +210,16 @@ test('realGit on a tiny repo: first-parent range, exit codes, unknown throws', (
   assert.equal(g.isAncestor(M0, M2), true);
   assert.equal(g.isAncestor(H, M0), false); // genuine exit 1
   assert.throws(() => g.isAncestor(M0, '0'.repeat(40)), /Ancestry unknown/); // exit 128
+});
+test('hold-registry touch in range refuses; global hold blocks descendant', async () => {
+  const touched = git({changedFiles: () => ['website/a.mjs', '.github/release-holds.json']});
+  await assert.rejects(evaluateDeployGate({...gateInput(), git: touched}),
+    /hold registry/);
+  const HOLD_SHA = 'd'.repeat(40);
+  const global = {[HOLD_SHA]: {sha: HOLD_SHA, active: true,
+    reason: 'PR84 all', setBy: 's', blockMerges: true}};
+  await assert.rejects(evaluateDeployGate({...gateInput(), holds: global}),
+    /HOLD active/);
 });
 test('git and API failures fail closed', async () => {
   const badGit = git({commitsInRange: () => { throw new Error('git gone'); }});

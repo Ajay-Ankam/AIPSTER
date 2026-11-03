@@ -1,8 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {assertNoCodeFetch, bindEvidence, fetchAssociatedPRs,
-  fetchPR, fetchPRFiles, fetchPermission, fetchReviews, holdRelationTo,
-  mergeEligible, parseEvidenceBlock, parseHoldsFile, publishHeadStatus,
+import {assertCanaryClean, assertNoCodeFetch, bindEvidence,
+  fetchAssociatedPRs, fetchPR, fetchPRFiles, fetchPermission, fetchReviews,
+  holdRelationTo, listOpenPRs, mergeEligible, parseEvidenceBlock,
+  parseHoldsFile, publishEvaluation, publishHeadStatus,
   requireCheckPass, resolveAcceptance, resolveMaintainer,
   runGateEvaluation} from '../scripts/release-gate.mjs';
 
@@ -243,7 +244,57 @@ test('runGateEvaluation races fresh; moved head discarded', async () => {
   await assert.rejects(runGateEvaluation({request: moving.request, n: 86, holds: {}}),
     /moved during evaluation/);
 });
-test('publishHeadStatus posts explicit distinct contexts only', async () => {
+test('global merge hold refuses ordinary merges; inactive does not', () => {
+  const global = {[HOLD_SHA]: {sha: HOLD_SHA, active: true,
+    reason: 'PR84 all-merges hold', setBy: 's', blockMerges: true}};
+  assert.throws(() => mergeEligible(gateInput({holdMap: global})), /Global merge HOLD/);
+  const off = {[HOLD_SHA]: {sha: HOLD_SHA, active: false,
+    reason: 'resolved', setBy: 's', blockMerges: true}};
+  assert.equal(mergeEligible(gateInput({holdMap: off})).ok, true);
+});
+test('PRs touching the hold registry fail closed (all variants)', async () => {
+  for (const file of [{filename: '.github/release-holds.json', status: 'modified'},
+    {filename: '.github/release-holds.json', status: 'removed'},
+    {filename: '.github/release-holds.json', status: 'added'}]) {
+    const routes = {'pulls/86': prDoc(),
+      'pulls/86/reviews': [reviewDoc({author_association: 'OWNER'})],
+      'pulls/86/files': [file],
+      [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}};
+    const {request} = mockRequest(routes);
+    await assert.rejects(runGateEvaluation({request, n: 86, holds: {}}),
+      /hold registry/);
+  }
+  // Controller hold-clear probe: a candidate editing the registry from
+  // active to inactive cannot clear its own hold even when the trusted
+  // base map still carries an active (legacy non-global) PR84 record —
+  // the registry touch itself fails closed before eligibility is reached.
+  {
+    const legacy = {[HOLD_SHA]: {sha: HOLD_SHA, active: true,
+      reason: 'PR84 release hold', setBy: 'safeguards-seed'}};
+    const routes = {'pulls/86': prDoc(),
+      'pulls/86/reviews': [reviewDoc({author_association: 'OWNER'})],
+      'pulls/86/files': [{filename: '.github/release-holds.json'}],
+      [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+      'collaborators/948a/permission': {permission: 'read'}};
+    const {request} = mockRequest(routes);
+    await assert.rejects(runGateEvaluation({request, n: 86, holds: legacy}),
+      /hold registry/);
+  }
+});
+test('standing resolves via fresh endpoint reads, not caller claims', async () => {
+  const collab = reviewDoc({author_association: 'COLLABORATOR'});
+  const routes = {'pulls/86': prDoc(),
+    'pulls/86/reviews': [collab],
+    'pulls/86/files': [{filename: 'website/x.html'}],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    'collaborators/948a/permission': {permission: 'admin'}};
+  const {seen, request} = mockRequest(routes);
+  const {verdict} = await runGateEvaluation({request, n: 86, holds: {}});
+  assert.equal(verdict.acceptedBy, '948a');
+  assert(seen.some((p) => p.startsWith('collaborators/948a/permission')),
+    'endpoint permission must actually be read');
+});
+test('publishHeadStatus uses POST statuses/{sha}', async () => {
   const posts = [];
   const request = async (path, init) => {
     posts.push({path, init});
@@ -251,7 +302,7 @@ test('publishHeadStatus posts explicit distinct contexts only', async () => {
   };
   await publishHeadStatus({request, headSha: HEAD, state: 'pending',
     context: 'aipster-release-gate/head', description: 're-reading'});
-  assert.equal(posts[0].path, `commits/${HEAD}/statuses`);
+  assert.equal(posts[0].path, `statuses/${HEAD}`);
   assert.equal(posts[0].init.method, 'POST');
   assert.equal(posts[0].init.body.context, 'aipster-release-gate/head');
   await assert.rejects(publishHeadStatus({request, headSha: HEAD,
@@ -260,6 +311,109 @@ test('publishHeadStatus posts explicit distinct contexts only', async () => {
     state: 'success', context: 'release-gate-refresh'}), /distinct context/);
   await assert.rejects(publishHeadStatus({request, headSha: 'zzz',
     state: 'success', context: 'aipster-release-gate/head'}), /40-hex/);
+});
+test('publishEvaluation never swallows writes or exits silent', async () => {
+  const ownerRoutes = () => ({'pulls/86': prDoc(),
+    'pulls/86/reviews': [reviewDoc({author_association: 'OWNER'})],
+    'pulls/86/files': [{filename: 'website/x.html'}],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    // Fresh standing is always read for marker authors, even when OWNER
+    // association alone would qualify: read proves nothing here by design.
+    'collaborators/948a/permission': {permission: 'read'}});
+  // Status posts go to POST statuses/{sha}; the PR read must succeed
+  // before any publish is attempted.
+  const isStatusPost = (path) => path.startsWith('statuses/');
+  // Pending-write failure aborts before any evaluation.
+  {
+    let evaluated = false;
+    const request = async (path) => {
+      if (path === 'pulls/86') return prDoc();
+      if (isStatusPost(path)) throw new Error('HTTP 500 on publish');
+      evaluated = true;
+      return {};
+    };
+    await assert.rejects(publishEvaluation({request, n: 86, holds: {},
+      context: 'aipster-release-gate/head'}), /500/);
+    assert.equal(evaluated, false);
+  }
+  // Refusal publishes failure, then the refusal (not silence) propagates.
+  {
+    const states = [];
+    const noEvidence = {...reviewDoc({author_association: 'OWNER'}),
+      body: 'nothing here ' + HEAD};
+    const request = async (path, init) => {
+      if (isStatusPost(path)) {
+        states.push(init.body.state);
+        return {id: states.length};
+      }
+      const routes = {...ownerRoutes(),
+        'pulls/86/reviews': [noEvidence]};
+      const [base] = path.split('?');
+      assert(base in routes, 'unexpected ' + path);
+      return routes[base];
+    };
+    await assert.rejects(publishEvaluation({request, n: 86,
+      holds: {}, context: 'aipster-release-gate/head'}), /independent review/);
+    assert.deepEqual(states, ['pending', 'failure']);
+  }
+  // Failure-publish failure is explicit, never exit-0 silence.
+  {
+    const request = async (path) => {
+      if (path === 'pulls/86') return prDoc();
+      if (isStatusPost(path)) throw new Error('HTTP 403 on publish');
+      throw new Error('evaluation boom');
+    };
+    await assert.rejects(publishEvaluation({request, n: 86, holds: {},
+      context: 'aipster-release-gate/head'}), /403/);
+  }
+  // Head moving between verdict and success refuses stale success: an
+  // error is published on the new head and no success ever lands.
+  {
+    const states = [];
+    let pulls = 0;
+    const moved = prDoc({head: {sha: NEXT, ref: 'muse/x',
+      repo: {full_name: 'synchronic1/AIPSTER'}}});
+    const request = async (path, init) => {
+      if (isStatusPost(path)) {
+        states.push(path.slice('statuses/'.length) + ':' + init.body.state);
+        return {id: states.length};
+      }
+      if (path === 'pulls/86') return ++pulls < 4 ? prDoc() : moved;
+      const routes = ownerRoutes();
+      const [base] = path.split('?');
+      assert(base in routes, 'unexpected ' + path);
+      return routes[base];
+    };
+    await assert.rejects(publishEvaluation({request, n: 86, holds: {},
+      context: 'aipster-release-gate/head'}), /moved after evaluation/);
+    assert.deepEqual(states, [`${HEAD}:pending`, `${NEXT}:error`]);
+  }
+});
+test('listOpenPRs paginates and fails loudly beyond cap', async () => {
+  const two = [];
+  for (let i = 0; i < 150; i++) two.push({number: i + 1});
+  const {request} = mockRequest({'pulls': (path) =>
+    path.includes('&page=1') ? two.slice(0, 100) : two.slice(100)});
+  assert.deepEqual(await listOpenPRs({request}), two.map((p) => p.number));
+  const full = Array.from({length: 100}, (_, i) => ({number: 1000 + i}));
+  const endless = mockRequest({pulls: full});
+  await assert.rejects(listOpenPRs({request: endless.request, maxPages: 2}),
+    /exceeded 2 pages/);
+});
+test('canary requires the context and no competing native run', async () => {
+  const good = [{id: 1, name: 'aipster-release-gate/head', head_sha: HEAD,
+    status: 'completed', conclusion: 'success', app: {slug: 'github-actions'}}];
+  const {request} = mockRequest({[`commits/${HEAD}/check-runs`]: {check_runs: good}});
+  assert.equal(await assertCanaryClean({request, headSha: HEAD,
+    context: 'aipster-release-gate/head'}), true);
+  const rival = mockRequest({[`commits/${HEAD}/check-runs`]: {check_runs: [...good,
+    {id: 2, name: 'release-gate', head_sha: HEAD, status: 'completed',
+      conclusion: 'success', app: {slug: 'github-actions'}}]}});
+  await assert.rejects(assertCanaryClean({request: rival.request, headSha: HEAD,
+    context: 'aipster-release-gate/head'}), /competing/);
+  const missing = mockRequest({[`commits/${HEAD}/check-runs`]: {check_runs: []}});
+  await assert.rejects(assertCanaryClean({request: missing.request, headSha: HEAD,
+    context: 'aipster-release-gate/head'}), /no passing/);
 });
 
 // no code fetched across the whole exercised surface

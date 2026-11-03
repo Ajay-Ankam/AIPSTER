@@ -32,8 +32,15 @@ import {CANONICAL_REPO, MAIN_CHECK_NAME, WORKER_CHECK_NAME,
   fetchAllCheckRuns, isWorkerApplicable} from './release-preflight.mjs';
 import {evaluateReviewEvidence, holdCovers} from './release-hold.mjs';
 
-export const GATE_VERSION = 'aipster-release-gate/3';
+export const GATE_VERSION = 'aipster-release-gate/4';
 export const INSTALLER_CHECK_NAME = 'Build and qualify Windows installer';
+// Control file whose edits can never authorize their own clearance: any
+// ordinary evaluated PR touching it fails closed (owner-only recovery is
+// a separate, explicitly approved operation — never auto-clear).
+export const HOLD_REGISTRY_PATH = '.github/release-holds.json';
+// Distinct commit-status context for the trusted publisher (never a
+// native job name — job names prove nothing about authenticity).
+export const PUBLISH_CONTEXT = 'aipster-release-gate/head';
 // Pinned verified repository owner (live-confirmed 2026-11-03: sole
 // collaborator). Owner acceptance needs no further proof; everything else
 // needs OWNER association or endpoint-proven admin/maintain.
@@ -279,10 +286,16 @@ function commonGates({pr, reviews, permissions, dispatchActor,
   return {evidence: evidence.length, acceptance};
 }
 
-// Merge eligibility: holds block only the exact held head (targeted
-// do-not-merge); release ancestry is a deploy question, so merging stays
-// usable while a release hold is active.
+// Merge eligibility. Targeted holds block only the exact held head, but
+// an ACTIVE GLOBAL (blockMerges) hold refuses every ordinary merge — the
+// PR84 directive is all-merges-and-deployments, so no relation pretense:
+// global coverage needs no ancestry proof. Inactive or non-global records
+// behave as before.
 export function mergeEligible(input) {
+  const actives = Object.values(input.holdMap || {}).filter(h => h && h.active);
+  const global = actives.filter(h => h.blockMerges === true);
+  assert(global.length === 0,
+    `Global merge HOLD active: ${global.map(h => h.sha + ' (' + h.reason + ')').join(', ')}`);
   const {evidence, acceptance} = commonGates({...input, holdRelation: 'unrelated'});
   return {ok: true, question: 'merge', sha: input.headSha,
     independentEvidence: evidence, acceptedBy: acceptance.by, via: acceptance.via};
@@ -307,8 +320,19 @@ export async function runGateEvaluation({request, n, holds}) {
   const [reviews, files, checks] = await Promise.all([
     fetchReviews(request, n), fetchPRFiles(request, n),
     fetchCheckRunsAll(request, pr.headSha)]);
-  const verdict = mergeEligible({pr, reviews, holdMap: holds, checks,
-    workerApplicable: isWorkerApplicable(files), headSha: pr.headSha});
+  // Control-file self-clearance guard: a PR touching the hold registry
+  // cannot authorize its own clearance in the ordinary gate (owner-only
+  // recovery is a separate, explicitly approved operation — never
+  // auto-clear). Applies to modify/remove/replace alike: the PATH, not
+  // the patch, is what fails closed.
+  assert(!(files || []).includes(HOLD_REGISTRY_PATH),
+    `PR touches the hold registry (${HOLD_REGISTRY_PATH}): refused — clearance needs a separately approved owner operation`);
+  // Fresh standing for the reviewers that actually need it (marker
+  // authors): supported endpoint reads, fail-closed gaps, never invented.
+  const permissions = await resolvePermissionsFor(
+    {request, logins: markerAuthors(reviews, pr.headSha)});
+  const verdict = mergeEligible({pr, reviews, permissions, holdMap: holds,
+    checks, workerApplicable: isWorkerApplicable(files), headSha: pr.headSha});
   const fresh = await fetchPR(request, n);
   assert.equal(fresh.headSha, pr.headSha,
     'PR head moved during evaluation (stale race): discard this verdict and re-run');
@@ -328,21 +352,119 @@ export async function publishHeadStatus({request, headSha, state, context,
   assert(typeof context === 'string' && context.length > 0
     && !/release-gate-refresh/.test(context),
     'Status context must be an explicit distinct context');
-  return request(`commits/${headSha}/statuses`, {method: 'POST',
+  return request(`statuses/${headSha}`, {method: 'POST',
     body: {state, context, description: description || '', target_url: ''}});
 }
 
-// Holds file read from a trusted canonical-main checkout (base checkout
-// for the merge gate, release-tip checkout for deploy — never a PR head).
-// Shape: {version: 1, holds: {sha: {sha, active, reason, setBy, at?}}}.
+// Full publish cycle for one PR: pending first (a pending-write failure
+// ABORTS before any evaluation), then evaluation, then success — or, on
+// refusal, a failure write followed by the refusal itself. A failed
+// failure-write is explicit (it throws); nothing here exits silent or
+// resolves success without a published success. Never invoked live in
+// this task; exercised with mocked HTTP only.
+export async function publishEvaluation({request, n, holds, context}) {
+  const opening = await fetchPR(request, n);
+  await publishHeadStatus({request, headSha: opening.headSha,
+    state: 'pending', context, description: 'release gate re-reading current state'});
+  let verdict;
+  try {
+    ({verdict} = await runGateEvaluation({request, n, holds}));
+  } catch (err) {
+    const current = await fetchPR(request, n);
+    await publishHeadStatus({request, headSha: current.headSha,
+      state: 'failure', context,
+      description: String((err && err.message) || err).slice(0, 140)});
+    throw err;
+  }
+  // The verdict was race-checked inside evaluation, but the head may
+  // have moved between the verdict and this write: re-read and refuse
+  // stale rather than publishing success on a superseded SHA.
+  const current = await fetchPR(request, n);
+  if (current.headSha !== verdict.sha) {
+    await publishHeadStatus({request, headSha: current.headSha,
+      state: 'error', context,
+      description: 'head moved after evaluation; refusing stale verdict'});
+    throw new Error('publish refused: head moved after evaluation');
+  }
+  await publishHeadStatus({request, headSha: verdict.sha, state: 'success',
+    context, description: `eligible: ${verdict.independentEvidence} evidence, ${verdict.acceptedBy}`});
+  return {ok: true, verdict};
+}
+
+// Bounded open-PR listing for the scheduled evaluator: paginates, then
+// fails LOUDLY past the cap (naming the cap) instead of silently
+// truncating the tail.
+export async function listOpenPRs({request, maxPages = 5}) {
+  const numbers = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await request(`pulls?state=open&base=main&per_page=100&page=${page}`);
+    assert(Array.isArray(batch), 'Open-PR listing returned no list');
+    numbers.push(...batch.map((pr) => pr.number));
+    if (batch.length < 100) return numbers;
+  }
+  throw new Error(`Open-PR listing exceeded ${maxPages} pages: refusing silent truncation`);
+}
+
+// Bootstrap canary (live, at activation only): the distinct context must
+// be present and passing ON the head, and NO legacy `release-gate`
+// enforcement run may exist on that head (the current advisory job is
+// named `release-gate-advisory` precisely so it never matches this).
+// Never invoked here.
+export async function assertCanaryClean({request, headSha, context}) {
+  assertSha(headSha, 'Canary head SHA');
+  assert(typeof context === 'string' && context.length > 0, 'Canary context required');
+  const runs = await fetchCheckRunsAll(request, headSha);
+  const accepted = runs.filter((r) => r.name === context
+    && r.status === 'completed' && r.conclusion === 'success');
+  assert(accepted.length > 0,
+    `Canary: no passing ${context} status on this head — do not install`);
+  const competing = runs.filter((r) => r.name === 'release-gate');
+  assert(competing.length === 0,
+    'Canary: competing native release-gate run present — do not install');
+  return true;
+}
+
+// Holds file read from a TRUSTED canonical-main checkout (base checkout
+// for the merge gate, release-tip checkout for deploy — never a PR head,
+// so a candidate can never clear its own hold through this file).
+// Shape: {version: 1, holds: {sha: {sha, active, reason, setBy, at?,
+// blockMerges?: bool}}}. blockMerges marks an all-merges hold (e.g. the
+// PR84 directive): ordinary merge eligibility fails while one is active,
+// without pretending ancestry is proven unrelated.
 export function parseHoldsFile(json) {
   assert(json && typeof json === 'object' && !Array.isArray(json), 'Holds file missing');
   assert.equal(json.version, 1, 'Unknown holds-file version');
   assert(json.holds && typeof json.holds === 'object', 'Holds map missing');
   for (const [sha, hold] of Object.entries(json.holds)) {
     assert(SHA_RE.test(sha) && hold && hold.sha === sha && typeof hold.active === 'boolean'
-      && typeof hold.reason === 'string' && typeof hold.setBy === 'string',
+      && typeof hold.reason === 'string' && typeof hold.setBy === 'string'
+      && (hold.blockMerges === undefined || typeof hold.blockMerges === 'boolean'),
       `Malformed hold entry for ${sha}`);
   }
   return json.holds;
+}
+
+// Fresh supported collaborator-permission reads for the logins that
+// actually need standing (marker-carrying reviewers). Best-effort per
+// login: failures resolve to undefined and fail closed downstream
+// (except the pinned owner). Read-only metadata — not new credential
+// access. Returns {login: permission}.
+export async function resolvePermissionsFor({request, logins}) {
+  const permissions = {};
+  for (const login of new Set(logins || [])) {
+    if (typeof login !== 'string' || !login) continue;
+    try {
+      const level = await fetchPermission(request, login);
+      if (typeof level === 'string') permissions[login] = level;
+    } catch {
+      // Inaccessible: fail closed later. Never invent a level.
+    }
+  }
+  return permissions;
+}
+
+export function markerAuthors(reviews, headSha) {
+  return (reviews || []).filter(r => r && typeof r.body === 'string'
+    && r.body.includes(ACCEPT_MARKER) && r.body.includes(headSha))
+    .map(r => r.user).filter(Boolean);
 }

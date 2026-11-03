@@ -4,8 +4,9 @@
     "45c9eb70c8f495a12d378b4e3ca031e47b2e111d": {
       "sha": "45c9eb70c8f495a12d378b4e3ca031e47b2e111d",
       "active": true,
-      "reason": "PR84 release hold pending Peter resolution (seeded with safeguards milestone; requires maintainer confirmation before it is relied on)",
-      "setBy": "safeguards-seed"
+      "reason": "PR84 all-merges-and-deployments hold pending Peter resolution (seeded with safeguards milestone; requires maintainer confirmation before it is relied on)",
+      "setBy": "safeguards-seed",
+      "blockMerges": true
     }
   }
 }
