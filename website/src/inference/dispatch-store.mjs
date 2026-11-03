@@ -43,6 +43,7 @@ import { all, first, rid16 } from '../lib/store.js';
 import { httpError } from '../lib/validate.js';
 import { resourceLiveness } from '../lib/status.mjs';
 import { CONTENT_MAX } from './worker-transport.mjs';
+import { matchDeny } from '../fabric/policy.mjs';
 
 export const ADMISSION_TTL_MS = 10 * 60 * 1000;
 // Per-principal limits. Three independent caps, because one number cannot
@@ -402,7 +403,75 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
     return rows.map((r) => r.model_id);
   }
 
-  async function readGrant({ grant_id } = {}) {
+  // Fabric-backed grants (`fg_*`, committed by the fabric control plane) are
+  // resolved against live persisted state: enforced + unquarantined + active
+  // connection + exporter-held live incarnation + recipient node owned by
+  // the caller + caller in consumers + no matching owner-scoped deny.
+  // Anything else returns null (fail-closed); the coordinator's matchGrant
+  // re-verifies recipient/consumer/action/model/time/route/quota/revision
+  // against the pinned admission. Route is the internal dispatch route:
+  // the fabric transport route ('fixture') lives in a different namespace
+  // and is enforced on the control-plane path, not here.
+  const FABRIC_GRANT_PREFIX = 'fg_';
+  const safeJson = (v, fallback) => {
+    try {
+      const p = typeof v === 'string' ? JSON.parse(v) : v;
+      return p === undefined ? fallback : p;
+    } catch {
+      return fallback;
+    }
+  };
+  const isIso = (v) => typeof v === 'string' && !Number.isNaN(Date.parse(v));
+  async function fabricGrantView({ grant_id, principal_id, resource_id } = {}) {
+    if (!isStr(grant_id) || !isStr(principal_id) || !isStr(resource_id)) return null;
+    const g = await first(db, 'SELECT * FROM fabric_grants WHERE id = ?', grant_id);
+    if (!g || g.status !== 'enforced' || g.quarantine_reason) return null;
+    const conn = await first(db, 'SELECT id, state FROM connections WHERE id = ?', g.connection_id);
+    if (!conn || conn.state !== 'active') return null;
+    const r = await first(db, 'SELECT id, owner_id, incarnation FROM resources WHERE id = ?', resource_id);
+    if (!r || r.owner_id !== g.exporter_id) return null;
+    const snapshot = safeJson(g.snapshot, null);
+    const entry = Array.isArray(snapshot) ? snapshot.find((s) => s && s.resourceId === resource_id) : null;
+    if (!entry || !isStr(entry.incarnation) || entry.incarnation !== r.incarnation) return null;
+    // Recipient binding off persisted ownership (ownNode semantics):
+    // the caller must own the recipient node, whose workspace must match
+    // the grant — strangers get null, never an existence oracle.
+    const node = await first(db, 'SELECT id, workspace FROM fabric_nodes WHERE id = ? AND owner_id = ?',
+      g.recipient_node, principal_id);
+    if (!node || node.workspace !== g.recipient_workspace) return null;
+    const consumers = safeJson(g.consumers, null);
+    if (!Array.isArray(consumers) || !consumers.includes(principal_id)) return null;
+    // Owner-scoped denies only (same shape as authorizationPreview): no
+    // cross-tenant deny bleed, none for a removed resource.
+    const denies = await all(db, `SELECT principal, resource_id AS resourceId, action FROM fabric_denies
+      WHERE owner_id = ? AND (resource_id = ? OR resource_id IS NULL)`, r.owner_id, resource_id);
+    const req = { consumer: principal_id, resourceId: resource_id, action: 'inference' };
+    for (const d of denies) {
+      if (d && matchDeny(req, {
+        principal: d.principal ?? undefined,
+        resourceId: d.resourceId ?? undefined,
+        action: d.action ?? undefined,
+      })) return null;
+    }
+    const rawActions = safeJson(g.actions, null);
+    const models = safeJson(g.models, null);
+    const ceilings = safeJson(g.ceilings, null);
+    if (!Array.isArray(rawActions) || !Array.isArray(models) || !ceilings || typeof ceilings !== 'object') return null;
+    // Action namespace seam: fabric commits the 'infer' verb (preview
+    // terms; "Connection only carries inference"), while the dispatch gate
+    // matches the fixed 'inference' action. Map the known verb; anything
+    // else passes through and is judged by matchGrant.
+    const actions = rawActions.map((a) => (a === 'infer' ? 'inference' : a));
+    if (!Number.isSafeInteger(g.version) || !isIso(g.created_at) || !isIso(g.expiry)) return null;
+    return {
+      id: g.id, status: 'enforced', revoked: false, revision: g.version,
+      recipientNode: g.recipient_node, recipientWorkspace: g.recipient_workspace,
+      consumers, resourceId: r.id, incarnation: r.incarnation,
+      actions, models, notBefore: g.created_at, expiry: g.expiry,
+      ceilings, route: INFERENCE_ROUTE,
+    };
+  }
+  async function readGrant({ grant_id, principal_id, resource_id } = {}) {
     if (!isStr(grant_id)) return null;
     if (isOwnerGrant(grant_id)) {
       const resourceId = grant_id.slice(OWNER_PREFIX.length);
@@ -419,6 +488,9 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
         // instead of surfacing as NO_MATCHING_GRANT here.
         ceilings: { maxTokens: Number.MAX_SAFE_INTEGER }, route: INFERENCE_ROUTE,
       };
+    }
+    if (grant_id.startsWith(FABRIC_GRANT_PREFIX) && grant_id.length > FABRIC_GRANT_PREFIX.length) {
+      return fabricGrantView({ grant_id, principal_id, resource_id });
     }
     const g = await first(db, `SELECT g.*, r.node_id AS live_node_id, r.incarnation AS live_incarnation
       FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.id = ?`, grant_id);
