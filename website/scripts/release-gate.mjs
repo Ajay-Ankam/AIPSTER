@@ -248,11 +248,15 @@ function holdSignalOf(body, headSha) {
 // Deterministic review-state resolution at one head, shared by the merge
 // and deploy paths. Same-head records only: stale other-head history
 // neither blocks nor passes. Per author, oldest to latest: a
-// CHANGES_REQUESTED blocks; only a later same-author APPROVED or an
-// explicit DISMISSED clears it — a plain COMMENTED never does, and a
-// different publisher's PASS never erases another author's block. A
-// structured HOLD block stops the gate until a later same-reviewer
-// APPROVED supersedes it. Proven-absent outsiders have no blocking
+// CHANGES_REQUESTED blocks; only a later same-author APPROVED clears it,
+// or the direct dismissal of that exact review object (dismissal is the
+// current state of one object — a DISMISSED record never clears a
+// different still-unresolved object, even a newer one by the same
+// publisher). A plain COMMENTED never resolves, and a different
+// publisher's PASS never erases another author's block. A structured
+// HOLD block stops the gate until a later same-reviewer APPROVED
+// carrying a valid structured PASS supersedes it — native approval
+// alone never erases a HOLD. Proven-absent outsiders have no blocking
 // power; unknown standing or unattributable/ambiguously-ordered blocking
 // fails closed. Returns {blocked: null | {by, via, reviewId}}.
 export function resolveReviewState({reviews, headSha, permissions}) {
@@ -304,8 +308,18 @@ export function resolveReviewState({reviews, headSha, permissions}) {
       if (r.state === 'CHANGES_REQUESTED') {
         block = {by: r.user, via: 'changes-requested', reviewId: r.id,
           association: r.association};
-      } else if (r.state === 'APPROVED' || r.state === 'DISMISSED') {
-        block = null;
+      } else if (r.state === 'APPROVED') {
+        // Genuine superseding approval clears a native CR outright, but
+        // a structured HOLD needs a valid structured PASS in the
+        // approving record — otherwise the HOLD stands.
+        if (!block || block.via !== 'hold-block'
+          || holdSignalOf(r.body, headSha) === 'clean') {
+          block = null;
+        }
+      } else if (r.state === 'DISMISSED') {
+        // Direct dismissal of the blocking object itself clears it;
+        // an unrelated dismissed object clears nothing.
+        if (block && block.reviewId === r.id) block = null;
       }
       if ((r.state === 'APPROVED' || r.state === 'COMMENTED')
         && holdSignalOf(r.body, headSha) === 'hold') {
@@ -326,15 +340,17 @@ export function resolveReviewState({reviews, headSha, permissions}) {
 }
 
 // A HOLD-bearing record is dead only when a later same-reviewer APPROVED
-// at the same head supersedes it with a non-HOLD body (order decidable
-// and strictly later). Anything else — including a plain COMMENTED —
-// leaves the HOLD in force.
+// at the same head supersedes it with a valid structured PASS body
+// (report/model/tests bound to this head — order decidable and strictly
+// later). A plain native APPROVED, a COMMENTED, a malformed block, or a
+// different reviewer's record leaves the HOLD in force: publisher
+// identity alone is never re-review evidence.
 function holdSuperseded(record, reviews, headSha) {
   for (const q of reviews || []) {
     if (!q || q.user !== record.user || q.commitId !== headSha) continue;
     if (q.state !== 'APPROVED') continue;
     if (compareOrder(record, q) !== -1) continue;
-    if (holdSignalOf(q.body, headSha) !== 'hold') return true;
+    if (holdSignalOf(q.body, headSha) === 'clean') return true;
   }
   return false;
 }
@@ -344,7 +360,8 @@ function holdSuperseded(record, reviews, headSha) {
 // author (the poster may be the maintainer publishing the agent's report —
 // recorded as publisher), evaluated through the shared evidence policy.
 // A structured HOLD still fails closed unless a later same-reviewer
-// APPROVED at this head superseded it (see resolveReviewState).
+// APPROVED carrying a valid structured PASS at this head superseded it
+// (see resolveReviewState): native approval alone never revives old PASS.
 export function bindEvidence({pr, reviews}) {
   assert(pr && typeof pr.author === 'string', 'PR author is required');
   const bound = [];

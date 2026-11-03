@@ -23,14 +23,33 @@ Peter resolves PR84.
   One maintainer suffices; no second-human lockout is added.
 - Acceptance never erases blocking. Same-head review records resolve
   deterministically per author, oldest to latest (`submitted_at`, then
-  review id): a CHANGES_REQUESTED blocks until a later same-author
-  APPROVED or an explicit dismissal clears it — a plain COMMENTED never
-  resolves it, and a different publisher's PASS never erases another
-  author's block. A structured HOLD block stops the gate until a later
-  same-reviewer APPROVED supersedes it. Stale other-head records neither
+  review id), with native state and structured evidence kept distinct:
+  a native CHANGES_REQUESTED blocks until a later same-author APPROVED
+  clears it or that exact review object is dismissed — dismissal is the
+  current state of one object, so a DISMISSED record never clears a
+  different still-unresolved object, even a newer one by the same
+  publisher. A plain COMMENTED never resolves, and a different
+  publisher's PASS never erases another author's block. A structured
+  HOLD block stops the gate until a later same-reviewer APPROVED
+  carrying a valid structured PASS (report/model/tests bound to this
+  head, reviewer distinct from the author) supersedes it — native
+  approval alone never erases a HOLD or revives an older PASS, and
+  publisher identity alone is never re-review evidence (one maintainer
+  may post several agents' reports). Stale other-head records neither
   block nor pass. Proven-absent outsiders have no blocking power;
   unknown standing, unattributable signals, and ambiguous order fail
   closed.
+- Tracked nonblocking limitation (outsider structured-HOLD wedge): the
+  HOLD-block path checks no standing, so any commenter posting a
+  well-formed HOLD block wedges that head's gate — a safe-direction
+  refusal only, never a release, and harder to trigger accidentally
+  than it sounds (exact block schema + head SHA required). This is NOT
+  fixed by the dismissal/supersession corrections above and is NOT
+  expanded into a new permissions scheme here. Recovery limits, honestly:
+  the same commenter posts a superseding clean APPROVED, or the head
+  moves (stale records go inert), or a maintainer dismisses that exact
+  review object on GitHub (direct dismissal clears it). There is no
+  owner override that clears someone else's unresolved review block.
 - HOLD is cumulative over ancestry: a hold on H covers H and descendants
   for DEPLOY, so a later unrelated main commit cannot bypass it. Unknown
   ancestry ⇒ covered. Only a listed maintainer with a reason can clear;

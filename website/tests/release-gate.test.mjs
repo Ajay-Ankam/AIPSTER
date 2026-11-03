@@ -212,6 +212,71 @@ test('proven-absent outsider cannot block; unknown standing blocks closed', () =
     {reviews: [passAt(), outsider()], headSha: HEAD});
   assert.equal(unknown.blocked.by, 'stranger');
 });
+test('dismissal clears only its own review object, not an unrelated blocker', () => {
+  const U10 = '2026-11-03T10:00:00Z';
+  const U11 = '2026-11-03T10:01:00Z';
+  const blocker = {login: 'helper', assoc: 'COLLABORATOR'};
+  const cr10 = normReview({id: 10, user: blocker.login,
+    association: blocker.assoc, state: 'CHANGES_REQUESTED',
+    body: 'needs work ' + HEAD, submittedAt: U10});
+  const dis11 = normReview({id: 11, user: blocker.login,
+    association: blocker.assoc, state: 'DISMISSED', body: '',
+    submittedAt: U11});
+  const perms = {helper: 'admin'};
+  // Distinct later DISMISSED object: the unresolved CR still blocks,
+  // whichever array order the API returns.
+  for (const reviews of [[cr10, dis11], [dis11, cr10]]) {
+    const state = resolveReviewState({reviews, headSha: HEAD,
+      permissions: perms});
+    assert.equal(state.blocked.by, 'helper');
+    assert.equal(state.blocked.reviewId, 10);
+  }
+  assert.throws(() => mergeEligible(
+    gateInput({reviews: [passAt(), cr10, dis11], permissions: perms})),
+  /review 10/);
+  // Negative control: direct dismissal of the blocking object itself
+  // clears it (GitHub flips that review's own state on dismiss).
+  assert.equal(resolveReviewState({reviews: [{...cr10, state: 'DISMISSED'}],
+    headSha: HEAD, permissions: perms}).blocked, null);
+});
+test('plain APPROVED cannot erase a structured HOLD or revive old PASS', () => {
+  const V20 = '2026-11-03T11:00:00Z';
+  const V21 = '2026-11-03T11:01:00Z';
+  const V22 = '2026-11-03T11:02:00Z';
+  const pass20 = normReview({id: 20, submittedAt: V20});
+  const hold21 = normReview({id: 21, state: 'COMMENTED',
+    body: BLOCK.replace('blocking: none', 'blocking: needs-fix'),
+    submittedAt: V21});
+  const plain22 = normReview({id: 22, body: '', submittedAt: V22});
+  const reviews = [pass20, hold21, plain22];
+  const state = resolveReviewState({reviews, headSha: HEAD});
+  assert.equal(state.blocked.via, 'hold-block');
+  assert.equal(state.blocked.reviewId, 21);
+  assert.throws(() => mergeEligible(gateInput({reviews})), /fix plus new/);
+});
+test('fresh structured PASS by a later agent report supersedes a HOLD', () => {
+  const V20 = '2026-11-03T11:00:00Z';
+  const V21 = '2026-11-03T11:01:00Z';
+  const V22 = '2026-11-03T11:02:00Z';
+  const pass20 = normReview({id: 20, submittedAt: V20});
+  const hold21 = normReview({id: 21, state: 'COMMENTED',
+    body: BLOCK.replace('blocking: none', 'blocking: needs-fix'),
+    submittedAt: V21});
+  // Same GitHub publisher posts a different agent's fresh re-review:
+  // valid structured PASS (report/model/tests) at this head.
+  const block2 = ['RELEASE-EVIDENCE', 'reviewer: agent-2',
+    'model: muse-spark-1.3-contributor', 'sha: ' + HEAD, 'verdict: PASS',
+    'report: REVIEW-Y.md', 'tests: 3/3', 'blocking: none',
+    'RELEASE-ACCEPT ' + HEAD].join('\n');
+  const pass22 = normReview({id: 22, body: block2, submittedAt: V22});
+  const reviews = [pass20, hold21, pass22];
+  assert.equal(resolveReviewState({reviews, headSha: HEAD}).blocked, null);
+  assert.equal(mergeEligible(gateInput({reviews})).ok, true);
+  const pr = {author: 'author1', headSha: HEAD,
+    baseRepo: 'synchronic1/AIPSTER'};
+  assert.deepEqual(bindEvidence({pr, reviews}).map((b) => b.reviewId),
+    [20, 22]);
+});
 test('structured HOLD blocks until a later same-reviewer approval', () => {
   const holdBody = BLOCK.replace('blocking: none', 'blocking: needs-fix');
   const hold = normReview({id: 3, state: 'COMMENTED', body: holdBody,
@@ -413,6 +478,30 @@ test('blocking authors get fresh permission lookup in orchestration', async () =
     const {verdict} = await runGateEvaluation({request, n: 86, holds: {}});
     assert.equal(verdict.ok, true);
   }
+});
+test('unrelated dismissal cannot clear a live blocker (merge path)', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T10:00:00Z';
+  const T2 = '2026-11-03T10:01:00Z';
+  const approved = reviewDoc({author_association: 'OWNER',
+    submitted_at: T0});
+  const cr10 = {id: 10, user: {login: 'helper'},
+    author_association: 'COLLABORATOR', state: 'CHANGES_REQUESTED',
+    commit_id: HEAD, body: 'needs work ' + HEAD, submitted_at: T1};
+  const dis11 = {id: 11, user: {login: 'helper'},
+    author_association: 'COLLABORATOR', state: 'DISMISSED', body: '',
+    commit_id: HEAD, submitted_at: T2};
+  const routes = {'pulls/86': prDoc(),
+    'pulls/86/reviews': [approved, cr10, dis11],
+    'pulls/86/files': [{filename: 'website/x.html'}],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    'collaborators/948a/permission': {permission: 'read'},
+    'collaborators/helper/permission': {permission: 'admin'}};
+  const {seen, request} = mockRequest(routes);
+  await assert.rejects(runGateEvaluation({request, n: 86, holds: {}}),
+    /review 10/);
+  assert(seen.some((p) => p.startsWith('collaborators/helper/permission')),
+    'blocker standing must be read, not assumed');
 });
 test('publishHeadStatus uses POST statuses/{sha}', async () => {
   const posts = [];

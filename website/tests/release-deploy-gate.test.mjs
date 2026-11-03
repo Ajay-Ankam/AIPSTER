@@ -119,6 +119,23 @@ test('same-head CHANGES_REQUESTED blocks deploy until same-author approval', asy
     request: resolved.request});
   assert.equal(out.ok, true);
 });
+test('unrelated dismissal cannot clear a live blocker (deploy path)', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T10:00:00Z';
+  const T2 = '2026-11-03T10:01:00Z';
+  const pass = reviewDoc(HEAD1, {submitted_at: T0});
+  const cr10 = reviewDoc(HEAD1, {id: 10, user: {login: 'helper'},
+    author_association: 'COLLABORATOR', state: 'CHANGES_REQUESTED',
+    body: 'needs work', submitted_at: T1});
+  const dis11 = reviewDoc(HEAD1, {id: 11, user: {login: 'helper'},
+    author_association: 'COLLABORATOR', state: 'DISMISSED', body: '',
+    submitted_at: T2});
+  const {request} = mockRequest(baseRoutes({
+    'pulls/90/reviews': [pass, cr10, dis11],
+    'collaborators/helper/permission': {permission: 'admin'}}));
+  await assert.rejects(evaluateDeployGate({...gateInput(), request}),
+    /review 10/);
+});
 test('fork-origin PR merged canonically is releasable', async () => {
   const {request} = mockRequest(baseRoutes({'pulls/90': prDoc(90, HEAD1, true)}));
   const out = await evaluateDeployGate({...gateInput(), request});
