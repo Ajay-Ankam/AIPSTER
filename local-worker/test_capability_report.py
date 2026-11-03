@@ -256,6 +256,24 @@ class SendTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "BAD_CAPABILITIES")
 
 
+def beat_quantized_max_age(interval, target=None, beats=60):
+    """Oldest a snapshot gets when reports ride successful beats.
+
+    A report goes out on the first successful beat at or after each
+    deadline; with no explicit target the sender's own scheduler
+    (pairing.capability_period) sets the deadline.
+    """
+    if target is None:
+        target = pairing.capability_period(interval)
+    last, deadline, worst = 0.0, 0.0, 0.0
+    for n in range(1, beats + 1):
+        beat = n * interval
+        if beat >= deadline:
+            worst = max(worst, beat - last)
+            last, deadline = beat, beat + target
+    return worst
+
+
 class SenderIntegrationTests(unittest.TestCase):
     """The opt-in report rides the heartbeat sender without ever hurting it."""
 
@@ -322,18 +340,50 @@ class SenderIntegrationTests(unittest.TestCase):
 
     def test_step_schedules_retry_and_cadence(self):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            self.assertEqual(pairing.report_capabilities_step(self.meta, None, self.data),
+            self.assertEqual(pairing.report_capabilities_step(self.meta, None, self.data, 60),
                              pairing.CAPABILITY_INTERVAL_SEC)
             self.api.caps_plan.append((429, {"error": "soon", "code": "CAPABILITIES_TOO_SOON"}, 5))
-            self.assertEqual(pairing.report_capabilities_step(self.meta, None, self.data),
+            self.assertEqual(pairing.report_capabilities_step(self.meta, None, self.data, 60),
                              pairing.HEARTBEAT_MIN_INTERVAL_SEC)
             self.api.caps_plan.append((503, {"error": "down", "code": "UNAVAILABLE"}, None))
-            self.assertEqual(pairing.report_capabilities_step(self.meta, None, self.data),
+            self.assertEqual(pairing.report_capabilities_step(self.meta, None, self.data, 60),
                              pairing.CAPABILITY_RETRY_SEC)
+
+    def test_step_quantizes_the_cadence_to_the_beat_grid(self):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(pairing.report_capabilities_step(self.meta, None, self.data, 110), 220)
+            self.assertEqual(pairing.report_capabilities_step(self.meta, None, self.data, 150), 150)
+
+    def test_period_targets_the_latest_beat_inside_the_window(self):
+        self.assertEqual(pairing.capability_period(60), 240)
+        self.assertEqual(pairing.capability_period(30), 240)
+        self.assertEqual(pairing.capability_period(110), 220)
+        self.assertEqual(pairing.capability_period(150), 150)
+        self.assertEqual(pairing.capability_period(240), 240)
+
+    def test_coarse_beats_report_best_effort_and_are_unsupported(self):
+        self.assertTrue(pairing.interval_supports_freshness(240))
+        self.assertFalse(pairing.interval_supports_freshness(241))
+        # Past the target no beat lands inside the window: report on the
+        # next beat anyway rather than silently holding a stale snapshot.
+        self.assertEqual(pairing.capability_period(300), 300)
 
     def test_cadence_stays_inside_the_catalog_freshness_window(self):
         # estimate.mjs TELEMETRY_FRESH_MS is 300s; a report must land before it.
         self.assertLessEqual(pairing.CAPABILITY_INTERVAL_SEC + pairing.HEARTBEAT_INTERVAL_SEC, 300)
+
+    def test_110s_interval_report_stays_fresh(self):
+        # Review follow-up: reports ride successful beats, so a fixed 240s
+        # target overshoots to 330s on 110s beats — 30s past the 300s
+        # catalog freshness window. The scheduler quantizes the deadline
+        # to the beat grid instead (110s beats report every 220s).
+        self.assertLessEqual(beat_quantized_max_age(110), 240)
+
+    def test_every_supported_interval_holds_the_freshness_window(self):
+        for interval in range(pairing.HEARTBEAT_MIN_INTERVAL_SEC, 241):
+            self.assertLessEqual(
+                beat_quantized_max_age(interval), 240,
+                f"beat interval {interval}s lets a snapshot go stale")
 
     def test_output_never_contains_the_key(self):
         _, out, err = self.run_once(report_capabilities=True)
