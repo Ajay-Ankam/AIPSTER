@@ -1,8 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {assertNoCodeFetch, autoDeployReady, bindEvidence, fetchAssociatedPRs,
+import {assertNoCodeFetch, bindEvidence, fetchAssociatedPRs,
   fetchPR, fetchPRFiles, fetchPermission, fetchReviews, holdRelationTo,
-  manualDeployReady, mergeEligible, parseEvidenceBlock, parseHoldsFile,
+  mergeEligible, parseEvidenceBlock, parseHoldsFile,
   requireCheckPass, resolveAcceptance, resolveMaintainer} from '../scripts/release-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -66,9 +66,21 @@ test('evidence block parses; bare SHA mention is not evidence', () => {
   assert.equal(parseEvidenceBlock('looks good ' + HEAD, HEAD), null);
   assert.equal(parseEvidenceBlock(null, HEAD), null);
 });
+test('stale blocks are skipped, malformed shapes fail', () => {
+  const stale = BLOCK.split(HEAD).join(OTHER);
+  assert.equal(parseEvidenceBlock(stale, HEAD), null);
+  const pr = {author: 'author1', headSha: HEAD, baseRepo: 'synchronic1/AIPSTER'};
+  const fresh = {id: 2, user: '948a', association: 'OWNER', state: 'APPROVED',
+    commitId: HEAD, body: BLOCK};
+  const old = {id: 1, user: '948a', association: 'OWNER', state: 'APPROVED',
+    commitId: OTHER, body: stale};
+  const bound = bindEvidence({pr, reviews: [old, fresh]});
+  assert.equal(bound.length, 1);
+  assert.equal(bound[0].reviewId, 2);
+});
 test('malformed blocks fail closed', () => {
   assert.throws(() => parseEvidenceBlock('RELEASE-EVIDENCE\nreviewer: x', HEAD), /missing/);
-  assert.throws(() => parseEvidenceBlock(BLOCK.replace(HEAD, OTHER), HEAD), /different head/);
+  assert.equal(parseEvidenceBlock(BLOCK.replace(HEAD, OTHER), HEAD), null); // stale ⇒ skip
   assert.throws(() => parseEvidenceBlock(BLOCK.replace('muse-spark-1.3-contributor', 'human'), HEAD), /model/);
   assert.throws(() => parseEvidenceBlock(BLOCK.replace('22/22', '20/22'), HEAD), /unanimously/);
   assert.throws(() => parseEvidenceBlock(BLOCK.replace('blocking: none', 'blocking: B1 accepted'), HEAD), /fix plus new/);
@@ -110,6 +122,21 @@ test('acceptance needs standing plus marker at this head', () => {
     {reviews: [normReview({body: BLOCK})], headSha: HEAD}), null); // marker edited away
   assert.deepEqual(resolveAcceptance({reviews: [], headSha: HEAD,
     dispatchActor: 'synchronic1'}), {by: 'synchronic1', via: 'dispatch'});
+  // No caller-asserted standing boolean exists: unknown association + no
+  // permission + non-owner login resolves to null, never to manufactured standing.
+  assert.equal(resolveAcceptance({reviews: [], headSha: HEAD,
+    dispatchActor: 'stranger'}), null);
+  assert.equal(resolveAcceptance({reviews: [], headSha: HEAD,
+    dispatchActor: 'stranger', dispatchActorStanding: true}), null);
+});
+test('worker-applicable heads also require installer CI', () => {
+  const installer = {id: 12, name: 'Build and qualify Windows installer',
+    head_sha: HEAD, status: 'completed', conclusion: 'success',
+    app: {slug: 'github-actions'}};
+  assert.throws(() => mergeEligible(gateInput({workerApplicable: true,
+    checks: [siteCheck(), workerCheck()]})), /installer/i);
+  assert.equal(mergeEligible(gateInput({workerApplicable: true,
+    checks: [siteCheck(), workerCheck(), installer]})).ok, true);
 });
 
 // reader shapes + bounded pagination + SHA asserts
@@ -171,55 +198,15 @@ test('CI provenance: latest wins, third-party and wrong-SHA runs do not count', 
   assert.throws(() => mergeEligible(gateInput(
     {checks: [siteCheck({head_sha: OTHER})]})), /passing/);
   assert.throws(() => mergeEligible(gateInput({workerApplicable: true})), /worker-covered/);
-  assert.equal(mergeEligible(gateInput({workerApplicable: true,
-    checks: [siteCheck(), workerCheck()]})).ok, true);
+  assert.equal(mergeEligible(gateInput({workerApplicable: false,
+    checks: [siteCheck()]})).ok, true);
 });
 test('malformed head SHA fails at the boundary', () => {
   assert.throws(() => mergeEligible(gateInput({headSha: 'zzz'})), /exact 40-hex/);
 });
 
-// production paths split reviewed head from release SHA
-function deployInput(over = {}) {
-  return {...gateInput(), reviewedHeadSha: HEAD, releaseSha: NEXT,
-    recheckedMainSha: NEXT, ancestryToMain: 'self',
-    associatedPRs: [{state: 'closed', merged_at: '2026-11-03T00:00:00Z',
-      merge_commit_sha: NEXT, base: {ref: 'main',
-        repo: {full_name: 'synchronic1/AIPSTER'}}}],
-    checks: [siteCheck({head_sha: NEXT, id: 11})], ...over};
-}
-test('auto: fork-origin merged PR is releasable once merged canonically', () => {
-  const forkPr = {...deployInput().pr, headRepo: 'someone/AIPSTER'};
-  const out = autoDeployReady(deployInput({pr: forkPr}));
-  assert.equal(out.reviewedHead, HEAD);
-  assert.equal(out.release, NEXT);
-});
-test('auto: moved main, missing association, held ancestry refused', () => {
-  assert.throws(() => autoDeployReady(deployInput({recheckedMainSha: OTHER})),
-    /rechecked main/);
-  assert.throws(() => autoDeployReady(deployInput({associatedPRs: []})),
-    /merged to canonical main/);
-  assert.throws(() => autoDeployReady(deployInput({ancestryToMain: 'unknown'})),
-    /ancestry/);
-  const holdMap = {[HOLD_SHA]: {sha: HOLD_SHA, active: true, reason: 'PR84 hold', setBy: 's'}};
-  assert.throws(() => autoDeployReady(deployInput({holdMap, holdRelation: 'descendant'})),
-    /HOLD active/);
-  const out = autoDeployReady(deployInput());
-  assert.equal(out.ok, true);
-  assert.match(out.residualRace, /expires/);
-});
-test('manual: no bypass without evidence; older SHA is not a rollback', () => {
-  assert.throws(() => manualDeployReady({...deployInput(), headSha: HEAD,
-    reviews: [], reviewedHeadSha: HEAD}), /bound to the current head/);
-  const independent = [{id: 2, user: 'agent2', association: 'COLLABORATOR',
-    state: 'COMMENTED', commitId: HEAD,
-    body: BLOCK.replace('reviewer: 948a', 'reviewer: agent2')}];
-  const out = manualDeployReady({...deployInput(), reviews: independent,
-    releaseSha: NEXT, recheckedMainSha: NEXT,
-    dispatchActor: 'synchronic1'});
-  assert.equal(out.via, 'dispatch');
-  assert.throws(() => manualDeployReady(deployInput({releaseSha: OTHER,
-    recheckedMainSha: NEXT})), /rechecked main tip/);
-});
+// single-head production primitives were removed: deployment runs through
+// evaluateDeployGate (release-deploy-gate.mjs), covered by its own suite.
 test('auth/API failure fails closed', async () => {
   const {request} = mockRequest({}, ['pulls/86']);
   await assert.rejects(fetchPR(request, 86), /401/);

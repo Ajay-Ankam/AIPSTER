@@ -51,20 +51,31 @@ recorded distinctly from independent review.
 
 ## Gate wiring (implemented, advisory until installed)
 
-- `.github/workflows/release-gate.yml` (new): `pull_request_target`
-  (base workflow version — a PR cannot alter these steps) plus
-  `pull_request_review` refresh runs, no path filter. Checks out the base
-  ref explicitly, evaluates the head from API metadata only, and fails the
-  `release-gate` job with reasons. Review-triggered runs are refresh-only
-  (their YAML is PR-versioned — documented limitation); enforcement rests
-  on target runs plus the deploy-time gate. No status-write permission
-  exists or is needed — the job conclusion IS the check.
+- `.github/workflows/release-gate.yml` (new): enforcement job
+  `release-gate` runs ONLY on `pull_request_target` (base workflow
+  version — a PR cannot alter these steps); refresh job
+  `release-gate-refresh` runs on `pull_request_review` and is never a
+  required context, so a hostile YAML edit can never satisfy it. Both
+  check out the base ref explicitly and evaluate the head from API
+  metadata only. Stale evidence blocks are skipped (superseded without
+  deleting history); malformed data fails closed. Worker-applicable heads
+  additionally require installer CI at the PR head. Review-triggered runs
+  are refresh-only (their YAML is PR-versioned — documented limitation);
+  enforcement rests on target runs plus the deploy-time gate. No
+  status-write permission exists or is needed — job conclusions ARE the
+  checks. Unresolved live check: confirm the target-run `release-gate`
+  context attaches to the PR head on first live run (see RESULT).
 - Deploy workflow step (authorized current-workflow edit, one step):
   `public-site-production-deploy.yml` runs
   `website/scripts/release-deploy-gate.mjs` after preflight and before
-  deploy. It evaluates EVERY merge in live..target (evidence on each PR's
-  own head, second-parent integration proof, trusted holds file,
-  merged-main CI) in both modes. A refusal fails the job before deploy.
+  deploy. It inspects the ENTIRE first-parent live..target range: merges
+  get evidence on each PR's own head + second-parent integration proof;
+  regular (direct/squash/rebase) commits release only when contained in a
+  merge's second-parent history, else fail closed (no merge method is
+  disabled). Trusted holds file, merged-main CI (site + worker/installer
+  conditionality) in both modes. Git exit codes are honest (exit 1 =
+  proven non-ancestry; anything else throws). A refusal fails the job
+  before deploy.
 - `.github/release-holds.json` (new, seeded): versioned holds map read
   from the trusted release checkout. The seed carries the PR84 hold on
   `45c9eb7…` — seeded state requiring maintainer confirmation (RESULT).
@@ -109,14 +120,18 @@ re-verify `actor_id` at apply time):
       "require_last_push_approval": false,
       "required_review_thread_resolution": false}}
   ],
-  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]
+  "bypass_actors": []
 }
 ```
-Notes: `required_approving_review_count: 0` + admin-role bypass keep the
-sole maintainer recoverable (no lockout). `actor_id 5` = admin role per
-docs example — re-confirm at apply time. Bootstrap order (no nonexistent
-check required): merge the gate workflow → let it run once on a PR so
-the `release-gate` context exists → then install the ruleset.
+Notes: `required_approving_review_count: 0` keeps the sole maintainer
+recoverable (no lockout) with no bypass inventiveness — no `actor_id`
+is proposed here because the docs do not pin role IDs; resolve the admin
+role live at apply time (`GET` the ruleset suite / role endpoints first)
+and record the exact value in the apply receipt. Never paste an
+unverified numeric ID. Bootstrap order (no nonexistent check required):
+merge the gate workflow → let `release-gate` run once on a PR so the
+context exists (confirm it attaches to the PR head — unresolved live
+check, see RESULT) → then install the ruleset.
 Environment `production`: confirm single-maintainer reviewer, no second
 human. Security-sensitive hygiene for any privileged gate change:
 `persist-credentials: false`, read-only token, pinned SHAs, no

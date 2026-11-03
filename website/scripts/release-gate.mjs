@@ -32,7 +32,8 @@ import {CANONICAL_REPO, MAIN_CHECK_NAME, WORKER_CHECK_NAME,
   fetchAllCheckRuns, isWorkerApplicable} from './release-preflight.mjs';
 import {evaluateReviewEvidence, holdCovers} from './release-hold.mjs';
 
-export const GATE_VERSION = 'aipster-release-gate/2';
+export const GATE_VERSION = 'aipster-release-gate/3';
+export const INSTALLER_CHECK_NAME = 'Build and qualify Windows installer';
 // Pinned verified repository owner (live-confirmed 2026-11-03: sole
 // collaborator). Owner acceptance needs no further proof; everything else
 // needs OWNER association or endpoint-proven admin/maintain.
@@ -183,7 +184,10 @@ export function parseEvidenceBlock(body, headSha) {
   if (!reviewer || !model || !sha || !verdict || !report || !tests || !blocking) {
     fail('missing reviewer/model/sha/verdict/report/tests/blocking');
   }
-  if (sha !== headSha) fail('evidence names a different head');
+  // Stale evidence is SKIPPED (null), never fatal: after a head move, old
+  // reviews stay in history while fresh evidence supersedes them. Only a
+  // well-formed block for THIS head can bind; malformed shape still throws.
+  if (sha !== headSha) return null;
   if (/^(human|github-approval|n\/a)$/i.test(model)) fail('model must name the reviewing agent');
   const tm = tests.match(/^(\d+)\/(\d+)$/);
   if (!tm || !(Number(tm[2]) > 0) || tm[1] !== tm[2]) fail('tests must read passed/total unanimously');
@@ -227,7 +231,7 @@ export function bindEvidence({pr, reviews}) {
 // mismatch), revoked (dismissed), or edited (marker gone) acceptances do
 // not resolve. Caller strings alone never suffice.
 export function resolveAcceptance({reviews, headSha, permissions, dispatchActor,
-  dispatchActorStanding}) {
+  dispatchActorAssociation}) {
   assertSha(headSha, 'Head SHA');
   for (const r of reviews || []) {
     if ((r.state === 'APPROVED' || r.state === 'COMMENTED')
@@ -238,34 +242,39 @@ export function resolveAcceptance({reviews, headSha, permissions, dispatchActor,
       return {by: r.user, via: 'review', reviewId: r.id};
     }
   }
-  if (dispatchActor && (dispatchActorStanding === true || resolveMaintainer({
-    login: dispatchActor, association: null,
-    permission: permissions?.[dispatchActor]}).maintainer)) {
+  // Dispatch-actor standing is resolved from supported metadata only: the
+  // pinned owner, OWNER association passed through from the event record,
+  // or an endpoint-proven permission in the map. There is no boolean
+  // parameter — standing can never be caller-asserted.
+  if (dispatchActor && resolveMaintainer({login: dispatchActor,
+    association: dispatchActorAssociation || null,
+    permission: permissions?.[dispatchActor]}).maintainer) {
     return {by: dispatchActor, via: 'dispatch'};
   }
   return null;
 }
 
 function commonGates({pr, reviews, permissions, dispatchActor,
-  dispatchActorStanding, holdMap, holdRelation, checks, workerApplicable, headSha, ciSha}) {
-  // Evidence binds the reviewed head; CI validates the release SHA (for a
-  // merged release these differ — ordinary merges must not fail). Callers
-  // that release a merge pass ciSha: releaseSha; merge checks its own head.
+  dispatchActorAssociation, holdMap, holdRelation, checks, workerApplicable, headSha}) {
   assertSha(headSha, 'Head SHA');
   assert(pr.baseRef === 'main' && pr.baseRepo === CANONICAL_REPO,
     'Only PRs against canonical main are eligible');
   const evidence = bindEvidence({pr, reviews});
   const acceptance = resolveAcceptance({reviews, headSha, permissions,
-    dispatchActor, dispatchActorStanding});
+    dispatchActor, dispatchActorAssociation});
   assert(acceptance, 'No maintainer acceptance for this head (author prose is not acceptance)');
   const hold = holdCovers(holdMap, headSha, holdRelation);
   assert(!hold.covered,
     `Release HOLD active: ${hold.holds.map(h => h.sha + ' (' + h.reason + ')').join(', ')}`);
-  const ci = ciSha || headSha;
-  requireCheckPass(checks, MAIN_CHECK_NAME, ci, 'This release');
+  requireCheckPass(checks, MAIN_CHECK_NAME, headSha, 'This head');
   if (workerApplicable) {
-    requireCheckPass(checks, WORKER_CHECK_NAME, ci,
-      'This release touches worker-covered paths, so');
+    // Worker changes additionally require worker + installer CI at the
+    // PR head: no installer pass means no worker merge. Deployment
+    // validates merged-main CI at the target through evaluateDeployGate.
+    requireCheckPass(checks, WORKER_CHECK_NAME, headSha,
+      'This head touches worker-covered paths, so');
+    requireCheckPass(checks, INSTALLER_CHECK_NAME, headSha,
+      'This head touches worker-covered paths, so its');
   }
   return {evidence: evidence.length, acceptance};
 }
@@ -279,54 +288,17 @@ export function mergeEligible(input) {
     independentEvidence: evidence, acceptedBy: acceptance.by, via: acceptance.via};
 }
 
-export function mergedAssociation(associatedPRs, headSha) {
-  return (associatedPRs || []).some(pr => pr && pr.state === 'closed'
-    && pr.merged_at && pr.merge_commit_sha === headSha
-    && pr.base?.ref === 'main' && pr.base?.repo?.full_name === CANONICAL_REPO);
-}
+// Production runs through evaluateDeployGate (release-deploy-gate.mjs),
+// which binds each included PR's evidence to its own head, proves merge
+// integration via second-parent, and validates holds plus merged-main CI
+// at the target. The earlier single-head auto/manual primitives were
+// removed here so tests cannot pass against an unwired path.
+// (Manual dispatch can only ever release the rechecked canonical main tip:
+// dispatching an older known-good SHA is NOT a supported rollback path —
+// recovery ships a new restoring head through the same gate.)
 
-// Production decisions split reviewed head from release SHA: evidence binds
-// the reviewed PR head, while main-equality, association, holds, and CI
-// validate the merged-main release SHA. A fork-origin PR merged to trusted
-// canonical main is therefore releasable once merged — fork origin alone
-// never refuses forever; the canonical merge source is what is validated.
-export function autoDeployReady(input) {
-  const {pr, reviewedHeadSha, releaseSha, recheckedMainSha, ancestryToMain,
-    associatedPRs} = input;
-  assertSha(reviewedHeadSha, 'Reviewed head SHA');
-  assertSha(releaseSha, 'Release SHA');
-  assertSha(recheckedMainSha, 'Rechecked main SHA');
-  assert.equal(releaseSha, recheckedMainSha, 'Release is not the rechecked main revision');
-  assert(ancestryToMain === 'self' || ancestryToMain === 'descendant',
-    'Release ancestry to the release line must be proven (fail closed)');
-  assert(mergedAssociation(associatedPRs, releaseSha),
-    'No pull request merged to canonical main for this exact release');
-  const {evidence, acceptance} = commonGates({...input, headSha: reviewedHeadSha, ciSha: releaseSha});
-  return {ok: true, question: 'auto-deploy', reviewedHead: reviewedHeadSha,
-    release: releaseSha, independentEvidence: evidence,
-    acceptedBy: acceptance.by, via: acceptance.via,
-    residualRace: 'Recheck main immediately before the irreversible step; this verdict expires on any new main commit.'};
-}
-
-export function manualDeployReady(input) {
-  const {releaseSha, recheckedMainSha, ancestryToMain} = input;
-  // Manual dispatch can only ever release the rechecked canonical main tip:
-  // dispatching an older known-good SHA is NOT a supported rollback path
-  // (preflight requires target == current main), so no bypass exists here.
-  // Recovery ships a new restoring head through this same gate instead.
-  assertSha(releaseSha, 'Release SHA');
-  assertSha(recheckedMainSha, 'Rechecked main SHA');
-  assert.equal(releaseSha, recheckedMainSha, 'Manual release must name the rechecked main tip');
-  assert(ancestryToMain === 'self' || ancestryToMain === 'descendant',
-    'Release ancestry to the release line must be proven (fail closed)');
-  const {evidence, acceptance} = commonGates({...input, headSha: input.reviewedHeadSha, ciSha: releaseSha});
-  return {ok: true, question: 'manual-deploy', reviewedHead: input.reviewedHeadSha,
-    release: releaseSha, independentEvidence: evidence,
-    acceptedBy: acceptance.by, via: acceptance.via,
-    residualRace: 'Recheck main immediately before the irreversible step; this verdict expires on any new main commit.'};
-}
-
-// Holds file read from the TRUSTED BASE checkout (never the head).
+// Holds file read from a trusted canonical-main checkout (base checkout
+// for the merge gate, release-tip checkout for deploy — never a PR head).
 // Shape: {version: 1, holds: {sha: {sha, active, reason, setBy, at?}}}.
 export function parseHoldsFile(json) {
   assert(json && typeof json === 'object' && !Array.isArray(json), 'Holds file missing');

@@ -1,6 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {evaluateDeployGate} from '../scripts/release-deploy-gate.mjs';
+import {execFileSync} from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {evaluateDeployGate, realGit} from '../scripts/release-deploy-gate.mjs';
 
 const LIVE = 'e'.repeat(40);
 const TARGET = 'f'.repeat(40);
@@ -52,8 +56,8 @@ function baseRoutes(over = {}) {
     'pulls/91/reviews': [reviewDoc(HEAD2)],
     [`commits/${TARGET}/check-runs`]: {check_runs: [siteCheck(TARGET)]}, ...over};
 }
-const git = (over = {}) => ({mergesInRange: () => [MERGE1, MERGE2],
-  secondParent: (m) => (m === MERGE1 ? HEAD1 : HEAD2),
+const git = (over = {}) => ({commitsInRange: () => [MERGE2, MERGE1],
+  secondParent: (m) => (m === MERGE1 ? HEAD1 : (m === MERGE2 ? HEAD2 : null)),
   isAncestor: () => false,
   changedFiles: () => ['website/public/index.html'], ...over});
 function gateInput(over = {}) {
@@ -65,7 +69,7 @@ function gateInput(over = {}) {
 test('happy path evaluates every included PR', async () => {
   const out = await evaluateDeployGate(gateInput());
   assert.equal(out.ok, true);
-  assert.deepEqual(out.prs.map(p => p.number), [90, 91]);
+  assert.deepEqual(out.prs.map(p => p.number), [91, 90]); // newest-first range order
   assert.equal(out.prs[0].acceptedBy, '948a');
 });
 test('fork-origin PR merged canonically is releasable', async () => {
@@ -77,10 +81,11 @@ test('unassociated merge fails closed', async () => {
   const {request} = mockRequest(baseRoutes({[`commits/${MERGE1}/pulls`]: []}));
   await assert.rejects(evaluateDeployGate({...gateInput(), request}), /no associated pull request/);
 });
-test('evidence on the wrong head fails', async () => {
+test('evidence on the wrong head binds nothing', async () => {
   const {request} = mockRequest(baseRoutes(
     {'pulls/90/reviews': [reviewDoc(HEAD2)]}));
-  await assert.rejects(evaluateDeployGate({...gateInput(), request}), /different head/);
+  await assert.rejects(evaluateDeployGate({...gateInput(), request}),
+    /No independent review evidence bound/);
 });
 test('second-parent mismatch fails integration proof', async () => {
   const badGit = git({secondParent: () => HEAD2});
@@ -117,13 +122,59 @@ test('already-live is a noop; manual dispatch actor accepted', async () => {
   const {request} = mockRequest(noMarker);
   const manual = await evaluateDeployGate({...gateInput(), request,
     mode: 'manual', dispatchActor: 'synchronic1'});
-  assert.equal(manual.prs[0].via, 'dispatch');
+  assert.equal(manual.prs.find(p => p.number === 90).via, 'dispatch');
   await assert.rejects(evaluateDeployGate({...gateInput(), request, mode: 'manual'}),
     /No maintainer acceptance/);
 });
+test('squash-mixed range fails on unbound direct content', async () => {
+  const S = 'e'.repeat(40).replace(/e/g, '9');
+  const mixed = git({commitsInRange: () => [MERGE2, S, MERGE1],
+    isAncestor: () => false});
+  await assert.rejects(evaluateDeployGate({...gateInput(), git: mixed}),
+    /Unbound mainline commit/);
+  const bound = git({commitsInRange: () => [MERGE2, S, MERGE1],
+    isAncestor: (a) => a === S});
+  const out = await evaluateDeployGate({...gateInput(), git: bound});
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.covered, [{sha: S, merge: MERGE2}]);
+});
+test('realGit on a tiny repo: first-parent range, exit codes, unknown throws', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-'));
+  const sh = (...args) => execFileSync('git', args, {cwd: dir, encoding: 'utf8'}).trim();
+  sh('init', '-q');
+  sh('config', 'user.email', 't@t');
+  sh('config', 'user.name', 't');
+  sh('checkout', '-qb', 'main');
+  fs.writeFileSync(path.join(dir, 'base.txt'), 'base');
+  sh('add', 'base.txt');
+  sh('commit', '-qm', 'M0');
+  const M0 = sh('rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(dir, 's.txt'), 'direct');
+  sh('add', 's.txt');
+  sh('commit', '-qm', 'direct-to-main');
+  const S = sh('rev-parse', 'HEAD');
+  sh('checkout', '-qb', 'pr');
+  fs.writeFileSync(path.join(dir, 'f.txt'), 'feat');
+  sh('add', 'f.txt');
+  sh('commit', '-qm', 'PR head');
+  const H = sh('rev-parse', 'HEAD');
+  sh('checkout', '-q', 'main');
+  sh('merge', '--no-ff', '-m', 'Merge PR', 'pr');
+  const M2 = sh('rev-parse', 'HEAD');
+  const g = realGit(dir);
+  assert.deepEqual(g.commitsInRange(M0, M2), [M2, S]);
+  assert.equal(g.secondParent(M2), H);
+  assert.equal(g.secondParent(S), null);
+  assert.equal(g.isAncestor(M0, M2), true);
+  assert.equal(g.isAncestor(H, M0), false); // genuine exit 1
+  assert.throws(() => g.isAncestor(M0, '0'.repeat(40)), /Ancestry unknown/); // exit 128
+});
 test('git and API failures fail closed', async () => {
-  const badGit = git({mergesInRange: () => { throw new Error('git gone'); }});
+  const badGit = git({commitsInRange: () => { throw new Error('git gone'); }});
   await assert.rejects(evaluateDeployGate({...gateInput(), git: badGit}), /git gone/);
-  const {request} = mockRequest({[`commits/${MERGE1}/pulls`]: [assoc(90)]}, ['pulls/90']);
+  const {request} = mockRequest({[`commits/${MERGE2}/pulls`]: [assoc(91)],
+    [`commits/${MERGE1}/pulls`]: [assoc(90)],
+    'pulls/91': prDoc(91, HEAD2),
+    'pulls/91/reviews': [reviewDoc(HEAD2)]}, ['pulls/90']);
   await assert.rejects(evaluateDeployGate({...gateInput(), request}), /401/);
 });

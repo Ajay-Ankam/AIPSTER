@@ -28,12 +28,25 @@ export async function evaluateDeployGate({git, request, fetchChecks,
   assert(mode === 'auto' || mode === 'manual', 'Mode must be auto or manual');
   if (liveSha === targetSha) return {ok: true, noop: 'already-live'};
   assert(holds && typeof holds === 'object', 'Trusted holds map is required');
-  const merges = git.mergesInRange(liveSha, targetSha);
-  assert(Array.isArray(merges) && merges.length > 0,
-    'No merge commits in range: unassociated main pushes cannot release');
+  // Entire first-parent live..target range: merge commits AND direct
+  // commits are all inspected. A regular (non-merge) commit — direct
+  // push, squash, or rebase content — releases ONLY when rigorously bound:
+  // contained in an enumerated merge's second-parent history. Anything
+  // else fails closed. No merge method is disabled; unbound content simply
+  // cannot release.
+  const range = git.commitsInRange(liveSha, targetSha);
+  assert(Array.isArray(range) && range.length > 0,
+    'Empty range without equality: refetch main (fail closed)');
+  const merges = [];
+  const regulars = [];
+  for (const sha of range) {
+    assert(SHA_RE.test(sha || ''), 'Range returned a non-SHA');
+    if (git.secondParent(sha) === null) regulars.push(sha);
+    else merges.push(sha);
+  }
+  const roots = new Map();
   const evaluated = [];
   for (const merge of merges) {
-    assert(SHA_RE.test(merge || ''), 'Merge range returned a non-SHA');
     const associated = await fetchAssociatedPRs(request, merge);
     assert(associated.length > 0,
       `Merge ${merge} has no associated pull request to canonical main`);
@@ -47,6 +60,7 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       const second = git.secondParent(merge);
       assert(second === pr.headSha,
         `Merge ${merge} does not integrate reviewed head ${pr.headSha}`);
+      roots.set(merge, second);
       const acceptance = resolveAcceptance({reviews: reviews,
         headSha: pr.headSha, permissions, dispatchActor,
         dispatchActorAssociation});
@@ -55,6 +69,17 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       evaluated.push({merge, number: pr.number, head: pr.headSha,
         evidence: evidence.length, acceptedBy: acceptance.by, via: acceptance.via});
     }
+  }
+  assert(evaluated.length > 0,
+    'No merge with bound PR evidence in range: unassociated main pushes cannot release');
+  const coveredBy = [];
+  for (const sha of regulars) {
+    let bound = false;
+    for (const [merge, root] of roots) {
+      if (git.isAncestor(sha, root)) { bound = true; coveredBy.push({sha, merge}); break; }
+    }
+    assert(bound,
+      `Unbound mainline commit ${sha}: direct/squash/rebase content with no reviewed PR merge cannot release`);
   }
   // Fresh trusted hold governs before any production step: any active hold
   // on an ancestor-or-self of the target (proven by git, never assumed)
@@ -75,14 +100,21 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       'The release touches worker-covered paths, so');
   }
   return {ok: true, mode, live: liveSha, target: targetSha, prs: evaluated,
+    covered: coveredBy,
     residualRace: 'Recheck main immediately before the irreversible step.'};
 }
 
-function realGit(cwd) {
+// Real git wrapper (exported for offline testing on tiny repositories).
+// Exit codes are HONEST: merge-base exit 1 means proven non-ancestry and
+// returns false; any other failure (missing objects, corruption —
+// typically exit 128) THROWS so unknown git outcomes fail closed and a
+// hold can never vanish on a read error. rev-parse ^2 on a non-merge
+// commit fails and yields null, which marks the commit as regular.
+export function realGit(cwd) {
   const run = (args) => execFileSync('git', args, {cwd, encoding: 'utf8'}).trim();
   return {
-    mergesInRange: (live, target) =>
-      run(['log', '--format=%H', '--merges', `${live}..${target}`])
+    commitsInRange: (live, target) =>
+      run(['log', '--format=%H', '--first-parent', `${live}..${target}`])
         .split('\n').map(s => s.trim()).filter(Boolean),
     secondParent: (merge) => {
       try {
@@ -95,8 +127,9 @@ function realGit(cwd) {
       try {
         execFileSync('git', ['merge-base', '--is-ancestor', a, b], {cwd});
         return true;
-      } catch {
-        return false;
+      } catch (e) {
+        if (e && e.status === 1) return false;
+        throw new Error(`Ancestry unknown for ${a}..${b}: git exit ${e && e.status}`);
       }
     },
     changedFiles: (live, target) =>
