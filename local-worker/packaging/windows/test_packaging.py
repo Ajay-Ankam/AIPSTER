@@ -1351,7 +1351,11 @@ class IconLoadTests(unittest.TestCase):
             exe.write_bytes(b"fake")
             with patch.object(sys, "frozen", True, create=True), \
                     patch.object(sys, "executable", str(exe)):
-                self.assertEqual(first.bundle_dir(), Path(temp))
+                # bundle_dir() resolves sys.executable, which canonicalizes an
+                # 8.3 short temp path (RUNNER~1 -> runneradmin) on CI runners.
+                # Compare resolved forms so the assertion tests the parent
+                # directory, not the name spelling of TMP.
+                self.assertEqual(first.bundle_dir(), Path(temp).resolve())
             with patch.object(sys, "frozen", False, create=True):
                 dev = first.bundle_dir()
             self.assertEqual(dev.name, "windows")
