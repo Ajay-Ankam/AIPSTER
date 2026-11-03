@@ -380,6 +380,16 @@ async function catalogSnapshot(db, nodeId) {
   return { snapshot, ageMs: Number.isFinite(ageMs) ? ageMs : null, reportedAt: row.reported_at };
 }
 
+// Optional GGUF variant selector for catalog compat/plan: an exact file name
+// from the model's variant list. Absent is fine; anything else is bounded.
+function catalogFileError(file) {
+  if (file === undefined || file === null || file === '') return null;
+  if (typeof file !== 'string' || file.length > 256 || !/\.gguf$/i.test(file) || /[\x00-\x1f]/.test(file)) {
+    return { error: 'file must be a GGUF file name (≤ 256 chars) from the model\'s variant list.', code: 'BAD_FILE' };
+  }
+  return null;
+}
+
 // Strict capability-report body (schema v1): exact top-level keys, bounded
 // strings/arrays, safe-integer byte counts. Unknown fields are rejected —
 // a browser or worker cannot smuggle trusted readings past the schema.
@@ -1490,6 +1500,9 @@ async function handleApi(request, env, url) {
     const runtime = typeof body.runtime === 'string' ? body.runtime.slice(0, 64) : '';
     const context = body.context;
     const concurrency = body.concurrency;
+    const fileError = catalogFileError(body.file);
+    if (fileError) return json(400, fileError);
+    const file = body.file || '';
     const refOk = (r) => validateRepoId(r) || /^priv:[A-Za-z0-9_-]{1,64}$/.test(r) || (r.startsWith('hub:') && validateRepoId(r.slice(4)));
     if ((repo && assetId) || (!repo && !assetId)) return json(400, { error: 'Supply exactly one of repo or assetId.', code: 'BAD_ASSET_REF' });
     if ((repo && !validateRepoId(repo)) || (assetId && !refOk(assetId))) return json(400, { error: 'Asset ref must be org/name, hub:org/name, or priv:<id>.', code: 'BAD_REPO' });
@@ -1539,7 +1552,7 @@ async function handleApi(request, env, url) {
       const nowMs = Date.now();
       const decision = evaluateCompatibility({
         asset, adapterAsset, baseAsset,
-        settings: { context, concurrency, runtime },
+        settings: { context, concurrency, runtime, file },
         snapshot: snap.snapshot, snapshotAgeMs: snap.ageMs, snapshotAt: snap.reportedAt,
         nodeId, principal: me(), nowMs,
       });
@@ -2436,6 +2449,9 @@ async function handleApi(request, env, url) {
     const runtime = typeof body.runtime === 'string' ? body.runtime.slice(0, 64) : '';
     const context = body.context;
     const concurrency = body.concurrency;
+    const fileError = catalogFileError(body.file);
+    if (fileError) return json(400, fileError);
+    const file = body.file || '';
     if (!assetRef || !refOk(assetRef)) return json(400, { error: 'assetRef must be org/name, hub:org/name, or priv:<id>.', code: 'BAD_REPO' });
     if (adapterRef && !refOk(adapterRef)) return json(400, { error: 'adapterRef is malformed.', code: 'BAD_REPO' });
     if (baseRef && !refOk(baseRef)) return json(400, { error: 'baseRef is malformed.', code: 'BAD_REPO' });
@@ -2475,7 +2491,7 @@ async function handleApi(request, env, url) {
     if (gated) return gated;
     const snap = await catalogSnapshot(db, nodeId);
     const decision = evaluateCompatibility({
-      asset, adapterAsset, baseAsset, settings: { context, concurrency, runtime },
+      asset, adapterAsset, baseAsset, settings: { context, concurrency, runtime, file },
       snapshot: snap.snapshot, snapshotAgeMs: snap.ageMs, snapshotAt: snap.reportedAt,
       nodeId, principal: me(), nowMs: Date.now(),
     });
@@ -2499,7 +2515,10 @@ async function handleApi(request, env, url) {
       fixtureScript,
       iat: nowMs, exp: nowMs + 15 * 60 * 1000,
     };
-    const fp = JSON.stringify([payload.asset, payload.adapter, payload.base, nodeId, runtime, context, concurrency]);
+    // The selected GGUF file is part of what was evaluated and signed; it is
+    // added only when present so file-less plans keep their exact shape.
+    if (file) payload.file = file;
+    const fp = JSON.stringify([payload.asset, payload.adapter, payload.base, nodeId, runtime, context, concurrency, ...(file ? [file] : [])]);
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(fp));
     payload.planFingerprint = Array.from(new Uint8Array(digest), (x) => x.toString(16).padStart(2, '0')).join('');
     const planToken = await signPlanToken(env, payload);
@@ -2581,7 +2600,7 @@ async function handleApi(request, env, url) {
     const snap = await catalogSnapshot(db, plan.nodeId);
     const decision = evaluateCompatibility({
       asset: resolved.asset, adapterAsset, baseAsset,
-      settings: { context: plan.context, concurrency: plan.concurrency, runtime: plan.runtime },
+      settings: { context: plan.context, concurrency: plan.concurrency, runtime: plan.runtime, file: typeof plan.file === 'string' ? plan.file : '' },
       snapshot: snap.snapshot, snapshotAgeMs: snap.ageMs, snapshotAt: snap.reportedAt,
       nodeId: plan.nodeId, principal: me(), nowMs: Date.now(),
     });

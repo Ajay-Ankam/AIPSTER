@@ -108,6 +108,23 @@ function checkAdapter(adapter, baseAsset, matrix) {
   return { blocks, unknowns };
 }
 
+// Picks the GGUF variant to evaluate. Assets without variants (private
+// uploads, non-GGUF repos, plain test objects) keep whole-asset sizing.
+// Several variants and no `file` is unknown, never a silent first pick.
+export function selectVariant(asset, file) {
+  const variants = asset && Array.isArray(asset.variants) ? asset.variants : [];
+  if (file) {
+    const hit = variants.find((v) => v && v.file === file);
+    if (hit) return { variant: hit };
+    return { block: reason('VARIANT_NOT_FOUND', `File ${String(file).slice(0, 128)} is not a GGUF variant of this model.`, 'Choose one of the listed GGUF files.') };
+  }
+  if (variants.length === 1) return { variant: variants[0] };
+  if (variants.length > 1) {
+    return { unknown: reason('VARIANT_UNSELECTED', `This model has ${variants.length} GGUF files (quantizations); compatibility is per file.`, 'Choose one GGUF file to evaluate.') };
+  }
+  return {};
+}
+
 export function evaluateCompatibility(input) {
   // input: { asset, adapter?, adapterAsset?, baseAsset?, settings{context, concurrency, runtime},
   //          snapshot|null, snapshotAgeMs|null, nodeId, principal, nowMs }
@@ -121,6 +138,18 @@ export function evaluateCompatibility(input) {
   if (!asset || !asset.revision) {
     unknowns.push(reason('ARTIFACT_UNPINNED', 'Artifact revision is not pinned to a commit.', 'Resolve the full revision before evaluating.'));
   }
+  // GGUF variant (one file per quantization): weights and quant come from
+  // the ONE selected file, never the whole-repo sum or an arbitrary label.
+  const pick = selectVariant(asset, settings.file);
+  if (pick.block) blocks.push(pick.block);
+  if (pick.unknown) unknowns.push(pick.unknown);
+  const variant = pick.variant || null;
+  const quant = variant ? variant.quant : asset.quant;
+  const weightsBytes = variant ? num(variant.bytes) : num(asset.totalBytes);
+  if (!pick.block && !pick.unknown && weightsBytes === 0) {
+    // A missing size is not a small model: fail closed instead of fitting.
+    unknowns.push(reason('WEIGHTS_SIZE_UNKNOWN', 'Model file size is unknown, so memory fit cannot be estimated.', 'Re-resolve the model metadata with file sizes.'));
+  }
   const entry = matrixEntry(settings.runtime);
   if (!entry) {
     unknowns.push(reason('RUNTIME_UNQUALIFIED', `Runtime ${settings.runtime || '(none)'} has no tested matrix row.`, 'Choose a supported runtime or qualify this one.'));
@@ -128,8 +157,8 @@ export function evaluateCompatibility(input) {
     if (!entry.formats.includes(asset.format)) {
       blocks.push(reason('FORMAT_UNSUPPORTED', `Format ${asset.format} has no tested ${entry.name} path.`, 'Choose a tested format/runtime pair.'));
     }
-    if (asset.quant !== 'unknown' && !entry.quants.includes(asset.quant) && !entry.quants.includes('UNKNOWN-OK')) {
-      blocks.push(reason('QUANT_UNSUPPORTED', `Quantization ${asset.quant} is untested on ${entry.name}.`, 'Choose a tested quantization.'));
+    if (quant !== 'unknown' && !entry.quants.includes(quant) && !entry.quants.includes('UNKNOWN-OK')) {
+      blocks.push(reason('QUANT_UNSUPPORTED', `Quantization ${quant} is untested on ${entry.name}.`, 'Choose a tested quantization.'));
     }
     if (context > entry.maxContext) {
       blocks.push(reason('CONTEXT_EXCEEDS_RUNTIME', `Context ${context} exceeds ${entry.name} maximum ${entry.maxContext}.`, 'Lower the context length.'));
@@ -162,9 +191,9 @@ export function evaluateCompatibility(input) {
         } else if (!Array.isArray(nodeRt.formats)) {
           unknowns.push(reason('NODE_FORMATS_UNDECLARED', `Node ${nodeRt.name} declares no formats.`, 'Re-report node capabilities with runtime formats.'));
         }
-        if (asset.quant !== 'unknown') {
-          if (Array.isArray(nodeRt.quants) && !nodeRt.quants.includes(asset.quant)) {
-            blocks.push(reason('QUANT_NOT_REPORTED', `Quantization ${asset.quant} is not in the node's ${nodeRt.name} quants.`, 'Choose a node-reported quantization.'));
+        if (quant !== 'unknown') {
+          if (Array.isArray(nodeRt.quants) && !nodeRt.quants.includes(quant)) {
+            blocks.push(reason('QUANT_NOT_REPORTED', `Quantization ${quant} is not in the node's ${nodeRt.name} quants.`, 'Choose a node-reported quantization.'));
           } else if (!Array.isArray(nodeRt.quants)) {
             unknowns.push(reason('NODE_QUANTS_UNDECLARED', `Node ${nodeRt.name} declares no quants.`, 'Re-report node capabilities with runtime quants.'));
           }
@@ -197,7 +226,6 @@ export function evaluateCompatibility(input) {
   // Resource budget vs the single snapshot (AC05/AC06).
   let budget = null;
   if (snap && blocks.length === 0 && unknowns.length === 0) {
-    const weightsBytes = num(asset.totalBytes);
     const adapterBytes = input.adapterAsset ? num(input.adapterAsset.totalBytes) : 0;
     budget = estimateBudget({ weightsBytes, adapterBytes, context, concurrency });
     const gpu = Array.isArray(snap.mem.gpu) ? snap.mem.gpu[0] : null;
@@ -235,12 +263,14 @@ export function evaluateCompatibility(input) {
       adapter: input.adapterAsset ? `${input.adapterAsset.id}@${input.adapterAsset.revision || 'unpinned'}` : null,
       base: input.adapterAsset && input.baseAsset ? `${input.baseAsset.id}@${input.baseAsset.revision || 'unpinned'}` : null,
       node: input.nodeId,
+      file: variant ? variant.file : null,
       runtime: settings.runtime,
       context,
       concurrency,
       estimator: ESTIMATOR_VERSION,
       snapshotAt: input.snapshotAt || null,
     },
+    variant: variant ? { file: variant.file, quant: variant.quant, bytes: variant.bytes } : null,
     blocking: blocks,
     warnings,
     unknown: unknowns,
