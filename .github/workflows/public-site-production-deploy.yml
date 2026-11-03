@@ -1,6 +1,31 @@
-# The release owner dispatches only after independent review and merge.
-# This explicit revision gate complements protected main/environment approvals;
-# it does not replace those repository settings or prove a review occurred.
+# Production releases deploy the exact verified merged-main SHA.
+#
+# Two paths share this job, serialized by the existing public-site-production
+# concurrency group (cancel-in-progress false):
+# - manual workflow_dispatch with an explicit reviewed_sha (owner, after review);
+# - automatic workflow_run after "Public site checks" completes on main.
+#
+# Automatic trust boundary, enforced before checkout by the event gate below
+# and re-verified by release-preflight against the API immediately before
+# deploy: same canonical repository (fork sources rejected), push to main
+# only, successful conclusion, pinned head SHA checked out, current main still
+# equal to that SHA, latest "Public site asset and build checks" check-run for
+# the SHA completed with success, merge evidence (merge commit or an
+# associated merged PR), and no website/migrations changes in the merge.
+# Schema changes are never auto-applied or silently deployed: the automatic
+# path holds and the release stays on manual dispatch after review.
+#
+# Applicable-check policy: only the main-push suite ("Public site asset and
+# build checks") runs on merged main SHAs. Path-filtered PR-only checks
+# (mock-install, installer build) run on PR head SHAs, never on main, so they
+# are not applicable to main releases; their gate lives in PR review.
+#
+# Honest limitations: branch protection is absent (API returned
+# "Branch not protected"), so this file cannot prove review occurred; the
+# merge-evidence check rejects direct unassociated main pushes from the
+# automatic path instead. A push landing between the preflight recheck and
+# `wrangler deploy` is not observed; the concurrency group serializes
+# deployments but not main pushes.
 name: Public site production deploy
 on:
   workflow_dispatch:
@@ -9,6 +34,10 @@ on:
         description: Full merged main commit approved for this release
         required: true
         type: string
+  workflow_run:
+    workflows: ['Public site checks']
+    types: [completed]
+    branches: [main]
 permissions:
   contents: read
   checks: read
@@ -17,7 +46,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     name: Build and deploy dist to production
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -26,10 +55,37 @@ jobs:
       run:
         working-directory: website
     steps:
+      - name: Resolve release SHA
+        id: release
+        run: |
+          if [ "$EVENT_NAME" = workflow_run ]; then
+            echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "mode=auto" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$REVIEWED_SHA" >> "$GITHUB_OUTPUT"
+            echo "mode=manual" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+      - name: Reject untrusted automatic events
+        if: steps.release.outputs.mode == 'auto'
+        run: |
+          test "$TRIGGER_EVENT" = push || { echo 'Automatic deploy requires a main push event'; exit 1; }
+          test "$HEAD_BRANCH" = main || { echo 'Automatic deploy requires the main branch'; exit 1; }
+          test "$HEAD_REPO" = 'synchronic1/AIPSTER' || { echo 'Automatic deploy refuses fork sources'; exit 1; }
+          test "$WORKFLOW_NAME" = 'Public site checks' || { echo 'Automatic deploy only follows Public site checks'; exit 1; }
+        env:
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 verified 2026-10-26
         with:
           persist-credentials: false
           fetch-depth: 0 # pin-consistency test inspects README blobs at DOCS_COMMIT (same as public-site-checks.yml)
+          ref: ${{ steps.release.outputs.sha }}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 verified 2026-10-26
         with:
           node-version: '24'
@@ -37,15 +93,50 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run check
       - run: npm test
-      - run: npm run build
-      - name: Require the reviewed current main revision and successful CI
+      # Pin stamps and guards to the resolved release SHA: for workflow_run
+      # events GITHUB_SHA is the branch head, not the verified head_sha.
+      - name: Build dist
+        run: npm run build
+        env:
+          GITHUB_SHA: ${{ steps.release.outputs.sha }}
+      - name: Hold automatic release on schema changes
+        id: migration
+        if: steps.release.outputs.mode == 'auto'
+        run: |
+          if git diff --name-only "$RELEASE_SHA^1" "$RELEASE_SHA" -- website/migrations | grep -q .; then
+            echo 'hold=true' >> "$GITHUB_OUTPUT"
+            echo 'Automatic deploy held: the merge changes website/migrations. Ship schema changes via manual dispatch.'
+          else
+            echo 'hold=false' >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+      - name: Require the verified current main revision and successful CI
+        if: steps.migration.outputs.hold != 'true'
         run: node scripts/release-preflight.mjs
         env:
+          GITHUB_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_MODE: ${{ steps.release.outputs.mode }}
           REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           GH_TOKEN: ${{ github.token }}
+      - name: Skip redeploy of the live revision
+        id: live
+        if: steps.migration.outputs.hold != 'true'
+        run: node --input-type=module -e "import {isAlreadyLive} from './scripts/release-preflight.mjs'; const target = process.env.TARGET_SHA; let liveCommit = ''; try { const res = await fetch('https://aipster.net/deployment.json', {signal: AbortSignal.timeout(15000)}); if (res.ok) liveCommit = (await res.json()).git_commit || ''; } catch {} const already = isAlreadyLive({liveCommit, targetSha: target}); const fs = await import('node:fs/promises'); await fs.appendFile(process.env.GITHUB_OUTPUT, 'already=' + (already ? 'true' : 'false') + '\n'); console.log(already ? 'Live revision already matches; skipping redeploy.' : 'Live revision differs; proceeding.');"
+        env:
+          TARGET_SHA: ${{ steps.release.outputs.sha }}
       - run: npx wrangler deploy --config wrangler.jsonc
+        if: steps.migration.outputs.hold != 'true' && steps.live.outputs.already != 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           WRANGLER_SEND_METRICS: 'false'
       - name: Verify live assets, release revision and anonymous access protection
+        if: steps.migration.outputs.hold != 'true'
         run: npm run verify:live
+        env:
+          GITHUB_SHA: ${{ steps.release.outputs.sha }}
