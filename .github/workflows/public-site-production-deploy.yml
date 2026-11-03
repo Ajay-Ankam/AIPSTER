@@ -120,7 +120,8 @@ jobs:
           GITHUB_SHA: ${{ steps.release.outputs.sha }}
       - name: Read live deployment baseline
         id: live
-        run: node --input-type=module -e "import {isAlreadyLive} from './scripts/release-preflight.mjs'; const target = process.env.TARGET_SHA; let liveCommit = ''; try { const res = await fetch('https://aipster.net/deployment.json', {signal: AbortSignal.timeout(15000)}); if (res.ok) liveCommit = (await res.json()).git_commit || ''; } catch {} if (!/^[a-f0-9]{40}$/.test(liveCommit)) liveCommit = ''; const already = isAlreadyLive({liveCommit, targetSha: target}); const fs = await import('node:fs/promises'); await fs.appendFile(process.env.GITHUB_OUTPUT, 'live_sha=' + liveCommit + '\n' + 'already=' + (already ? 'true' : 'false') + '\n'); console.log(already ? 'Live revision already matches; redeploy will be skipped.' : 'Live baseline: ' + (liveCommit || '(unknown)') + '.');"
+        run: |
+          node --input-type=module -e "import {isAlreadyLive} from './scripts/release-preflight.mjs'; const target = process.env.TARGET_SHA; let liveCommit = ''; try { const res = await fetch('https://aipster.net/deployment.json', {signal: AbortSignal.timeout(15000)}); if (res.ok) liveCommit = (await res.json()).git_commit || ''; } catch {} if (!/^[a-f0-9]{40}$/.test(liveCommit)) liveCommit = ''; const already = isAlreadyLive({liveCommit, targetSha: target}); const fs = await import('node:fs/promises'); await fs.appendFile(process.env.GITHUB_OUTPUT, 'live_sha=' + liveCommit + '\n' + 'already=' + (already ? 'true' : 'false') + '\n'); console.log(already ? 'Live revision already matches; redeploy will be skipped.' : 'Live baseline: ' + (liveCommit || '(unknown)') + '.');"
         env:
           TARGET_SHA: ${{ steps.release.outputs.sha }}
       - name: Hold automatic release on unknown or migrated schema

@@ -105,6 +105,27 @@ test('deploy and verify steps are skipped on hold or already-live', () => {
   assert(deploy.includes("steps.migration.outputs.hold != 'true' && steps.live.outputs.already != 'true'"));
 });
 
+test('no plain-scalar run step contains YAML-breaking colons', () => {
+  // Regression for the line-123 workflow-validation failure: a plain scalar
+  // `run: node ... -e "..."` containing ': ' ends the mapping and invalidates
+  // the whole workflow file. Inline scripts must use literal block syntax.
+  for (const line of deploy.split('\n')) {
+    const m = /^(\s*)run: (.*)$/.exec(line);
+    if (m && m[2] !== '|' && m[2] !== '>') {
+      assert(!m[2].includes(': '), `plain-scalar run must not contain ': ': ${line.trim().slice(0, 80)}`);
+    }
+  }
+});
+
+test('inline node scripts use literal block syntax', () => {
+  const texts = steps(deploy).map(b => b.header + '\n' + b.body);
+  const inline = texts.filter(t => /node --input-type=module/.test(t));
+  assert(inline.length > 0, 'expected inline node steps');
+  for (const t of inline) {
+    assert(t.includes('run: |'), 'inline node script must run under a literal block');
+  }
+});
+
 test('preflight precedes wrangler deploy and live verification follows it', () => {
   const texts = steps(deploy).map(b => b.header + '\n' + b.body);
   const preflight = texts.findIndex(t => t.includes('release-preflight.mjs') && t.includes('Require the verified'));
