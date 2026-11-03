@@ -54,6 +54,11 @@ export function normalizeHubModel(raw) {
     sha256: null,
   })) : [];
   const totalBytes = siblings.reduce((n, f) => n + f.bytes, 0);
+  const format = inferFormat(siblings);
+  // A GGUF repo usually ships one file per quantization; each is a separate
+  // deployable artifact, so sizes and quant are tracked per variant rather
+  // than summed across the repo (totalBytes keeps its whole-repo meaning).
+  const variants = format === 'gguf' ? ggufVariants(siblings) : [];
   return {
     id: `hub:${raw.id}`,
     source: 'hub',
@@ -62,8 +67,11 @@ export function normalizeHubModel(raw) {
     kind: tags.includes('peft') || tags.includes('lora') ? 'adapter' : 'model',
     task: typeof raw.pipeline_tag === 'string' ? raw.pipeline_tag.slice(0, 64) : 'unknown',
     arch: 'unknown',
-    format: inferFormat(siblings),
-    quant: inferQuant(raw.id, siblings),
+    format,
+    // One variant: its quant. Several: no single honest label (the old
+    // first-regex-match picked an arbitrary file); filters match variants.
+    quant: variants.length === 1 ? variants[0].quant : variants.length > 1 ? 'unknown' : inferQuant(raw.id, siblings),
+    variants,
     license: { tags: license, evidence: 'hub-tag', note: 'A license tag is evidence to review, not a legal conclusion.' },
     gated: raw.gated === true || raw.gated === 'manual' || raw.gated === 'auto' ? (raw.gated === true ? 'manual' : raw.gated) : false,
     card: typeof raw.cardData === 'string' ? raw.cardData.slice(0, 20000) : (typeof raw.card === 'string' ? raw.card.slice(0, 20000) : ''),
@@ -82,6 +90,40 @@ function inferFormat(siblings) {
   if (names.some((n) => n.endsWith('.bin'))) return 'pytorch-bin';
   if (names.some((n) => n.endsWith('.onnx'))) return 'onnx';
   return 'unknown';
+}
+
+// GGUF quant from a file name: the LAST quant token before `.gguf`, so model
+// names that happen to contain a token never win. Unknown stays unknown.
+const GGUF_QUANT_TOKEN = /(IQ\d_(?:XXS|XS|NL|S|M|L)|Q\d_K_(?:XL|S|M|L)|Q\d_K|Q\d_\d(?:_\d_\d)?|BF16|F16|F32)(?![A-Z0-9])/gi;
+export function ggufQuant(relpath) {
+  const name = String(relpath).split('/').pop().replace(/(-\d{5}-of-\d{5})?\.gguf$/i, '');
+  const all = name.match(GGUF_QUANT_TOKEN);
+  return all ? all[all.length - 1].toUpperCase() : 'unknown';
+}
+
+// Split GGUF shards (`name-00001-of-00003.gguf`) form one variant. A variant
+// whose files lack sizes, or whose shard set is incomplete, reports
+// bytes 0 = unknown: the estimator must never treat a missing size as small.
+const GGUF_SHARD = /-(\d{5})-of-(\d{5})\.gguf$/i;
+export const MAX_GGUF_VARIANTS = 64;
+export function ggufVariants(files) {
+  const groups = new Map();
+  for (const f of files) {
+    if (!/\.gguf$/i.test(f.relpath)) continue;
+    const shard = GGUF_SHARD.exec(f.relpath);
+    const key = shard ? f.relpath.replace(GGUF_SHARD, '.gguf') : f.relpath;
+    const g = groups.get(key) || { file: key, relpaths: [], bytes: 0, sized: true, expected: shard ? Number(shard[2]) : 1 };
+    g.relpaths.push(f.relpath);
+    g.bytes += f.bytes;
+    if (!(f.bytes > 0)) g.sized = false;
+    groups.set(key, g);
+  }
+  return [...groups.values()].slice(0, MAX_GGUF_VARIANTS).map((g) => ({
+    file: g.file,
+    quant: ggufQuant(g.file),
+    bytes: g.sized && g.relpaths.length === g.expected ? g.bytes : 0,
+    shards: g.relpaths.length,
+  }));
 }
 
 function inferQuant(repo, siblings) {
@@ -111,7 +153,8 @@ function normalizeFixtureModel(raw) {
 function matchFilters(asset, f) {
   if (f.task && asset.task !== f.task) return false;
   if (f.format && asset.format !== f.format) return false;
-  if (f.quant && asset.quant !== f.quant) return false;
+  if (f.quant && asset.quant !== f.quant
+    && !(Array.isArray(asset.variants) && asset.variants.some((v) => v.quant === f.quant))) return false;
   if (f.license && !asset.license.tags.includes(f.license)) return false;
   if (f.kind && asset.kind !== f.kind) return false;
   if (f.q) {
@@ -254,7 +297,10 @@ export async function hubDetail(repo, { token, admit } = {}) {
   // 401/403, or an uncached error that re-admits on retry); a spent
   // budget 429s with zero upstream calls.
   if (admit) await admit();
-  const res = await hubFetch(`https://${HUB_API_HOST}/api/models/${repo}`, { token });
+  // blobs=true: without it the Hub omits every sibling `size`, so all
+  // weights read as 0 bytes and the estimator under-counts (verified live
+  // 2026-11-03 against /api/models/<repo>). Same single metadata call.
+  const res = await hubFetch(`https://${HUB_API_HOST}/api/models/${repo}?blobs=true`, { token });
   if (res.status === 404) {
     hubCacheStore(cacheKey, null);
     return null;
