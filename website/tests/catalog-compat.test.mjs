@@ -360,3 +360,37 @@ test('Codex-sec-P2: spent write budgets reject compat misses but serve hits', as
   const rows = await t.DB.prepare('SELECT COUNT(*) AS n FROM catalog_compat_cache WHERE principal = ?').bind('u_alice').first('n');
   assert.equal(rows, 1, 'the rejected miss wrote no cache row');
 });
+
+// Regression for the unresolved PR83 finding: the compatibility fingerprint
+// keyed only the RESOLVED variant, so a request with no `file` and one with an
+// unresolvable `file` shared a cache key while returning different decisions.
+test('regression: an unresolved file selector cannot reuse or poison the no-file decision', async () => {
+  const body = { repo: BASE, runtime: 'fixture-llama', context: 2048, concurrency: 1 };
+  const setup = async () => {
+    const t = await fx();
+    const node = await register(t, t.alice, 'cache-order-box');
+    await report(t, node.id, fixtureSnapshot());
+    return { t, nodeId: node.id };
+  };
+
+  // Order A: no selector, then a bad one. The bad one must MISS, not reuse.
+  const a = await setup();
+  const plainFirst = await evaluate(a.t, a.t.alice, { ...body, nodeId: a.nodeId });
+  const badSecond = await evaluate(a.t, a.t.alice, { ...body, nodeId: a.nodeId, file: 'missing.gguf' });
+  assert.equal(plainFirst.status, 200, plainFirst.text);
+  assert.equal(badSecond.status, 200, badSecond.text);
+  assert.equal(plainFirst.json.fingerprint.file, null);
+  assert.equal(badSecond.json.fingerprint.file, 'missing.gguf', 'the requested selector is part of the key');
+  assert.equal(badSecond.json.cached, false, 'the bad selector did not reuse the no-file decision');
+  assert.ok(badSecond.json.blocking.some((r) => r.code === 'VARIANT_NOT_FOUND'), JSON.stringify(badSecond.json));
+
+  // Order B: the bad selector first. It must not poison the valid request.
+  const b = await setup();
+  const badFirst = await evaluate(b.t, b.t.alice, { ...body, nodeId: b.nodeId, file: 'missing.gguf' });
+  const plainSecond = await evaluate(b.t, b.t.alice, { ...body, nodeId: b.nodeId });
+  assert.equal(badFirst.status, 200, badFirst.text);
+  assert.equal(plainSecond.status, 200, plainSecond.text);
+  assert.equal(plainSecond.json.cached, false, 'the no-file request did not reuse the bad decision');
+  assert.ok(!plainSecond.json.blocking.some((r) => r.code === 'VARIANT_NOT_FOUND'),
+    'the bad selector did not poison the valid request');
+});
