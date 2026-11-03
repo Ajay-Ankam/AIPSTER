@@ -154,6 +154,61 @@ export function requireCheckPass(checks, name, sha, label) {
   return run;
 }
 
+// Expected producer workflow files (actual repository paths — the job
+// names above are defined in these files). A same-named job from any
+// other workflow, including a PR-controlled spoof workflow on a
+// same-repo branch, must never substitute for the required suite.
+export const SITE_WORKFLOW_FILE = '.github/workflows/public-site-checks.yml';
+export const WORKER_WORKFLOW_FILE = '.github/workflows/local-worker-checks.yml';
+export const INSTALLER_WORKFLOW_FILE = '.github/workflows/worker-installer-build.yml';
+
+// Check-suite ids of a workflow file's runs at one head, via the
+// supported Actions workflow-runs listing (matched client-side on
+// head_sha; unknown/failed listings fail closed). Reading this endpoint
+// needs the `actions: read` permission — recorded as an UNAPPLIED
+// approval-gated proposal; without it every producer check refuses.
+export async function fetchWorkflowSuiteIds(request, workflowFile, headSha) {
+  assert(typeof request === 'function', 'A metadata requester is required');
+  assert(typeof workflowFile === 'string' && workflowFile.length > 0,
+    'A producer workflow file is required');
+  assertSha(headSha, 'Suite head SHA');
+  const ids = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const data = await request(
+      `actions/workflows/${workflowFile}/runs?head_sha=${headSha}&per_page=100&page=${page}`);
+    assert(data && Array.isArray(data.workflow_runs),
+      `Workflow runs listing returned no list: ${workflowFile}`);
+    for (const run of data.workflow_runs) {
+      if (run && run.head_sha === headSha
+        && Number.isInteger(run.check_suite_id)) {
+        ids.push(run.check_suite_id);
+      }
+    }
+    if (data.workflow_runs.length < 100) return ids;
+  }
+  throw new Error(`Workflow runs listing exceeded ${MAX_PAGES} pages (fail closed): ${workflowFile}`);
+}
+
+// Producer binding for required checks: the latest run of each named
+// check must belong to a run of its expected workflow file at this head
+// (joined by check-suite id). Pass/fail/latest semantics stay in
+// requireCheckPass; this proves the producer. Specs: [{name, sha,
+// workflowFile, label}].
+export async function verifyCheckProducers({request, checks, specs}) {
+  assert(Array.isArray(specs) && specs.length > 0, 'Check specs are required');
+  for (const {name, sha, workflowFile, label} of specs) {
+    const run = latestCheckFor(checks, name, sha);
+    assert(run, `${label} has no ${name} run for this head at all`);
+    const suiteId = run.check_suite && run.check_suite.id;
+    assert(Number.isInteger(suiteId),
+      `${label} ${name} run ${run.id} carries no suite provenance (fail closed)`);
+    const suites = await fetchWorkflowSuiteIds(request, workflowFile, sha);
+    assert(suites.includes(suiteId),
+      `${label} ${name} run ${run.id} was not produced by ${workflowFile} at this head`);
+  }
+  return true;
+}
+
 // Maintainer standing: pinned owner, OWNER association, or endpoint-proven
 // admin/maintain. Read/triage relationships, stale associations, and
 // inaccessible endpoints (permission undefined) never qualify — except the
@@ -386,7 +441,8 @@ function holdSuperseded(record, reviews, headSha, permissions) {
 }
 
 // Independent evidence: APPROVED/COMMENTED only (CHANGES_REQUESTED never
-// counts), bound to the CURRENT head, and only from proven-trusted
+// counts), bound to the CURRENT head by BOTH the platform object's
+// commit_id and the body sha, and only from proven-trusted
 // publishers — string fields and report paths alone authenticate
 // nothing. The GitHub poster is recorded as publisher, but independence
 // is attested agent-to-agent: the block's reviewing-agent identity must
@@ -401,6 +457,13 @@ export function bindEvidence({pr, reviews, permissions}) {
   const bound = [];
   for (const r of reviews || []) {
     if (r.state !== 'APPROVED' && r.state !== 'COMMENTED') continue;
+    // Exact-head placement comes FIRST: the platform review object's
+    // commit_id must be the target head before any trust or parsing
+    // decision. A body sha never overwrites its object's placement, so
+    // proven other-head history can neither bind nor wedge the current
+    // head; records with missing/malformed placement never count as a
+    // current match (skipped, never bound).
+    if (!r || r.commitId !== pr.headSha) continue;
     if (typeof r.body !== 'string' || !r.body.includes('RELEASE-EVIDENCE')) {
       continue;
     }
@@ -541,8 +604,23 @@ export async function runGateEvaluation({request, n, holds}) {
   // endpoint reads, fail-closed gaps, never invented.
   const permissions = await resolvePermissionsFor(
     {request, logins: standingLogins(reviews, pr.headSha)});
+  const applicable = isWorkerApplicable(files);
   const verdict = mergeEligible({pr, reviews, permissions, holdMap: holds,
-    checks, workerApplicable: isWorkerApplicable(files), headSha: pr.headSha});
+    checks, workerApplicable: applicable, headSha: pr.headSha});
+  // Producer binding for the same applicable checks: the passing runs
+  // above must come from their expected workflow files, never from a
+  // same-named job in another workflow.
+  const specs = [{name: MAIN_CHECK_NAME, sha: pr.headSha,
+    workflowFile: SITE_WORKFLOW_FILE, label: 'This head'}];
+  if (applicable) {
+    specs.push({name: WORKER_CHECK_NAME, sha: pr.headSha,
+      workflowFile: WORKER_WORKFLOW_FILE,
+      label: 'This head touches worker-covered paths, so its worker suite'},
+    {name: INSTALLER_CHECK_NAME, sha: pr.headSha,
+      workflowFile: INSTALLER_WORKFLOW_FILE,
+      label: 'This head touches worker-covered paths, so its installer suite'});
+  }
+  await verifyCheckProducers({request, checks, specs});
   const fresh = await fetchPR(request, n);
   assert.equal(fresh.headSha, pr.headSha,
     'PR head moved during evaluation (stale race): discard this verdict and re-run');

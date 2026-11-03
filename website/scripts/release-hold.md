@@ -13,6 +13,12 @@ Peter resolves PR84.
 
 - Exact head: every verdict names one full 40-hex SHA. New head ⇒ old
   evidence is stale ⇒ re-review. Missing/ambiguous metadata fails closed.
+  Evidence binds only on a dual match: the platform review object's
+  `commit_id` AND the body's `sha` must both equal the target head — a
+  body sha never overwrites its object's placement, and records with
+  missing/malformed placement never count as a current match. Proven
+  other-head history is filtered before any trust/parsing decision, so
+  it can neither supply evidence nor wedge the current head.
 - Blocking findings must be fixed and re-reviewed at the exact new head.
   Tracked notes need explicit disposition + evidence.
 - AI-review evidence states model, reviewing-agent id, attested
@@ -163,9 +169,24 @@ recorded distinctly from independent review.
   including any active GLOBAL hold — govern before any production step,
   so a descendant with an unchanged registry stays held. Merged-main CI
   covers site plus conditional worker only (installer at a merge target
-  would deadlock every deploy: verified asymmetry, kept). Git exit
-  codes are honest (exit 1 = proven non-ancestry; anything else
-  throws). A refusal fails the job before deploy.
+  would deadlock every deploy: verified asymmetry, kept). Every
+  required check additionally binds its producer: the passing run must
+  belong to its expected workflow file at that head, joined by
+  check-suite id (`SITE/WORKER/INSTALLER_WORKFLOW_FILE` — the actual
+  repository paths holding those jobs), so a same-named passing job
+  from any other workflow, including a PR-controlled spoof on a
+  same-repo branch, never substitutes. The suite join uses the
+  supported Actions workflow-runs listing; unknown/failed listings
+  fail closed. Reading it needs `actions: read` on the gate workflows
+  — an UNAPPLIED approval-gated proposal (all three pin
+  contents/checks/pull-requests read only); until granted, producer
+  checks fail closed. The check-suite join itself remains a
+  live-unverified residual until the first real canary run. The legacy
+  preflight path still matches CI by name only (out of scope, no
+  redesign); this gate's refusal stands in front of production
+  regardless. Git exit codes are honest (exit 1 = proven
+  non-ancestry; anything else throws). A refusal fails the job before
+  deploy.
 - `.github/release-holds.json` (new, seeded): versioned holds map read
   from the trusted release checkout. The seed carries the PR84
   all-merges-and-deployments hold on `45c9eb7…` with `blockMerges: true`

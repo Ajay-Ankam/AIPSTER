@@ -18,8 +18,9 @@ import {CANONICAL_REPO, MAIN_CHECK_NAME, WORKER_CHECK_NAME,
 import {bindEvidence, fetchAssociatedPRs, fetchPR,
   fetchPRFiles, fetchReviews, parseHoldsFile,
   requireCheckPass, resolveAcceptance, resolvePermissionsFor,
-  resolveReviewState, standingLogins,
-  INSTALLER_CHECK_NAME} from './release-gate.mjs';
+  resolveReviewState, standingLogins, verifyCheckProducers,
+  INSTALLER_CHECK_NAME, INSTALLER_WORKFLOW_FILE,
+  SITE_WORKFLOW_FILE, WORKER_WORKFLOW_FILE} from './release-gate.mjs';
 
 const SHA_RE = /^[a-f0-9]{40}$/;
 
@@ -90,12 +91,27 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       requireCheckPass(headChecks, MAIN_CHECK_NAME, pr.headSha,
         `PR ${pr.number} head`);
       const files = await fetchPRFiles(request, pr.number);
-      if (isWorkerApplicable(files)) {
+      const headWorker = isWorkerApplicable(files);
+      if (headWorker) {
         requireCheckPass(headChecks, WORKER_CHECK_NAME, pr.headSha,
           `PR ${pr.number} head touches worker-covered paths, so`);
         requireCheckPass(headChecks, INSTALLER_CHECK_NAME, pr.headSha,
           `PR ${pr.number} head touches worker-covered paths, so its`);
       }
+      // Producer binding for the same per-PR checks: passing runs must
+      // come from their expected workflow files.
+      const headSpecs = [{name: MAIN_CHECK_NAME, sha: pr.headSha,
+        workflowFile: SITE_WORKFLOW_FILE, label: `PR ${pr.number} head`}];
+      if (headWorker) {
+        headSpecs.push({name: WORKER_CHECK_NAME, sha: pr.headSha,
+          workflowFile: WORKER_WORKFLOW_FILE,
+          label: `PR ${pr.number} head worker suite`},
+        {name: INSTALLER_CHECK_NAME, sha: pr.headSha,
+          workflowFile: INSTALLER_WORKFLOW_FILE,
+          label: `PR ${pr.number} head installer suite`});
+      }
+      await verifyCheckProducers({request, checks: headChecks,
+        specs: headSpecs});
       evaluated.push({merge: sha, number: pr.number, head: pr.headSha,
         evidence: evidence.length, acceptedBy: acceptance.by, via: acceptance.via});
     }
@@ -126,10 +142,20 @@ export async function evaluateDeployGate({git, request, fetchChecks,
     `Release HOLD active: ${covering.map(h => h.sha + ' (' + h.reason + ')').join(', ')}`);
   const checks = await fetchChecks(targetSha);
   requireCheckPass(checks, MAIN_CHECK_NAME, targetSha, 'The release revision');
-  if (isWorkerApplicable(changed)) {
+  const targetWorker = isWorkerApplicable(changed);
+  if (targetWorker) {
     requireCheckPass(checks, WORKER_CHECK_NAME, targetSha,
       'The release touches worker-covered paths, so');
   }
+  // Producer binding for the merged-main checks as well.
+  const targetSpecs = [{name: MAIN_CHECK_NAME, sha: targetSha,
+    workflowFile: SITE_WORKFLOW_FILE, label: 'The release revision'}];
+  if (targetWorker) {
+    targetSpecs.push({name: WORKER_CHECK_NAME, sha: targetSha,
+      workflowFile: WORKER_WORKFLOW_FILE,
+      label: 'The release worker suite'});
+  }
+  await verifyCheckProducers({request, checks, specs: targetSpecs});
   return {ok: true, mode, live: liveSha, target: targetSha, prs: evaluated,
     residualRace: 'Recheck main immediately before the irreversible step.'};
 }

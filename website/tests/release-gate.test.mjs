@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import {assertCanaryClean, assertNoCodeFetch, bindEvidence,
   fetchAssociatedPRs, fetchPR, fetchPRFiles, fetchPermission, fetchReviews,
   holdRelationTo, listOpenPRs, mergeEligible, parseEvidenceBlock,
-  parseHoldsFile, publishEvaluation, publishHeadStatus,
+  fetchWorkflowSuiteIds, parseHoldsFile, publishEvaluation, publishHeadStatus,
   requireCheckPass, resolveAcceptance, resolveMaintainer, resolveReviewState,
-  runGateEvaluation} from '../scripts/release-gate.mjs';
+  runGateEvaluation, verifyCheckProducers} from '../scripts/release-gate.mjs';
 
 const HEAD = 'a'.repeat(40);
 const NEXT = 'b'.repeat(40);
@@ -44,9 +44,13 @@ const prDoc = (over = {}) => ({number: 86, head: {sha: HEAD, ref: 'muse/x',
 const reviewDoc = (over = {}) => ({id: 1, user: {login: '948a'},
   author_association: 'COLLABORATOR', state: 'APPROVED', commit_id: HEAD,
   body: MARKER_BODY, submitted_at: '2026-11-03T00:00:00Z', ...over});
+const SITE_SUITE_ID = 900;
 const siteCheck = (over = {}) => ({id: 9, name: 'Public site asset and build checks',
   head_sha: HEAD, status: 'completed', conclusion: 'success',
-  app: {slug: 'github-actions'}, ...over});
+  app: {slug: 'github-actions'}, check_suite: {id: SITE_SUITE_ID}, ...over});
+const siteSuiteRuns = () => ({workflow_runs: [{id: 4242, head_sha: HEAD,
+  check_suite_id: SITE_SUITE_ID}]});
+const SITE_RUNS_ROUTE = 'actions/workflows/.github/workflows/public-site-checks.yml/runs';
 const workerCheck = (over = {}) => ({id: 7, name: 'mock-install', head_sha: HEAD,
   status: 'completed', conclusion: 'success', app: {slug: 'github-actions'}, ...over});
 
@@ -320,6 +324,48 @@ test('unknown-standing evidence publisher fails closed', () => {
   assert.throws(() => mergeEligible(gateInput({reviews: [passAt(), mystery]})),
     /Unverified evidence publisher/);
 });
+// FIX-018: exact-head binding needs BOTH the authenticated platform
+// review object (commit_id) and the body sha to match the target — a
+// body sha never overwrites its object's placement. Proven other-head
+// records are filtered before any trust/parsing decision, so history
+// from another head can neither supply evidence nor wedge the current
+// head. Missing/malformed commit metadata never counts as a current
+// match (skipped, never bound).
+const OLDHEAD = 'b'.repeat(40);
+const headPr = () => ({author: 'author1', headSha: HEAD,
+  baseRepo: 'synchronic1/AIPSTER'});
+test('platform commit_id and body sha must BOTH match the target', () => {
+  const current = normReview({id: 1, submittedAt: T0});
+  assert.deepEqual(bindEvidence({pr: headPr(), reviews: [current]}).map((b) => b.reviewId), [1]);
+  // Trusted object bound to OLD head, body claiming CURRENT: refuses.
+  const wrongHead = normReview({id: 1, commitId: OLDHEAD, submittedAt: T0});
+  assert.throws(() => bindEvidence({pr: headPr(), reviews: [wrongHead]}),
+    /No independent review evidence/);
+  // Object at CURRENT head, body for OLD head: stale, skipped.
+  const staleBody = normReview({id: 1, submittedAt: T0,
+    body: BLOCK.replace(HEAD, OLDHEAD)});
+  assert.throws(() => bindEvidence({pr: headPr(), reviews: [staleBody]}),
+    /No independent review evidence/);
+  assert.throws(() => mergeEligible(gateInput({reviews: [wrongHead]})),
+    /No independent review evidence/);
+});
+test('stale unknown history neither binds nor wedges the current head', () => {
+  const staleUnknown = normReview({id: 2, user: 'fixture-old-outsider',
+    association: 'NONE', state: 'COMMENTED', commitId: OLDHEAD,
+    body: BLOCK.replace(HEAD, OLDHEAD), submittedAt: T1});
+  const staleMalformed = normReview({id: 3, user: 'mystery',
+    association: 'NONE', state: 'COMMENTED', commitId: OLDHEAD,
+    body: 'RELEASE-EVIDENCE\nreviewer: x', submittedAt: T2});
+  const noCommitId = normReview({id: 4, user: '948a', association: 'OWNER',
+    state: 'APPROVED', commitId: null, body: MARKER_BODY, submittedAt: T2});
+  // Current valid evidence carries the verdict despite stale company.
+  assert.equal(mergeEligible(gateInput(
+    {reviews: [passAt(), staleUnknown, staleMalformed]})).ok, true);
+  // A record with no platform placement never binds, even from a
+  // trusted publisher with a current-dated body.
+  assert.throws(() => bindEvidence({pr: headPr(), reviews: [noCommitId]}),
+    /No independent review evidence/);
+});
 test('self-review at agent identity refuses despite different GitHub logins', () => {
   const selfBody = BLOCK.replace('reviewer: 948a',
     'reviewer: fixture-source-agent');
@@ -435,7 +481,7 @@ test('runGateEvaluation races fresh; moved head discarded', async () => {
   const routes = {'pulls/86': prDoc(),
     'pulls/86/reviews': [ownerReview],
     'pulls/86/files': [{filename: 'website/x.html'}],
-    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}};
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns()};
   const {request} = mockRequest(routes);
   const {verdict, pr} = await runGateEvaluation({request, n: 86, holds: {}});
   assert.equal(verdict.ok, true);
@@ -446,7 +492,7 @@ test('runGateEvaluation races fresh; moved head discarded', async () => {
       repo: {full_name: 'synchronic1/AIPSTER'}}}),
     'pulls/86/reviews': [ownerReview],
     'pulls/86/files': [],
-    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}});
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns()});
   await assert.rejects(runGateEvaluation({request: moving.request, n: 86, holds: {}}),
     /moved during evaluation/);
 });
@@ -465,7 +511,7 @@ test('PRs touching the hold registry fail closed (all variants)', async () => {
     const routes = {'pulls/86': prDoc(),
       'pulls/86/reviews': [reviewDoc({author_association: 'OWNER'})],
       'pulls/86/files': [file],
-      [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}};
+      [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns()};
     const {request} = mockRequest(routes);
     await assert.rejects(runGateEvaluation({request, n: 86, holds: {}}),
       /hold registry/);
@@ -480,7 +526,7 @@ test('PRs touching the hold registry fail closed (all variants)', async () => {
     const routes = {'pulls/86': prDoc(),
       'pulls/86/reviews': [reviewDoc({author_association: 'OWNER'})],
       'pulls/86/files': [{filename: '.github/release-holds.json'}],
-      [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+      [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns(),
       'collaborators/948a/permission': {permission: 'read'}};
     const {request} = mockRequest(routes);
     await assert.rejects(runGateEvaluation({request, n: 86, holds: legacy}),
@@ -492,7 +538,7 @@ test('standing resolves via fresh endpoint reads, not caller claims', async () =
   const routes = {'pulls/86': prDoc(),
     'pulls/86/reviews': [collab],
     'pulls/86/files': [{filename: 'website/x.html'}],
-    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns(),
     'collaborators/948a/permission': {permission: 'admin'}};
   const {seen, request} = mockRequest(routes);
   const {verdict} = await runGateEvaluation({request, n: 86, holds: {}});
@@ -511,7 +557,7 @@ test('blocking authors get fresh permission lookup in orchestration', async () =
   const routes = (permission) => ({'pulls/86': prDoc(),
     'pulls/86/reviews': [approved, cr],
     'pulls/86/files': [{filename: 'website/x.html'}],
-    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns(),
     'collaborators/948a/permission': {permission: 'read'},
     'collaborators/helper/permission': {permission}});
   // Fresh endpoint-proven admin for the blocker: merge refuses.
@@ -544,7 +590,7 @@ test('unrelated dismissal cannot clear a live blocker (merge path)', async () =>
   const routes = {'pulls/86': prDoc(),
     'pulls/86/reviews': [approved, cr10, dis11],
     'pulls/86/files': [{filename: 'website/x.html'}],
-    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns(),
     'collaborators/948a/permission': {permission: 'read'},
     'collaborators/helper/permission': {permission: 'admin'}};
   const {seen, request} = mockRequest(routes);
@@ -564,7 +610,7 @@ test('orchestration refuses outsider evidence, fetches reporter standing', async
   const routes = {'pulls/86': prDoc(),
     'pulls/86/reviews': [ownerAccept, outsiderReport],
     'pulls/86/files': [{filename: 'website/x.html'}],
-    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns(),
     'collaborators/948a/permission': {permission: 'read'},
     'collaborators/fixture-outsider/permission': {permission: 'read'}};
   const {seen, request} = mockRequest(routes);
@@ -572,6 +618,72 @@ test('orchestration refuses outsider evidence, fetches reporter standing', async
     /No independent review evidence/);
   assert(seen.some((p) => p.startsWith('collaborators/fixture-outsider/permission')),
     'marker-less reporter standing must be read, not assumed');
+});
+test('spoofed body head versus API commit mismatch refuses (merge path)', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const OLDH = 'b'.repeat(40);
+  // Trusted OWNER object bound by the platform to OLD head, body
+  // claiming CURRENT: the body never overwrites the placement.
+  const spoofed = reviewDoc({author_association: 'OWNER', commit_id: OLDH,
+    submitted_at: T0});
+  const routes = {'pulls/86': prDoc(),
+    'pulls/86/reviews': [spoofed],
+    'pulls/86/files': [{filename: 'website/x.html'}],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns(),
+    'collaborators/948a/permission': {permission: 'read'}};
+  const {request} = mockRequest(routes);
+  await assert.rejects(runGateEvaluation({request, n: 86, holds: {}}),
+    /No independent review evidence/);
+});
+// FIX-018 provenance: a same-named passing job from any other
+// workflow — including a PR-controlled spoof — must not substitute for
+// the required suite. Binding is by workflow file, proven through the
+// run's check-suite id, never by name string alone.
+test('spoofed same-name check from another workflow is refused', async () => {
+  const spoof = siteCheck({id: 99, check_suite: {id: 4242}});
+  const routes = {'pulls/86': prDoc(),
+    'pulls/86/reviews': [reviewDoc({author_association: 'OWNER'})],
+    'pulls/86/files': [{filename: 'website/x.html'}],
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck(), spoof]},
+    [SITE_RUNS_ROUTE]: siteSuiteRuns(),
+    'collaborators/948a/permission': {permission: 'read'}};
+  const {request} = mockRequest(routes);
+  await assert.rejects(runGateEvaluation({request, n: 86, holds: {}}),
+    /not produced by/);
+});
+test('producer binding: suite linkage, caps, and failures', async () => {
+  const file = '.github/workflows/public-site-checks.yml';
+  const runsKey = `actions/workflows/${file}/runs`;
+  const run = {head_sha: HEAD, check_suite_id: SITE_SUITE_ID};
+  const {request} = mockRequest({[runsKey]: {workflow_runs: [run,
+    {head_sha: OTHER, check_suite_id: 12345},
+    {head_sha: HEAD, check_suite_id: 'not-an-int'}]}});
+  // Only integer suite ids at this head are collected.
+  assert.deepEqual(await fetchWorkflowSuiteIds(request, file, HEAD),
+    [SITE_SUITE_ID]);
+  const checks = [siteCheck()];
+  assert.equal(await verifyCheckProducers({request, checks,
+    specs: [{name: 'Public site asset and build checks', sha: HEAD,
+      workflowFile: file, label: 'T'}]}), true);
+  // Missing run, missing provenance, wrong producer, API failure.
+  await assert.rejects(verifyCheckProducers({request, checks: [],
+    specs: [{name: 'Public site asset and build checks', sha: HEAD,
+      workflowFile: file, label: 'T'}]}), /no .* run for this head/);
+  await assert.rejects(verifyCheckProducers({request,
+    checks: [siteCheck({check_suite: null})],
+    specs: [{name: 'Public site asset and build checks', sha: HEAD,
+      workflowFile: file, label: 'T'}]}), /no suite provenance/);
+  await assert.rejects(verifyCheckProducers({request,
+    checks: [siteCheck({check_suite: {id: 4242}})],
+    specs: [{name: 'Public site asset and build checks', sha: HEAD,
+      workflowFile: file, label: 'T'}]}), /not produced by/);
+  const bad = mockRequest({[runsKey]: {nope: []}});
+  await assert.rejects(fetchWorkflowSuiteIds(bad.request, file, HEAD),
+    /no list/);
+  const endless = mockRequest({[runsKey]: () => ({workflow_runs:
+    Array.from({length: 100}, () => run)})});
+  await assert.rejects(
+    fetchWorkflowSuiteIds(endless.request, file, HEAD), /exceeded/);
 });
 test('trusted marker-less report binds after fresh standing proof', async () => {
   const T0 = '2026-11-03T00:00:00Z';
@@ -586,7 +698,7 @@ test('trusted marker-less report binds after fresh standing proof', async () => 
   const routes = {'pulls/86': prDoc(),
     'pulls/86/reviews': [ownerAccept, reporterPass],
     'pulls/86/files': [{filename: 'website/x.html'}],
-    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns(),
     'collaborators/948a/permission': {permission: 'read'},
     'collaborators/helper/permission': {permission: 'admin'}};
   const {seen, request} = mockRequest(routes);
@@ -617,7 +729,7 @@ test('publishEvaluation never swallows writes or exits silent', async () => {
   const ownerRoutes = () => ({'pulls/86': prDoc(),
     'pulls/86/reviews': [reviewDoc({author_association: 'OWNER'})],
     'pulls/86/files': [{filename: 'website/x.html'}],
-    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]},
+    [`commits/${HEAD}/check-runs`]: {check_runs: [siteCheck()]}, [SITE_RUNS_ROUTE]: siteSuiteRuns(),
     // Fresh standing is always read for marker authors, even when OWNER
     // association alone would qualify: read proves nothing here by design.
     'collaborators/948a/permission': {permission: 'read'}});
