@@ -95,32 +95,38 @@ class PairingLifecycleTests(unittest.TestCase):
         self.assertNotIn("unpaired locally",out.getvalue());self.assertIn("could not",err.getvalue())
 
     @unittest.skipIf(os.name=="nt","POSIX directory read/search permissions")
-    def test_posix_write_search_only_directory_repairs_then_completes_cleanup(self):
-        # macOS lane 2026-11-01 (renamed; was ..._cannot_claim_complete_cleanup):
-        # raw 0o300 denies scandir, but pair_lock provisions via private_dir
-        # since 811709f, repairing user-owned 0o300 to 0o700 before
-        # enumeration. Enumeration then succeeds and unpair honestly
-        # completes. The mocked enumeration test still covers true failures.
+    def test_posix_write_search_only_directory_cannot_claim_complete_cleanup(self):
+        # Merge 2026-11-03: main's verify-don't-repair private_dir (5d91c1f)
+        # supersedes the lane's repair expectation; the old name/expectation
+        # is correct on the merged tree.
         if os.geteuid()==0:self.skipTest("root bypasses POSIX read denial")
         meta=self.pair();manifest=self.data/"pairing.json";key=self.data/meta["key_file"]
         sentinel=self.data/"unmanaged.txt";sentinel.write_text("synthetic unrelated file")
         self.data.chmod(0o300)
         try:
-            with self.assertRaises(OSError):
-                with os.scandir(self.data):
-                    pass
-        finally:
-            pass
-        out,err=io.StringIO(),io.StringIO()
-        try:
+            out,err=io.StringIO(),io.StringIO()
             with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
-                self.assertEqual(pairing.cmd_unpair(self.args),pairing.EXIT_OK)
-            self.assertFalse(manifest.exists());self.assertFalse(key.exists())
-            self.assertTrue(sentinel.exists())
-            self.assertIn("unpaired locally",out.getvalue())
-        finally:
-            try:self.data.chmod(0o700)
-            except OSError:pass
+                self.assertNotEqual(pairing.cmd_unpair(self.args),pairing.EXIT_OK)
+            self.assertTrue(manifest.exists());self.assertTrue(key.exists());self.assertTrue(sentinel.exists())
+            self.assertIn("could not",err.getvalue());self.assertNotIn("unpaired locally",out.getvalue())
+        finally:self.data.chmod(0o700)
+
+    @unittest.skipIf(os.name=="nt","POSIX directory ownership bits")
+    def test_posix_existing_directory_is_verified_not_silently_repaired(self):
+        if os.geteuid()==0:self.skipTest("root bypasses POSIX ownership checks")
+        target=self.data/"existing";self.data.mkdir(parents=True);target.mkdir(mode=0o755)
+        with self.subTest(mode="0o755"):
+            target.chmod(0o755)
+            with self.assertRaises(pairing.PairingError) as ctx:
+                pairing.private_dir(target)
+            self.assertEqual(ctx.exception.code,"PRIVATE_STORAGE")
+            self.assertEqual(target.stat().st_mode&0o777,0o755)
+        with self.subTest(mode="0o300"):
+            target.chmod(0o300)
+            try:
+                self.assertEqual(pairing.private_dir(target),target)
+                self.assertEqual(target.stat().st_mode&0o777,0o300)
+            finally:target.chmod(0o700)
 
     @unittest.skipUnless(os.name=="nt","Windows sharing semantics")
     def test_native_open_key_handle_reports_unpair_failure(self):

@@ -4,8 +4,11 @@ import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {publicFiles, sha} from './check.mjs';
 
-const CONTENT_TYPES = {html: ['text/html'], js: ['text/javascript', 'application/javascript'],
-  css: ['text/css'], svg: ['image/svg+xml'], png: ['image/png'], json: ['application/json']};
+// .mjs modules are JavaScript and are held to exactly the .js media types.
+const JAVASCRIPT_TYPES = ['text/javascript', 'application/javascript'];
+const CONTENT_TYPES = {html: ['text/html'], js: JAVASCRIPT_TYPES, mjs: JAVASCRIPT_TYPES,
+  css: ['text/css'], svg: ['image/svg+xml'], png: ['image/png'], json: ['application/json'],
+  mp4: ['video/mp4'], jpg: ['image/jpeg'], vtt: ['text/vtt']};
 function verifyContentType(response, path) {
   const type = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   assert(CONTENT_TYPES[path.split('.').at(-1)]?.includes(type), `Incorrect content type: ${path}`);
@@ -26,10 +29,38 @@ function verifyAppSecurity(response) {
 
 // Anonymous checks only: not proof of a real OAuth callback, authenticated
 // logout, two-user isolation, or live inference. Those need approved identities.
+
+// The build stamps deployment.json with the deploying run's own
+// github_run_url, so two builds of the same commit never match byte for byte.
+// On the already-live path (a distinct run confirming an existing deployment)
+// the receipt is validated field by field instead of byte-compared: exact
+// source SHA, exact source manifest and revision, canonical receipt shape with
+// no unexpected fields, and a canonical run URL whose identity may legitimately
+// differ. Every other check — static bytes, health, auth denials, 404s — is
+// identical in both modes. This mode never proves a new deploy.
+const RECEIPT_FIELDS = ['site', 'site_revision', 'git_commit', 'github_run_url',
+  'source_manifest_sha256', 'auth_deployed'];
+const CANONICAL_RUN_URL = /^https:\/\/github\.com\/synchronic1\/AIPSTER\/actions\/runs\/\d+$/;
+export function verifyDeploymentReceipt(live, local, expectedCommit) {
+  assert(live && typeof live === 'object' && !Array.isArray(live), 'Live deployment receipt is not an object');
+  assert.deepEqual(Object.keys(live).sort(), [...RECEIPT_FIELDS].sort(),
+    'Live deployment receipt has unexpected fields');
+  assert.equal(live.site, 'aipster-public-site', 'Live receipt is not the public site deployment');
+  assert.equal(live.git_commit, expectedCommit, 'Live receipt is not the expected commit');
+  assert.equal(live.source_manifest_sha256, local.source_manifest_sha256,
+    'Live receipt source manifest differs');
+  assert.equal(live.site_revision, local.site_revision, 'Live receipt site revision differs');
+  assert.match(live.github_run_url || '', CANONICAL_RUN_URL,
+    'Live receipt run provenance is not canonical');
+  assert.equal(typeof live.auth_deployed, 'boolean', 'Live receipt auth flag is malformed');
+  return live.github_run_url;
+}
+
 export async function verifyLive({base = 'https://aipster.net',
   dist = resolve(import.meta.dirname, '../dist'), files = publicFiles,
   expectedCommit = process.env.GITHUB_SHA, fetchImpl = fetch,
-  propagation = {attempts: 1, delayMs: 0}, sleep = ms => new Promise(r => setTimeout(r, ms))} = {}) {
+  propagation = {attempts: 1, delayMs: 0}, sleep = ms => new Promise(r => setTimeout(r, ms)),
+  alreadyLive = false} = {}) {
   const origin = new URL(base);
   assert.equal(origin.protocol, 'https:', 'Verification requires HTTPS');
   assert.equal(origin.origin, base, 'Use a canonical origin without path or credentials');
@@ -53,8 +84,17 @@ export async function verifyLive({base = 'https://aipster.net',
   const delayMs = Math.max(0, Number(propagation.delayMs) || 0);
   let retriesLeft = attempts - 1;
   let assets = 0;
+  let liveRunUrl = localDeployment.github_run_url || null;
   for (const path of [...files, 'deployment.json']) {
     if (path === '_headers' || path === '404.html') continue;
+    // Already-live path: the live bytes carry the deploying run's own stamp,
+    // so the receipt is validated as legitimate instead of byte-compared.
+    if (path === 'deployment.json' && alreadyLive) {
+      const receipt = await jsonRequest('/deployment.json', 200);
+      liveRunUrl = verifyDeploymentReceipt(receipt, localDeployment, expectedCommit);
+      assets++;
+      continue;
+    }
     // Edge caches can serve the previous release for a short time after a
     // deploy. Only a byte mismatch is retried, within a bounded window; the
     // final attempt must still match exactly.
@@ -101,14 +141,15 @@ export async function verifyLive({base = 'https://aipster.net',
   return {verified: true, url: base, git_commit: expectedCommit,
     source_manifest_sha256: localDeployment.source_manifest_sha256,
     assets_verified: assets, auth_configured: true, oauth_configured: oauthConfigured,
-    anonymous_access_denied: true,
+    anonymous_access_denied: true, already_live: alreadyLive, live_run_url: liveRunUrl,
     pending: ['approved-identity sign-in/callback', 'authenticated logout', 'two-identity isolation', 'real inference qualification'],
     inference_verified: false};
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const result = await verifyLive({base: process.env.AIPSTER_VERIFY_ORIGIN || 'https://aipster.net',
-    propagation: {attempts: 8, delayMs: 15000}});
+    propagation: {attempts: 8, delayMs: 15000},
+    alreadyLive: process.env.AIPSTER_ALREADY_LIVE === 'true'});
   const output = resolve(import.meta.dirname, '../.verification');
   await mkdir(output, {recursive: true});
   await writeFile(resolve(output, 'live.json'), JSON.stringify(result, null, 2) + '\n');

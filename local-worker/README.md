@@ -53,6 +53,49 @@ Network access to public Python distribution/PyPI hosts is required on first use
 The locks pin dependency artifacts, not a bit-for-bit native build or a promise
 that upstream distribution hosts will remain available.
 
+## Update an existing source install
+
+Use this procedure when the checkout already has local changes from a reviewed
+pairing overlay (for example, an `f3e115e` checkout with the `adfe357`
+`pairing.py` compatibility fix applied by hand). A plain `git checkout` would
+abort on those local changes; the hash gate below verifies the overlay is
+exactly the reviewed file before discarding it. Run the `git` steps from the
+`AIPSTER` repo root (the directory above `local-worker`):
+
+```powershell
+git status --short
+```
+
+Continue only if the single modified file is `local-worker/pairing.py`. If
+anything else changed, back it up and use a fresh clone instead.
+
+1. Stop the running `heartbeat-loop` sender terminal with Ctrl+C. Old senders
+   hold no lock, so confirm only one sender runs afterwards.
+2. Fetch the reviewed revision (current pin `3fa309c`):
+```powershell
+git fetch origin 3fa309cb08461ea046ee23e801404911c1f3bcc2
+```
+3. Hash-gate the overlay: the LF-normalized local `pairing.py` must equal the
+   reviewed blob:
+```powershell
+$blob = .\local-worker\.venv\Scripts\python.exe -c "import hashlib,pathlib;b=pathlib.Path('local-worker/pairing.py').read_bytes().replace(b'\r\n',b'\n');print(hashlib.sha1(b'blob '+str(len(b)).encode()+b'\x00'+b).hexdigest())"
+$want = git rev-parse 3fa309cb08461ea046ee23e801404911c1f3bcc2:local-worker/pairing.py
+if ($blob.Trim() -ne $want.Trim()) { Write-Output 'STOP: pairing.py does not match the reviewed overlay; use a fresh clone instead' }
+```
+   If it prints STOP, do not continue; use a fresh clone.
+4. Discard the verified overlay:
+```powershell
+git checkout -- local-worker/pairing.py
+```
+5. Move to the reviewed revision:
+```powershell
+git checkout --detach 3fa309cb08461ea046ee23e801404911c1f3bcc2
+```
+6. Keep `.venv` and do not rerun `install.py`: there are no lock or vendor
+   changes between `f3e115e` and `3fa309c`.
+7. Restart one `heartbeat-loop` sender from `local-worker`. Pairing state
+   lives in `%LOCALAPPDATA%\AIPSTER-Worker` and survives the update.
+
 ## Pairing with AIPSTER
 
 Installing never shares anything. To link this computer to your AIPSTER
@@ -79,15 +122,16 @@ Compute after pairing to refresh the resource list. If the key is revoked or
 expires, the sender exits asking for a fresh pairing code. `pairing.py status`
 shows secret-free local status and marks old success as stale.
 
-Installed the packaged worker instead of this source checkout? Pair from the
-app: open the AIPSTER Worker tray menu and choose Pair this computer (or run
-`aipster-worker pair` in a terminal) and type the dashboard code when asked.
-The tray supervises the heartbeat sender while serving and shows the pairing
-overlay (unpaired / registered / reachable / stale / repair-required) in the
-menu and `aipster-worker tray status`. A busy daemon port never blocks
-pairing or the sender: they need no local port. There is no automatic
-update; update by reinstalling from a newer reviewed pin (uninstall preserves
-pairing by default).
+No packaged installer is published yet: the built 0.1.0 package predates the
+API edge-compat fix and will not be published, so tray pairing arrives with
+the next published qualified installer. Until then, packaged installs cannot
+pair; use this source checkout. The published installer will supervise the
+heartbeat sender while serving and show the pairing overlay (unpaired /
+registered / reachable / stale / repair-required) in the menu and
+`aipster-worker tray status`. A busy daemon port never blocks pairing or the
+sender: they need no local port. When AIPSTER publishes a qualified
+installer, update packaged installs by reinstalling from its reviewed pin
+(uninstall preserves pairing by default).
 Status belongs to the selected pairing generation: a previous sender's status,
 including an in-flight response finishing after re-pairing, is not attributed
 to the new key or resource. Unbound older status records await a fresh heartbeat.
@@ -106,10 +150,114 @@ If any pairing file cannot be removed, unpair exits nonzero and reports
 incomplete cleanup. Stop the sender or other process holding the file, revoke
 the server key, and retry; an already missing file is harmless.
 Preserve unrelated models and engines. This source setup adds no startup task,
-service or automatic update. The packaged install pairs from the tray menu
-(Pair this computer) or `aipster-worker pair` and supervises the sender.
+service or automatic update. Packaged-install tray pairing will be documented
+with the published installer.
 See [pairing/storage integration details](PAIRING-INTEGRATION.md). For unqualified
 POSIX adaptation the corresponding Python entry point is `.venv/bin/python`.
+
+## Serving inference jobs (dark by default)
+
+This checkout can run *leased* inference jobs for its paired resource against a
+local upstream (Ganglion or llama-server — any OpenAI `/v1`-shaped local server
+that lists its models works). It is dark by default in both directions: nothing runs unless you start
+it here, and the server keeps `POST /api/jobs` at `INFERENCE_DISABLED` (every
+worker job route 404s) unless `INFERENCE_ENABLED` is set. No live deployment,
+live job route or live inference was exercised to add this; see
+[execution gaps](EXECUTION-GAPS.md).
+
+Prerequisites:
+
+- a paired worker (`pairing.py pair`) whose heartbeat key is bound to a
+  resource; the same private credential is reused, never copied or re-minted;
+- a running upstream — Ganglion or, on macOS, a plain `llama-server` — on
+  `http://127.0.0.1:8471` (or `AIPSTER_GANGLION_URL`, `--upstream-url`,
+  `--ganglion-base`). The address must be loopback unless you pass
+  `--allow-non-loopback-ganglion`; remote mode is not qualified.
+- if your upstream requires a token, set `AIPSTER_GANGLION_TOKEN` in the
+  environment. Do not put it on a command line, in a config file or in pairing
+  state.
+
+```powershell
+.\.venv\Scripts\python.exe pairing.py serve-jobs --once   # one poll cycle, then exit
+.\.venv\Scripts\python.exe pairing.py serve-jobs          # keep serving (Ctrl+C)
+```
+
+| Flag | Meaning |
+|---|---|
+| `--upstream-url URL` | Upstream base URL (default `http://127.0.0.1:8471`, or `AIPSTER_GANGLION_URL`). `--ganglion-base` is an alias |
+| `--runtime-id ID` | Runtime this worker claims: `ganglion` (default) or `llama-server`. Anything else exits 2 |
+| `--allow-non-loopback-ganglion` | Permit a non-loopback upstream base. Unqualified; refuses otherwise |
+| `--interval SECONDS` | Base idle poll interval (default 2). Grows while idle, capped at 30 |
+| `--models-cache-ttl SECONDS` | How long the upstream model list is cached (default 30) |
+| `--once` | Poll once and exit; still takes the single-runner lock |
+
+Per job the runner: leases one job from `GET /api/worker/jobs/next` with the
+stored heartbeat key; validates the leased envelope strictly; checks the model
+against the upstream `GET /v1/models`; then makes one non-streaming
+`POST /v1/completions` (`temperature: 0`, timeout = the deadline minus now, no
+redirects, no retries) and posts `{lease_id, status, result}` to
+`POST /api/worker/jobs/:job_id/result`. A `404` on completions means the route
+does not exist, so one single-message `/v1/chat/completions` fallback is tried;
+every other failure is final. Behaviour is identical against either upstream;
+only the runtime identity you configure changes.
+
+The lease frame is `{job_id, lease_id, envelope, deadline_at}`: `job_id` and
+`lease_id` are opaque strings and `deadline_at` is integer Unix milliseconds.
+The envelope is nested, as the coordinator builds it
+(`website/src/inference/dispatch-coordinator.mjs`):
+
+```
+{ protocol: "aipster-bound-cpu-internal/1",
+  task: { capability: "complete", model_id, prompt, max_tokens, temperature: 0,
+          allow_simulated: false, idempotency_key,
+          placement: { device: "cpu", node_id, runtime_id: "ganglion" } },
+  binding: { op_id, generation, runtime_instance, model_fingerprint, deadline_at } }
+```
+
+`protocol` must match exactly; `task` is validated field by field
+(`capability` `complete`, `placement.device` `cpu`, node id equal to this
+resource, runtime id equal to the configured `--runtime-id` — `ganglion` or
+`llama-server` — model, prompt, `max_tokens` 1..4096, `temperature` present
+and 0, `allow_simulated` present and false, no unknown fields); `binding` must
+carry exactly those five fields, with `binding.deadline_at` equal to the lease
+`deadline_at` and in the future. There is no flat-envelope form: an envelope
+without the protocol wrapper is refused.
+
+A failure is always reported as `failed` with a stable `reason`
+(`ENVELOPE_INVALID`, `MODEL_UNAVAILABLE`, `GANGLION_UNAVAILABLE`,
+`GANGLION_HTTP_ERROR`, `GANGLION_TIMEOUT`, `GANGLION_INVALID_RESPONSE`,
+`EMPTY_CONTENT`, `DEADLINE_EXCEEDED`) and no content, so it can never be
+mistaken for a successful result. The failed result is exactly
+`{reason, detail?, elapsed_ms?, usage?, cache?}` — no request, node, runtime,
+model, `simulated` or `content` field, because a failure claims nothing about
+the job's identity. A success is exactly
+`{request_id, node_id, runtime_id, model_id, runtime_instance,
+model_fingerprint, simulated: false, content, elapsed_ms, usage, cache}`;
+`runtime_id` is the configured runtime identity, and `runtime_instance` and
+`model_fingerprint` are echoed from the lease binding — never invented. Both
+shapes match L2's validator in `website/src/inference/worker-transport.mjs`.
+
+Before calling the upstream the job id is written to a private started-job ledger
+(`jobs-started.json` in the worker data dir). A job whose result post was never
+confirmed is therefore not re-executed after a restart: the outcome stays
+uncertain instead of being guessed. Only one `serve-jobs` runs per data dir
+(`jobs.lock`); a second one exits 6, matching the heartbeat sender's
+`SENDER_RUNNING`. A revoked key exits 4 (pairing again required); a malformed
+lease frame or unreadable ledger exits 2; five consecutive transport/5xx
+failures exit 5. Prompts and completions are never logged, and neither the
+heartbeat key nor the Ganglion token is printed.
+
+On macOS and other POSIX systems `serve-jobs` stops on `SIGTERM` or `SIGINT`
+(the signal launchd and Ctrl+C send): the request is recorded, a completion
+already handed to Ganglion is allowed to finish and report, and the process
+then exits 0 without re-running anything. A second signal restores the default
+action, so a wedged upstream can still be killed. The job lock is created
+user-only (`0600`) and opened without following symlinks; a lock path that
+cannot be used exits 2 rather than being misreported as a second runner.
+
+`status`, `heartbeat-once`/`heartbeat-loop`, `pair` and `unpair` are unchanged,
+and heartbeats still prove reachability only: `usable` stays false for the mock
+config, and running jobs here does not change what the dashboard reports.
 
 In a second terminal, set `$env:DENDRITE_API_TOKEN` to the same value, then:
 

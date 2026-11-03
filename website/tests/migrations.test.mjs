@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { applyMigrations } from './d1-shim.mjs';
+import { applyMigrations, MIGRATION_FILES } from './d1-shim.mjs';
 
 test('migrations create the auth and app tables', () => {
   const sqlite = new DatabaseSync(':memory:');
@@ -29,6 +29,97 @@ test('migrations create the auth and app tables', () => {
   for (const c of ['run_id', 'seq', 'at', 'event', 'body_json']) assert.ok(cols('dgm_preview_events').includes(c), `dgm_preview_events.${c}`);
   assert.ok(names.includes('idempotency_keys'), 'missing table idempotency_keys (0015)');
   assert.ok(cols('resources').includes('node_id'), 'resources.node_id (0015 pairing identity)');
+  assert.ok(names.includes('advisor_ops'), 'missing table advisor_ops (0018)');
+  for (const c of ['tenant_id', 'op_key', 'input_digest', 'state', 'receipt_json', 'created_at', 'updated_at']) assert.ok(cols('advisor_ops').includes(c), `advisor_ops.${c}`);
+  assert.ok(names.includes('dgm_muse_ops'), 'missing table dgm_muse_ops (0026)');
+  for (const c of ['tenant_id', 'op_key', 'input_digest', 'mode', 'state', 'receipt_json', 'created_at', 'updated_at', 'unknown_outcome', 'spend_micros']) assert.ok(cols('dgm_muse_ops').includes(c), `dgm_muse_ops.${c} (0026/0027/0028)`);
+  assert.ok(names.includes('dgm_muse_spend'), 'missing table dgm_muse_spend (0028)');
+  for (const c of ['scope', 'window_key', 'reserved_micros', 'used_micros', 'updated_at']) assert.ok(cols('dgm_muse_spend').includes(c), `dgm_muse_spend.${c}`);
+  // The spend window row is created lazily by the first live admission, so
+  // the migration itself seeds no data and cannot conflict with a copy.
+  assert.equal(Number(sqlite.prepare('SELECT COUNT(*) AS n FROM dgm_muse_spend').get().n), 0, 'dgm_muse_spend starts empty');
+  assert.ok(names.includes('routing_ops'), 'missing table routing_ops (0021 provisional)');
+  for (const c of ['tenant_id', 'request_id', 'state', 'source', 'ranking_json', 'policy_version', 'created_at', 'updated_at', 'expires_at']) assert.ok(cols('routing_ops').includes(c), `routing_ops.${c}`);
+  assert.ok(names.includes('routing_reservations'), 'missing table routing_reservations (0021 provisional)');
+  for (const c of ['op_id', 'tenant_id', 'grant_id', 'jobs', 'tokens', 'state', 'created_at', 'updated_at', 'expires_at']) assert.ok(cols('routing_reservations').includes(c), `routing_reservations.${c}`);
+  assert.ok(names.includes('routing_advice_cache'), 'missing table routing_advice_cache (0021 provisional)');
+  for (const c of ['cache_key', 'tenant_id', 'response_json', 'created_at', 'expires_at']) assert.ok(cols('routing_advice_cache').includes(c), `routing_advice_cache.${c}`);
+  assert.ok(names.includes('routing_refunds'), 'missing table routing_refunds (0021 provisional)');
+  for (const c of ['reservation_id', 'grant_id', 'jobs', 'tokens', 'created_at']) assert.ok(cols('routing_refunds').includes(c), `routing_refunds.${c}`);
+  assert.ok(names.includes('dispatch_admissions'), 'missing table dispatch_admissions (0024)');
+  for (const c of ['admission_ref', 'principal_id', 'tenant_id', 'grant_id', 'grant_revision', 'resource_id',
+    'incarnation', 'peer_node', 'peer_workspace', 'route', 'node_id', 'runtime_id', 'runtime_instance',
+    'model_id', 'model_fingerprint', 'max_tokens', 'pools_json', 'expires_at', 'created_at']) {
+    assert.ok(cols('dispatch_admissions').includes(c), `dispatch_admissions.${c}`);
+  }
+  assert.ok(names.includes('dispatch_operations'), 'missing table dispatch_operations (0024)');
+  for (const c of ['op_id', 'op_key', 'principal_id', 'tenant_id', 'request_digest', 'binding_json',
+    'generation', 'phase', 'job_id', 'uncertain_phase', 'uncertain_detail', 'cancel_intent',
+    'settled_outcome', 'settled_digest', 'settled_job_id', 'created_at', 'updated_at']) {
+    assert.ok(cols('dispatch_operations').includes(c), `dispatch_operations.${c}`);
+  }
+  assert.ok(names.includes('dispatch_holds'), 'missing table dispatch_holds (0024)');
+  for (const c of ['hold_id', 'op_id', 'generation', 'pool_id', 'pool_kind', 'amount', 'jobs', 'state',
+    'created_at', 'updated_at']) assert.ok(cols('dispatch_holds').includes(c), `dispatch_holds.${c}`);
+  assert.ok(names.includes('dispatch_pool_usage'), 'missing table dispatch_pool_usage (0024)');
+  for (const c of ['pool_id', 'kind', 'principal_id', 'day', 'ceiling_tokens', 'used_tokens',
+    'created_at', 'updated_at']) assert.ok(cols('dispatch_pool_usage').includes(c), `dispatch_pool_usage.${c}`);
+  assert.ok(names.includes('dispatch_start_redemptions'), 'missing table dispatch_start_redemptions (0024)');
+  for (const c of ['op_id', 'generation', 'redeemed_at', 'worker_node_id', 'worker_runtime_instance']) {
+    assert.ok(cols('dispatch_start_redemptions').includes(c), `dispatch_start_redemptions.${c}`);
+  }
+  assert.ok(names.includes('dispatch_fences'), 'missing table dispatch_fences (0024)');
+  for (const c of ['op_id', 'generation', 'fenced_at', 'reason']) assert.ok(cols('dispatch_fences').includes(c), `dispatch_fences.${c}`);
+  assert.ok(names.includes('dispatch_jobs'), 'missing table dispatch_jobs (0024)');
+  for (const c of ['job_id', 'op_id', 'generation', 'resource_id', 'node_id', 'runtime_id', 'model_id',
+    'runtime_instance', 'model_fingerprint', 'status', 'envelope_json', 'deadline_at', 'lease_id',
+    'leased_at', 'result_json', 'created_at', 'updated_at']) assert.ok(cols('dispatch_jobs').includes(c), `dispatch_jobs.${c}`);
+  assert.ok(names.includes('dispatch_settlements'), 'missing table dispatch_settlements (0024)');
+  for (const c of ['op_id', 'generation', 'job_id', 'outcome', 'result_digest', 'settled_at']) {
+    assert.ok(cols('dispatch_settlements').includes(c), `dispatch_settlements.${c}`);
+  }
+  assert.ok(names.includes('dispatch_claim_events'), 'missing table dispatch_claim_events (0025)');
+  for (const c of ['principal_id', 'claimed_at']) {
+    assert.ok(cols('dispatch_claim_events').includes(c), `dispatch_claim_events.${c}`);
+  }
+  const unique = sqlite.prepare('SELECT * FROM pragma_index_list(?)').all('dispatch_holds');
+  assert.ok(unique.some((i) => i.unique === 1), 'dispatch_holds is unique per (op_id, pool_id)');
+});
+
+test('migration 0028 backfills the unknown-outcome flag for migrated rows', () => {
+  const sqlite = new DatabaseSync(':memory:');
+  applyMigrations(sqlite, MIGRATION_FILES.filter((n) => n !== '0028_dgm_muse_spend.sql'));
+  const now = new Date().toISOString();
+  sqlite.prepare('INSERT INTO "user" (id, name, email, emailVerified, image, createdAt, updatedAt) VALUES (?, ?, ?, 1, NULL, ?, ?)')
+    .run('u_legacy', 'Legacy', 'legacy@synthetic.invalid', now, now);
+  const insert = (key, state, receipt, mode = 'live') => sqlite.prepare(
+    'INSERT INTO dgm_muse_ops (tenant_id, op_key, input_digest, mode, state, receipt_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run('u_legacy', key, `d-${key}`, mode, state, JSON.stringify(receipt), now, now);
+  insert('unc', 'uncertain', { providerContact: 'sent', acceptance: 'accepted' });
+  insert('fetch', 'fetching', { providerContact: 'sent', acceptance: 'unknown' });
+  insert('cancelled-inflight', 'cancelled', { cancelledFrom: 'fetching' });
+  insert('cancelled-sent', 'cancelled', { providerContact: 'sent' });
+  insert('cancelled-reserved', 'cancelled', { cancelledFrom: 'reserved', providerContact: 'none' });
+  insert('delivered', 'delivered', { providerContact: 'sent' });
+  // Fixture mode never contacts the provider, so its in-flight state and
+  // cancelled-from-fetching phase are not contact evidence.
+  insert('fixture-fetch', 'fetching', { providerContact: 'none', acceptance: 'not-sent' }, 'fixture');
+  insert('fixture-cancelled-inflight', 'cancelled', { cancelledFrom: 'fetching', providerContact: 'none' }, 'fixture');
+  insert('fixture-cancelled-sent', 'cancelled', { providerContact: 'sent' }, 'fixture');
+  insert('unknown-mode-fetch', 'fetching', { providerContact: 'none' }, null);
+  applyMigrations(sqlite, ['0028_dgm_muse_spend.sql']);
+  const flag = (k) => Number(sqlite.prepare('SELECT unknown_outcome FROM dgm_muse_ops WHERE op_key = ?').get(k).unknown_outcome);
+  assert.equal(flag('unc'), 1, 'a migrated uncertain row is conservatively unknown');
+  assert.equal(flag('fetch'), 1, 'a migrated live fetch may have been sent');
+  assert.equal(flag('cancelled-inflight'), 1, 'a legacy cancel during flight cannot prove the call did not run');
+  assert.equal(flag('cancelled-sent'), 1, 'retained contact evidence marks the outcome unknown');
+  assert.equal(flag('cancelled-reserved'), 0, 'a cancellation before contact stays provably unsent');
+  assert.equal(flag('delivered'), 0);
+  assert.equal(flag('fixture-fetch'), 0, 'a fixture fetch has no provider transport and is provably unsent');
+  assert.equal(flag('fixture-cancelled-inflight'), 0, 'the fixture phase alone is not contact evidence');
+  assert.equal(flag('fixture-cancelled-sent'), 1, 'actual contact evidence still marks a fixture row unknown');
+  assert.equal(flag('unknown-mode-fetch'), 1, 'an unknown mode stays conservative');
+  sqlite.close();
 });
 
 test('migrations are idempotent where SQLite allows', () => {

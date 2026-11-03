@@ -446,6 +446,7 @@ class RestartPreservesIdentityTests(unittest.TestCase):
             self.assertEqual(pairing.cmd_status(self.args), pairing.EXIT_OK)
         self.assertIn("RESTART-BEAT", out.getvalue())
 
+    @unittest.skipIf(os.name == "nt", "POSIX shebang exec and ps verification")
     def test_restart_does_not_start_duplicate_sender_in_same_controller(self):
         from packaging.aipster_tray.child import SenderChild
         fake_bin = Path(self.tmp.name) / "fake-bundle"
@@ -601,6 +602,7 @@ class WorkerChildDescendantCleanupTests(unittest.TestCase):
             self.fail(f"WorkerChild.stop orphaned grandchild {grandchild}")
 
 
+@unittest.skipIf(os.name == "nt", "POSIX process groups and signals")
 class CrossProcessSenderExclusionTests(unittest.TestCase):
     """Item 3 product gap: two heartbeat-loop processes must not both beat."""
 

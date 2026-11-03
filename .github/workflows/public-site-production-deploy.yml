@@ -1,6 +1,34 @@
-# The release owner dispatches only after independent review and merge.
-# This explicit revision gate complements protected main/environment approvals;
-# it does not replace those repository settings or prove a review occurred.
+# Production releases deploy the exact verified merged-main SHA.
+#
+# Two paths share this job, serialized by the existing public-site-production
+# concurrency group (cancel-in-progress false):
+# - manual workflow_dispatch with an explicit reviewed_sha (owner, after review);
+# - automatic workflow_run after each applicable check suite completes on main.
+#
+# Automatic trust boundary, enforced by the event gate before checkout and
+# re-verified by release-preflight against the API immediately before deploy:
+# same canonical repository (fork sources rejected), main push only, successful
+# conclusion of the triggering suite, pinned head SHA checked out and confirmed
+# with `git rev-parse HEAD`, current main still equal to that SHA, latest
+# successful check-run for every applicable suite, a merged pull request whose
+# merge commit is exactly this SHA, and no schema delta since the verified live
+# baseline. Schema changes are never auto-applied or silently deployed.
+#
+# Applicable-check policy: the main-push site suite ("Public site asset and
+# build checks") always applies. The local-worker suite ("mock-install") runs
+# on main for pushes touching its path filters and applies when the cumulative
+# live-to-target diff touches those paths; its result is required then. Each
+# suite completion wakes this workflow; an early wake fails closed in
+# preflight (the pending suite is named) and the last completion re-triggers
+# the run that can proceed. PR-only checks that never run on main (installer
+# build artifacts) are not deploy gates; their gate lives in PR review.
+#
+# Honest limitations: branch protection is absent (API returned
+# "Branch not protected"), so this file cannot prove review occurred; the
+# exact-merge-commit rule rejects unassociated main pushes from the automatic
+# path instead. Preflight is the last recheck before `wrangler deploy`; a push
+# landing between that recheck and Cloudflare propagation cannot be excluded
+# by this job. The next automatic run for the newer SHA would deploy it later.
 name: Public site production deploy
 on:
   workflow_dispatch:
@@ -9,15 +37,20 @@ on:
         description: Full merged main commit approved for this release
         required: true
         type: string
+  workflow_run:
+    workflows: ['Public site checks', 'Public local worker installation']
+    types: [completed]
+    branches: [main]
 permissions:
   contents: read
   checks: read
+  pull-requests: read
 concurrency:
   group: public-site-production
   cancel-in-progress: false
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     name: Build and deploy dist to production
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -26,9 +59,52 @@ jobs:
       run:
         working-directory: website
     steps:
+      # These two steps run before checkout, when website/ does not exist yet.
+      - name: Resolve release SHA
+        id: release
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ "$EVENT_NAME" = workflow_run ]; then
+            echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "mode=auto" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$REVIEWED_SHA" >> "$GITHUB_OUTPUT"
+            echo "mode=manual" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+      - name: Reject untrusted automatic events
+        if: steps.release.outputs.mode == 'auto'
+        working-directory: ${{ github.workspace }}
+        run: |
+          test "$TRIGGER_EVENT" = push || { echo 'Automatic deploy requires a main push event'; exit 1; }
+          test "$HEAD_BRANCH" = main || { echo 'Automatic deploy requires the main branch'; exit 1; }
+          test "$HEAD_REPO" = 'synchronic1/AIPSTER' || { echo 'Automatic deploy refuses fork sources'; exit 1; }
+          case "$WORKFLOW_NAME" in
+            'Public site checks'|'Public local worker installation') ;;
+            *) echo 'Automatic deploy only follows the site or local-worker check suites'; exit 1;;
+          esac
+        env:
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 verified 2026-10-26
         with:
           persist-credentials: false
+          fetch-depth: 0 # pin-consistency test inspects README blobs at DOCS_COMMIT (same as public-site-checks.yml)
+          ref: ${{ steps.release.outputs.sha }}
+      - name: Verify checkout matches the resolved release SHA
+        id: verify
+        working-directory: ${{ github.workspace }}
+        run: |
+          BUILT_SHA="$(git rev-parse HEAD)"
+          echo "built_sha=$BUILT_SHA" >> "$GITHUB_OUTPUT"
+          test "$BUILT_SHA" = "$RELEASE_SHA" || { echo "Checked-out $BUILT_SHA differs from resolved $RELEASE_SHA"; exit 1; }
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 verified 2026-10-26
         with:
           node-version: '24'
@@ -36,15 +112,89 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run check
       - run: npm test
-      - run: npm run build
-      - name: Require the reviewed current main revision and successful CI
+      # Pin stamps to the resolved release SHA: for workflow_run events
+      # GITHUB_SHA is the branch head, not the verified head_sha.
+      - name: Build dist
+        run: npm run build
+        env:
+          GITHUB_SHA: ${{ steps.release.outputs.sha }}
+      - name: Read live deployment baseline
+        id: live
+        run: |
+          node --input-type=module -e "import {isAlreadyLive} from './scripts/release-preflight.mjs'; const target = process.env.TARGET_SHA; let liveCommit = ''; try { const res = await fetch('https://aipster.net/deployment.json', {signal: AbortSignal.timeout(15000)}); if (res.ok) liveCommit = (await res.json()).git_commit || ''; } catch {} if (!/^[a-f0-9]{40}$/.test(liveCommit)) liveCommit = ''; const already = isAlreadyLive({liveCommit, targetSha: target}); const fs = await import('node:fs/promises'); await fs.appendFile(process.env.GITHUB_OUTPUT, 'live_sha=' + liveCommit + '\n' + 'already=' + (already ? 'true' : 'false') + '\n'); console.log(already ? 'Live revision already matches; redeploy will be skipped.' : 'Live baseline: ' + (liveCommit || '(unknown)') + '.');"
+        env:
+          TARGET_SHA: ${{ steps.release.outputs.sha }}
+      - name: Hold automatic release on unknown or migrated schema
+        id: migration
+        if: steps.release.outputs.mode == 'auto'
+        working-directory: ${{ github.workspace }}
+        run: |
+          ANCESTOR=false; DIFF_OK=false; MIGRATIONS='';
+          if git cat-file -e "$LIVE_SHA^{commit}" 2>/dev/null && git cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null; then
+            git merge-base --is-ancestor "$LIVE_SHA" "$TARGET_SHA" 2>/dev/null && ANCESTOR=true;
+            if MIGRATIONS="$(git diff --name-only "$LIVE_SHA" "$TARGET_SHA" -- website/migrations 2>/dev/null)"; then DIFF_OK=true; else MIGRATIONS=''; fi
+          fi
+          export ANCESTOR DIFF_OK MIGRATIONS
+          node --input-type=module -e "import {migrationHoldDecision} from './website/scripts/release-preflight.mjs'; import fs from 'node:fs/promises'; const d = migrationHoldDecision({liveSha: process.env.LIVE_SHA, targetSha: process.env.TARGET_SHA, ancestor: process.env.ANCESTOR === 'true', diffOk: process.env.DIFF_OK === 'true', changedMigrationPaths: (process.env.MIGRATIONS || '').split('\n').map(s => s.trim()).filter(Boolean)}); await fs.appendFile(process.env.GITHUB_OUTPUT, 'hold=' + (d.hold ? 'true' : 'false') + '\nreason=' + d.reason.replace(/\n/g, ' ') + '\n'); console.log((d.hold ? 'HOLD: ' : 'PROCEED: ') + d.reason);"
+        env:
+          LIVE_SHA: ${{ steps.live.outputs.live_sha }}
+          TARGET_SHA: ${{ steps.release.outputs.sha }}
+      - name: Determine worker-suite applicability
+        id: worker
+        if: steps.release.outputs.mode == 'auto' && steps.migration.outputs.hold != 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          W_OK=false; CHANGED='';
+          if git cat-file -e "$LIVE_SHA^{commit}" 2>/dev/null && git cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null; then
+            if CHANGED="$(git diff --name-only "$LIVE_SHA" "$TARGET_SHA" 2>/dev/null)"; then W_OK=true; else CHANGED=''; fi
+          fi
+          export W_OK CHANGED
+          node --input-type=module -e "import {isWorkerApplicable} from './website/scripts/release-preflight.mjs'; import fs from 'node:fs/promises'; const ok = process.env.W_OK === 'true'; const files = ok ? (process.env.CHANGED || '').split('\n').map(s => s.trim()).filter(Boolean) : []; const applicable = !ok || isWorkerApplicable(files); await fs.appendFile(process.env.GITHUB_OUTPUT, 'applicable=' + (applicable ? 'true' : 'false') + '\n'); console.log(applicable ? 'Worker suite applies to this release.' : 'Worker suite does not apply to this release.');"
+        env:
+          LIVE_SHA: ${{ steps.live.outputs.live_sha }}
+          TARGET_SHA: ${{ steps.release.outputs.sha }}
+      - name: Require the verified current main revision and successful CI
+        if: steps.migration.outputs.hold != 'true'
         run: node scripts/release-preflight.mjs
         env:
+          BUILT_SHA: ${{ steps.verify.outputs.built_sha }}
+          GITHUB_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_MODE: ${{ steps.release.outputs.mode }}
           REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          WORKER_APPLICABLE: ${{ steps.worker.outputs.applicable }}
           GH_TOKEN: ${{ github.token }}
       - run: npx wrangler deploy --config wrangler.jsonc
+        if: steps.migration.outputs.hold != 'true' && steps.live.outputs.already != 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           WRANGLER_SEND_METRICS: 'false'
       - name: Verify live assets, release revision and anonymous access protection
+        if: steps.migration.outputs.hold != 'true'
         run: npm run verify:live
+        env:
+          GITHUB_SHA: ${{ steps.release.outputs.sha }}
+          # On the already-live path the deployed receipt carries the deploying
+          # run's own stamp, so the verifier validates the receipt instead of
+          # byte-comparing deployment.json. New deploys stay byte-strict.
+          AIPSTER_ALREADY_LIVE: ${{ steps.live.outputs.already }}
+      - name: Report automatic hold
+        if: steps.migration.outputs.hold == 'true'
+        run: |
+          {
+            echo '## AUTODEPLOY HOLD — no deployment performed'
+            echo ''
+            echo "- release SHA: $RELEASE_SHA"
+            echo "- reason: $HOLD_REASON"
+            echo ''
+            echo 'Ship via manual workflow_dispatch after review.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::AUTODEPLOY HOLD: $HOLD_REASON"
+          exit 1
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          HOLD_REASON: ${{ steps.migration.outputs.reason }}

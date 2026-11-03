@@ -1,0 +1,161 @@
+{
+ "tool": "lighthouse 12 (chrome-headless-shell 156.0.8078.80), local wrangler dev, categories performance/accessibility/best-practices/seo",
+ "runs": {
+  "lh_admin_desktop": {
+   "before": {
+    "url": "http://localhost:8787/admin/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 100,
+     "best-practices": 96,
+     "seo": 100
+    },
+    "cls": 0.004234313849261457,
+    "lcp_ms": 286,
+    "contrast_failures": 0
+   },
+   "after": {
+    "url": "http://localhost:8787/admin/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 100,
+     "best-practices": 96,
+     "seo": 100
+    },
+    "cls": 0.00455757341334329,
+    "lcp_ms": 287,
+    "contrast_failures": 0
+   }
+  },
+  "lh_admin_mobile": {
+   "before": {
+    "url": "http://localhost:8787/admin/",
+    "scores": {
+     "performance": 91,
+     "accessibility": 100,
+     "best-practices": 96,
+     "seo": 100
+    },
+    "cls": 0.1916536291565985,
+    "lcp_ms": 1057,
+    "contrast_failures": 0
+   },
+   "after": {
+    "url": "http://localhost:8787/admin/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 100,
+     "best-practices": 96,
+     "seo": 100
+    },
+    "cls": 0.003985889420275274,
+    "lcp_ms": 1132,
+    "contrast_failures": 0
+   }
+  },
+  "lh_app_desktop": {
+   "before": {
+    "url": "http://localhost:8787/app/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 100,
+     "best-practices": 100,
+     "seo": 91
+    },
+    "cls": 0,
+    "lcp_ms": 329,
+    "contrast_failures": 0
+   },
+   "after": {
+    "url": "http://localhost:8787/app/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 100,
+     "best-practices": 100,
+     "seo": 91
+    },
+    "cls": 0,
+    "lcp_ms": 330,
+    "contrast_failures": 0
+   }
+  },
+  "lh_app_mobile": {
+   "before": {
+    "url": "http://localhost:8787/app/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 100,
+     "best-practices": 100,
+     "seo": 91
+    },
+    "cls": 0,
+    "lcp_ms": 1134,
+    "contrast_failures": 0
+   },
+   "after": {
+    "url": "http://localhost:8787/app/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 100,
+     "best-practices": 100,
+     "seo": 91
+    },
+    "cls": 0,
+    "lcp_ms": 1287,
+    "contrast_failures": 0
+   }
+  },
+  "lh_desktop": {
+   "before": {
+    "url": "http://localhost:8787/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 95,
+     "best-practices": 100,
+     "seo": 100
+    },
+    "cls": 0,
+    "lcp_ms": 372,
+    "contrast_failures": 7
+   },
+   "after": {
+    "url": "http://localhost:8787/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 100,
+     "best-practices": 100,
+     "seo": 100
+    },
+    "cls": 0,
+    "lcp_ms": 389,
+    "contrast_failures": 0
+   }
+  },
+  "lh_mobile": {
+   "before": {
+    "url": "http://localhost:8787/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 95,
+     "best-practices": 100,
+     "seo": 100
+    },
+    "cls": 0,
+    "lcp_ms": 1664,
+    "contrast_failures": 7
+   },
+   "after": {
+    "url": "http://localhost:8787/",
+    "scores": {
+     "performance": 100,
+     "accessibility": 100,
+     "best-practices": 100,
+     "seo": 100
+    },
+    "cls": 0,
+    "lcp_ms": 1664,
+    "contrast_failures": 0
+   }
+  }
+ }
+}

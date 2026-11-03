@@ -17,10 +17,20 @@ import urllib.request
 from pathlib import Path
 
 from . import state as st
-from .child import (EXIT_REPAIR_REQUIRED, SenderChild, WorkerChild,
-                      port_busy, looks_like_bind_error)
+from .child import (EXIT_REPAIR_REQUIRED, EXIT_SENDER_RUNNING, SenderChild,
+                      WorkerChild, port_busy, looks_like_bind_error)
 from .firstrun import (APP_NAME, bundle_dir, build_info, data_dir, ensure_setup,
-                       ensure_private_token, private_directory)
+                       ensure_private_token, explicit_demo_ready, first_run_ready, private_directory,
+                       runtime_note, setup_detail)
+
+if not getattr(sys, "frozen", False):
+    # Source runs need local-worker/ itself for the pairing CLI probe
+    # (frozen builds get it from the spec pathex instead; launcher.py
+    # applies the same rule). The names at that root shadow nothing the
+    # tray imports.
+    _SOURCE_ROOT = str(Path(__file__).resolve().parents[2])
+    if _SOURCE_ROOT not in sys.path:
+        sys.path.insert(0, _SOURCE_ROOT)
 
 HEALTH_TIMEOUT = 25
 TICK_SECONDS = 1
@@ -91,7 +101,7 @@ class Controller:
         if error:
             self.set_state(st.ERROR, error)
         else:
-            self.set_state(st.STOPPED)
+            self.set_state(st.STOPPED, runtime_note(self.loaded))
 
     def _reload(self):
         """(Re)load config + token. Returns an error detail or ''."""
@@ -129,6 +139,8 @@ class Controller:
         try:
             if self.sender is not None and self.sender.running():
                 return "running"
+            if self.sender_notified == EXIT_SENDER_RUNNING:
+                return "already running in another process"
             if self.sender is not None and self.sender.last_exit is not None:
                 return f"stopped (exit {self.sender.last_exit})"
         except Exception:
@@ -214,6 +226,16 @@ class Controller:
             self.log("sender not started: worker is not paired")
             return False
         try:
+            from pairing import sender_lock_held
+        except ImportError:
+            self.log("sender lock probe unavailable; spawning (exit 6 still safe)")
+        else:
+            if sender_lock_held(self.data):
+                self.log("sender already running in another process; not spawning another")
+                self.sender_notified = EXIT_SENDER_RUNNING
+                self.set_state(self.state, self.detail)  # overlay follows
+                return True
+        try:
             pid = self.sender.start()
         except SystemExit as exc:
             self.log(f"sender failed to start: {exc}")
@@ -226,6 +248,9 @@ class Controller:
         return True
 
     def stop_sender(self):
+        # A stop ends the external-sender report too: the overlay returns
+        # to a plain stopped sender until the next Start rechecks.
+        self.sender_notified = None
         if self.sender is None:
             return
         try:
@@ -357,7 +382,7 @@ class Controller:
             if code is not None:
                 self._classify_exit(code)
             elif self.loaded and _health_ok(self.loaded.node.host, self.loaded.node.port):
-                self.set_state(st.RUNNING)
+                self.set_state(st.RUNNING, runtime_note(self.loaded))
                 self.backend.notify("started", st.RUNNING)
             elif now >= (self.health_deadline or now):
                 self.log("worker did not become healthy in time")
@@ -394,7 +419,9 @@ class Controller:
         if code is None or code == self.sender_notified:
             return
         self.sender_notified = code
-        if code == EXIT_REPAIR_REQUIRED:
+        if code == EXIT_SENDER_RUNNING:
+            self.log("sender already running in another process; not spawning another")
+        elif code == EXIT_REPAIR_REQUIRED:
             self.log("sender key is dead; pair again with a new code")
             self.backend.notify("pair_again", self.state, "")
         elif code != 0:
@@ -711,7 +738,9 @@ def main(argv=None):
         controller.log(f"backend={controller.backend.name} windowed run")
         # The tray owns a running worker: start on launch (a busy port or bad
         # config becomes a visible state, never a silent exit).
-        if controller.state == st.STOPPED:
+        if controller.state == st.STOPPED \
+                and (first_run_ready(controller.loaded)
+                     or explicit_demo_ready(controller.loaded)):
             controller.start_worker()
         if headless:
             run_headless_loop(controller)
