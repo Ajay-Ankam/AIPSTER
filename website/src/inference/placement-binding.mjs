@@ -18,6 +18,11 @@
 // - Freshness is heartbeat freshness: `resourceLiveness` over STALE_AFTER_MS
 //   (lib/status.mjs). Admission itself requires `online`; this module applies
 //   the same bar to selection so a stale/unknown row can never be picked.
+//   Heartbeat ages are telemetry, not trusted metrics: non-finite ages take
+//   the null/unknown path and future (negative) ages clamp to just-now, so no
+//   score can be non-finite or exceed FRESHNESS_MAX. This clamp intentionally
+//   differs from the shared routing/policy.mjs:96 formula (another owner's
+//   module, left unchanged; recorded as a shared-contract observation).
 // - Model compatibility is ALWAYS 'unverified' (routing/eligibility.mjs):
 //   an exact capability-token match is a labeled scoring signal, never proof
 //   of compatibility and never an exclusion. The selection receipt carries
@@ -44,7 +49,22 @@ const MODEL_RE = /^.{1,256}$/s;
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const isId = (x) => typeof x === 'string' && ID_RE.test(x);
 
+// Mirror of the codec's strict target shape (eif-task-contract.mjs:46):
+// exactly these keys, no extras. Unknown keys are refused, never ignored.
+const BINDING_KEYS = ['device', 'nodeId', 'runtimeId', 'modelId'];
+
 const denied = (code, reason, http) => ({ ok: false, code, reason, http });
+
+// Normalize a heartbeat age for scoring and evidence. Non-finite ages
+// (NaN, Infinity, non-numbers) carry no freshness information and take the
+// null/unknown path so they can never produce a non-finite score. Negative
+// (future-timestamp) ages clamp to just-now: a future heartbeat is clock
+// skew, not proof of being "more than just now" fresh, and unclamped it
+// would score above FRESHNESS_MAX without bound.
+function normAge(age) {
+  if (!Number.isFinite(age)) return null;
+  return Math.max(0, age);
+}
 
 /**
  * Validate one explicit placement binding against fresh evidence.
@@ -56,6 +76,11 @@ const denied = (code, reason, http) => ({ ok: false, code, reason, http });
 export function validatePlacementBinding(binding, evidence) {
   if (!isObj(binding) || !isObj(evidence)) {
     return denied('INVALID_BINDING_SHAPE', 'Binding and evidence must be objects.', 400);
+  }
+  const unknownKeys = Object.keys(binding).filter((k) => !BINDING_KEYS.includes(k));
+  if (unknownKeys.length > 0) {
+    return denied('UNKNOWN_BINDING_FIELD',
+      `Unknown binding field(s): ${unknownKeys.slice(0, 5).map((k) => JSON.stringify(k)).join(', ')}. Only ${BINDING_KEYS.join(', ')} are accepted.`, 400);
   }
   // No silent fallback: anything that is not exactly cpu has no qualified
   // bound path today (GPU included).
@@ -86,7 +111,10 @@ export function validatePlacementBinding(binding, evidence) {
   }
   // Evidence disagreement fails closed: an "online" label older than the
   // freshness window is treated as stale regardless of the label.
-  if (Number.isFinite(evidence.lastSeenAgeMs) && evidence.lastSeenAgeMs > STALE_AFTER_MS) {
+  // Non-finite ages carry no freshness information (null path); negative
+  // ages clamp to just-now (clock skew, never bonus freshness).
+  const evidenceAge = normAge(evidence.lastSeenAgeMs);
+  if (evidenceAge !== null && evidenceAge > STALE_AFTER_MS) {
     return denied('STALE_BINDING', 'Heartbeat age exceeds the freshness window; no binding was issued.', 409);
   }
   return {
@@ -99,7 +127,7 @@ export function validatePlacementBinding(binding, evidence) {
       ...(binding.modelId === undefined ? {} : { modelId: binding.modelId }),
       evidence: {
         liveness: 'online',
-        lastSeenAgeMs: Number.isFinite(evidence.lastSeenAgeMs) ? evidence.lastSeenAgeMs : null,
+        lastSeenAgeMs: evidenceAge,
         modelCompat: 'unverified',
       },
     },
@@ -112,10 +140,14 @@ function scoreCandidate(c, maxTokens) {
   give('exactTokenMatch', c.exactTokenMatch === true ? SCORE.EXACT_TOKEN : 0,
     c.exactTokenMatch === true ? 'model string equals a capability token (soft signal only)' : 'no exact token match');
   give('online', c.liveness === 'online' ? SCORE.ONLINE : 0, `liveness=${c.liveness}`);
-  const fresh = c.lastSeenAgeMs === null || c.lastSeenAgeMs === undefined ? 0
-    : Math.max(0, SCORE.FRESHNESS_MAX - Math.floor(c.lastSeenAgeMs / 60000));
+  const age = normAge(c.lastSeenAgeMs);
+  const clamped = age !== null && c.lastSeenAgeMs < 0;
+  const fresh = age === null ? 0
+    : Math.max(0, Math.min(SCORE.FRESHNESS_MAX, SCORE.FRESHNESS_MAX - Math.floor(age / 60000)));
   give('freshness', fresh,
-    c.lastSeenAgeMs === null || c.lastSeenAgeMs === undefined ? 'no heartbeat age' : `heartbeat age ${c.lastSeenAgeMs}ms`);
+    age === null ? 'no heartbeat age'
+      : clamped ? `heartbeat age ${age}ms (clamped from future timestamp; skew is not bonus freshness)`
+        : `heartbeat age ${age}ms`);
   const owned = !!(c.via && c.via.owned);
   give('owned', owned ? SCORE.OWNED : 0, owned ? 'owner-direct, no grant hop' : 'via grant');
   const remaining = c.capacity ? Number(c.capacity.tokensRemaining) : null;
@@ -173,6 +205,13 @@ export function selectPlacement(candidates, request, opts = {}) {
     return exclude(candidates, 'RUNTIME_UNSUPPORTED',
       `Runtime ${JSON.stringify(runtimeId)} is not one of: ${PLACEMENT_RUNTIMES.join(', ')}.`);
   }
+  // A malformed deadline is a caller-contract violation and throws, like
+  // bad maxTokens/tenantId/candidates-shape — it is never silently ignored.
+  // Well-formed past instants (including 0/negative) select nothing.
+  if (request.deadlineMs !== undefined && request.deadlineMs !== null
+    && !Number.isSafeInteger(request.deadlineMs)) {
+    throw new Error('request.deadlineMs must be a safe-integer epoch-ms instant.');
+  }
   if (Number.isSafeInteger(request.deadlineMs) && nowMs >= request.deadlineMs) {
     return exclude(candidates, 'DEADLINE_EXCEEDED', 'The selection deadline passed; nothing was selected and nothing was held.');
   }
@@ -184,11 +223,37 @@ export function selectPlacement(candidates, request, opts = {}) {
       excluded.push({ resourceId: null, reason: 'MALFORMED_ROW' });
       continue;
     }
-    // Owned rows re-pin tenant scope here; granted rows were authorized
-    // upstream via their grant and carry no tenant field to re-check, so
-    // they are recorded as-is instead of being re-verified into a refusal.
-    if (c.via && c.via.owned === true && c.ownerId !== request.tenantId) {
-      excluded.push({ resourceId: c.resourceId, reason: 'TENANT_MISMATCH' });
+    // Authorization provenance is positively evidenced, never assumed. A
+    // descriptor without a server-shaped `via` is out of contract
+    // (buildDescriptor always emits one) and fails closed as MALFORMED_ROW —
+    // even when it claims the requester's tenant, because a client assertion
+    // of ownership is not a grant. Owned rows re-pin tenant scope here;
+    // granted rows were authorized upstream via their grant. A via that is
+    // neither is unknown provenance and is refused, not selected.
+    const via = c.via;
+    if (!isObj(via)) {
+      excluded.push({ resourceId: c.resourceId, reason: 'MALFORMED_ROW' });
+      continue;
+    }
+    if (via.owned === true) {
+      if (typeof c.ownerId !== 'string' || c.ownerId.length === 0) {
+        excluded.push({ resourceId: c.resourceId, reason: 'MALFORMED_ROW' });
+        continue;
+      }
+      if (c.ownerId !== request.tenantId) {
+        excluded.push({ resourceId: c.resourceId, reason: 'TENANT_MISMATCH' });
+        continue;
+      }
+    } else if (typeof via.grantId === 'string') {
+      if (via.grantId.length === 0) {
+        excluded.push({ resourceId: c.resourceId, reason: 'MALFORMED_ROW' });
+        continue;
+      }
+    } else if ('grantId' in via) {
+      excluded.push({ resourceId: c.resourceId, reason: 'MALFORMED_ROW' });
+      continue;
+    } else {
+      excluded.push({ resourceId: c.resourceId, reason: 'UNKNOWN_PROVENANCE' });
       continue;
     }
     if (c.liveness !== 'online' && c.liveness !== 'stale') {
@@ -241,7 +306,7 @@ export function selectPlacement(candidates, request, opts = {}) {
       binding: { device: 'cpu', nodeId: winner.candidate.resourceId, runtimeId },
       evidence: {
         liveness: winner.candidate.liveness,
-        lastSeenAgeMs: Number.isFinite(winner.candidate.lastSeenAgeMs) ? winner.candidate.lastSeenAgeMs : null,
+        lastSeenAgeMs: normAge(winner.candidate.lastSeenAgeMs),
         modelCompat: 'unverified',
       },
     },

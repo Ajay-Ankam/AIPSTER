@@ -159,3 +159,90 @@ test('tie-break is resourceId order and caller contract violations throw', () =>
   assert.throws(() => selectPlacement('nope', req()), /array/);
   assert.throws(() => selectPlacement([owned()], req({ maxTokens: 5000 })), /maxTokens/);
 });
+
+// ---- REVIEW-FABRIC-1 regressions (permanent) ----
+
+test('via-less rows fail closed even when claiming the requester tenant', () => {
+  for (const ownerId of ['tenant-b', 'tenant-a']) {
+    const row = { ...owned({ resourceId: 'res-x', ownerId }) };
+    delete row.via;
+    const r = selectPlacement([row], req(), { nowMs: NOW });
+    assert.equal(r.code, 'NO_ELIGIBLE_NODE');
+    assert.equal(r.selected, null);
+    assert.deepEqual(r.excluded, [{ resourceId: 'res-x', reason: 'MALFORMED_ROW' }]);
+  }
+});
+
+test('unrecognized via provenance is refused, valid grant refs still pass', () => {
+  for (const via of [{}, { owned: false }, { owned: 'yes' }]) {
+    const r = selectPlacement([owned({ resourceId: 'res-x', via })], req(), { nowMs: NOW });
+    assert.equal(r.code, 'NO_ELIGIBLE_NODE');
+    assert.deepEqual(r.excluded, [{ resourceId: 'res-x', reason: 'UNKNOWN_PROVENANCE' }]);
+  }
+  const nullVia = selectPlacement([owned({ resourceId: 'res-x', via: null })], req(), { nowMs: NOW });
+  assert.deepEqual(nullVia.excluded, [{ resourceId: 'res-x', reason: 'MALFORMED_ROW' }]);
+  for (const via of [{ grantId: '' }, { grantId: 42 }]) {
+    const r = selectPlacement([owned({ resourceId: 'res-x', via })], req(), { nowMs: NOW });
+    assert.equal(r.code, 'NO_ELIGIBLE_NODE');
+    assert.deepEqual(r.excluded, [{ resourceId: 'res-x', reason: 'MALFORMED_ROW' }]);
+  }
+  const ok = selectPlacement([owned({ resourceId: 'res-x', ownerId: 'owner-z', via: { grantId: 'grant-1' } })],
+    req(), { nowMs: NOW });
+  assert.equal(ok.code, 'SELECTED');
+  assert.equal(ok.selected.resourceId, 'res-x');
+});
+
+test('non-finite heartbeat ages never produce non-finite scores or quietly-ready state', () => {
+  for (const age of [NaN, Infinity, -Infinity, 'recent', undefined]) {
+    const r = selectPlacement([owned({ lastSeenAgeMs: age })], req(), { nowMs: NOW });
+    assert.equal(r.code, 'SELECTED');
+    assert.ok(Number.isFinite(r.selected.score), `score must be finite for age ${String(age)}`);
+    assert.ok(JSON.stringify(r.selected.score) !== 'null');
+    const fresh = r.selected.contributions.find((c) => c.feature === 'freshness');
+    assert.equal(fresh.points, 0);
+    assert.ok(Number.isFinite(fresh.points));
+    assert.equal(r.selected.evidence.lastSeenAgeMs, null);
+  }
+});
+
+test('future heartbeat ages clamp to just-now and never exceed the freshness bound', () => {
+  const r = selectPlacement([owned({ lastSeenAgeMs: -3_600_000 })], req(), { nowMs: NOW });
+  assert.equal(r.code, 'SELECTED');
+  const fresh = r.selected.contributions.find((c) => c.feature === 'freshness');
+  assert.ok(Number.isFinite(fresh.points));
+  assert.ok(fresh.points >= 0 && fresh.points <= 20, `freshness ${fresh.points} outside 0..20`);
+  assert.equal(fresh.points, 20);
+  assert.equal(r.selected.evidence.lastSeenAgeMs, 0);
+});
+
+test('malformed deadlineMs throws; past instants select nothing', () => {
+  for (const bad of ['tomorrow', 1.5, NaN, true, '123', {}, []]) {
+    assert.throws(() => selectPlacement([owned()], req({ deadlineMs: bad }), { nowMs: NOW }),
+      /deadline/, `deadlineMs=${String(bad)} silently ignored`);
+  }
+  for (const past of [0, -1, NOW, NOW - 1]) {
+    const r = selectPlacement([owned()], req({ deadlineMs: past }), { nowMs: NOW });
+    assert.equal(r.code, 'DEADLINE_EXCEEDED');
+    assert.equal(r.selected, null);
+  }
+  assert.equal(selectPlacement([owned()], req({ deadlineMs: null }), { nowMs: NOW }).code, 'SELECTED');
+  assert.equal(selectPlacement([owned()], req({ deadlineMs: NOW + 60_000 }), { nowMs: NOW }).code, 'SELECTED');
+});
+
+test('unknown binding keys are strictly rejected like the mirrored contract', () => {
+  const ev = { liveness: 'online', usable: true, tenantMatch: true };
+  const r = validatePlacementBinding(
+    { device: 'cpu', nodeId: 'res-01', runtimeId: 'ganglion', admin: true }, ev);
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'UNKNOWN_BINDING_FIELD');
+  assert.equal(r.http, 400);
+  assert.equal(validatePlacementBinding(
+    { device: 'cpu', nodeId: 'res-01', runtimeId: 'ganglion', modelId: 'm1' }, ev).ok, true);
+});
+
+test('validate evidence normalizes invalid heartbeat ages instead of echoing them', () => {
+  const bind = { device: 'cpu', nodeId: 'res-01', runtimeId: 'ganglion' };
+  const ev = { liveness: 'online', usable: true, tenantMatch: true };
+  assert.equal(validatePlacementBinding(bind, { ...ev, lastSeenAgeMs: NaN }).value.evidence.lastSeenAgeMs, null);
+  assert.equal(validatePlacementBinding(bind, { ...ev, lastSeenAgeMs: -5_000 }).value.evidence.lastSeenAgeMs, 0);
+});
