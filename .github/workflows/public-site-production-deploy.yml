@@ -178,6 +178,10 @@ jobs:
         run: npm run verify:live
         env:
           GITHUB_SHA: ${{ steps.release.outputs.sha }}
+          # On the already-live path the deployed receipt carries the deploying
+          # run's own stamp, so the verifier validates the receipt instead of
+          # byte-comparing deployment.json. New deploys stay byte-strict.
+          AIPSTER_ALREADY_LIVE: ${{ steps.live.outputs.already }}
       - name: Report automatic hold
         if: steps.migration.outputs.hold == 'true'
         run: |

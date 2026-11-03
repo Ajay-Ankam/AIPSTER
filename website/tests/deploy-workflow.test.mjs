@@ -126,6 +126,14 @@ test('inline node scripts use literal block syntax', () => {
   }
 });
 
+test('live verification receives the already-live mode from the baseline step', () => {
+  const texts = steps(deploy).map(b => b.header + '\n' + b.body);
+  const verify = texts.find(t => t.includes('npm run verify:live'));
+  assert(verify, 'verify step must exist');
+  assert(verify.includes('AIPSTER_ALREADY_LIVE: ${{ steps.live.outputs.already }}'),
+    'verify step must run the already-live receipt validation on the skip path');
+});
+
 test('preflight precedes wrangler deploy and live verification follows it', () => {
   const texts = steps(deploy).map(b => b.header + '\n' + b.body);
   const preflight = texts.findIndex(t => t.includes('release-preflight.mjs') && t.includes('Require the verified'));
