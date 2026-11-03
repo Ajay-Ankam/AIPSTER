@@ -146,6 +146,53 @@ test('matching deny row vetoes before any grant term is consulted', () => {
   assert.equal(other.decision, 'allow', 'a deny scoped to someone else changes nothing');
 });
 
+test('quarantined enforced grant with preserved exporter stays inert', () => {
+  // Stored D1 shape: JSON columns stringified exactly as commitGrant writes
+  // them; quarantine_reason set, exporter preserved (the exposed case).
+  const stored = {
+    ...grant(),
+    consumers: JSON.stringify([CONSUMER]),
+    snapshot: JSON.stringify([{ resourceId: RES, incarnation: INC }]),
+    actions: JSON.stringify(['inference']),
+    models: JSON.stringify(['demo-model']),
+    ceilings: JSON.stringify({ maxTokens: 1000 }),
+    quarantine_reason: 'issuer-ambiguous',
+  };
+  const d = adaptGrantToExecution({ ...LIVE(), grant: stored });
+  assert.equal(d.decision, 'deny', JSON.stringify(d));
+  assert.equal(d.code, 'GRANT_QUARANTINED');
+  assert.equal(d.execution, null);
+  // Control: the same stored shape without quarantine adapts (D1 compat).
+  const clean = adaptGrantToExecution({ ...LIVE(), grant: { ...stored, quarantine_reason: null } });
+  assert.equal(clean.decision, 'allow', JSON.stringify(clean));
+});
+
+test('stored D1 shapes: null, scalar, and object JSON columns fail closed cleanly', () => {
+  const obj = JSON.stringify({ x: 1 });
+  const shapes = [
+    ['consumers', obj], ['actions', obj], ['models', obj], ['snapshot', obj],
+    ['consumers', null], ['models', JSON.stringify('Q4_K_M')], ['snapshot', null],
+  ];
+  for (const [field, value] of shapes) {
+    const g = grant({ [field]: value });
+    let d;
+    try {
+      d = adaptGrantToExecution({ ...LIVE(), grant: g });
+    } catch (e) {
+      assert.fail(`shape ${field}=${String(value)} threw instead of denying: ${e && e.message}`);
+    }
+    assert.equal(d.decision, 'deny', `shape ${field}=${String(value)}`);
+    assert.equal(d.code, 'INPUT_MALFORMED', `shape ${field}=${String(value)}`);
+    assert.equal(d.execution, null);
+  }
+  // Absent snapshot is "no cover", not malformed.
+  const missing = grant();
+  delete missing.snapshot;
+  const d = adaptGrantToExecution({ ...LIVE(), grant: missing });
+  assert.equal(d.decision, 'deny');
+  assert.equal(d.code, 'NO_MATCHING_GRANT');
+});
+
 test('exporter drift and multi-resource snapshots stay honest', () => {
   const drift = adaptGrantToExecution({ ...LIVE(), resource: resource({ owner_id: 'u_someone_else' }) });
   assert.equal(drift.decision, 'deny');

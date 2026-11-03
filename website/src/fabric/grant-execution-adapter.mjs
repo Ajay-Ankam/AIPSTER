@@ -26,11 +26,20 @@ export const ADAPTER_REASONS = {
   CONNECTION_DOWN: 'CONNECTION_DOWN',
   CONNECTION_MISMATCH: 'CONNECTION_MISMATCH',
   GRANT_REVOKED: 'GRANT_REVOKED',
+  GRANT_QUARANTINED: 'GRANT_QUARANTINED',
   EXPORTER_MISMATCH: 'EXPORTER_MISMATCH',
   STALE_INCARNATION: 'STALE_INCARNATION',
 };
 
-const asArray = (v) => (Array.isArray(v) ? v : typeof v === 'string' ? safeParse(v, null) : null);
+// D1 returns JSON columns as strings; a stored scalar/object (corrupt or
+// migrated row) must fail closed as INPUT_MALFORMED, never throw on a
+// downstream `.includes`/`.map`. Only real arrays pass.
+const asArray = (v) => {
+  if (Array.isArray(v)) return v;
+  if (typeof v !== 'string') return null;
+  const parsed = safeParse(v, null);
+  return Array.isArray(parsed) ? parsed : null;
+};
 const asObject = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : typeof v === 'string' ? safeParse(v, null) : null);
 
 function safeParse(s, fallback) {
@@ -87,12 +96,20 @@ export function adaptGrantEntryToExecution({ grant, connection, resource, entry,
 
   if (grant.connection_id !== connection.id) return fail(ADAPTER_REASONS.CONNECTION_MISMATCH);
   if (connection.state !== 'active') return fail(ADAPTER_REASONS.CONNECTION_DOWN);
+  // Quarantined rows are inert on every path (preview, discovery, and here):
+  // the status stays 'enforced', so quarantine is checked before status.
+  // A null exporter fails closed later at the exporter pin; a preserved
+  // exporter does not rescue a quarantined row.
+  if (grant.quarantine_reason !== undefined && grant.quarantine_reason !== null) {
+    return fail(ADAPTER_REASONS.GRANT_QUARANTINED);
+  }
   // Terminal revocation is reported precisely: a revoked grant is not merely
   // "not enforced", it can never authorize again.
   if (grant.status === 'revoked') return fail(ADAPTER_REASONS.GRANT_REVOKED);
   if (grant.status !== 'enforced') return fail(ADAPTER_REASONS.GRANT_NOT_ENFORCED);
-  // The exporter must still hold the live resource: ownership drift,
-  // quarantine, or import rebinding authorizes nothing.
+  // The exporter must still hold the live resource: ownership drift
+  // authorizes nothing, and import rebinding fails closed here exactly when
+  // it changes the recorded owner.
   if (!isStr(resource.id) || !isStr(resource.owner_id) || !isStr(resource.incarnation)) {
     return fail(ADAPTER_REASONS.INPUT_MALFORMED);
   }
@@ -166,10 +183,19 @@ export function adaptGrantToExecution({ grant, connection, resources, resource, 
     // never implies a grant (store.mjs accept path grants zero access).
     return { decision: 'deny', code: ADAPTER_REASONS.NO_MATCHING_GRANT, witness: null, execution: null, details: [] };
   }
+  // A missing snapshot is "no cover" (NO_MATCHING_GRANT); a present but
+  // unparseable one (scalar/object/null where D1 holds a JSON array) is a
+  // corrupt row (INPUT_MALFORMED). Both deny; the code tells them apart.
+  if (grant.snapshot === undefined) {
+    return { decision: 'deny', code: ADAPTER_REASONS.NO_MATCHING_GRANT, witness: null, execution: null, details: [] };
+  }
   const snapshot = asArray(grant.snapshot);
+  if (!snapshot) {
+    return { decision: 'deny', code: ADAPTER_REASONS.INPUT_MALFORMED, witness: null, execution: null, details: [] };
+  }
   const given = resources !== undefined ? resources : resource;
   const resourceList = Array.isArray(given) ? given : (given ? [given] : []);
-  if (!snapshot || snapshot.length === 0 || resourceList.length === 0) {
+  if (snapshot.length === 0 || resourceList.length === 0) {
     return { decision: 'deny', code: ADAPTER_REASONS.NO_MATCHING_GRANT, witness: null, execution: null, details: [] };
   }
   const byId = new Map(resourceList.filter((r) => r && typeof r === 'object').map((r) => [r.id, r]));
