@@ -75,7 +75,7 @@ export const DISABLED_ACTIONS = {
   'advise-live': 'live_adviser is disabled; no code path enables it'
 };
 
-export const ALLOWED_BODY_KEYS = ['fixture', 'held', 'label', 'target'];
+export const ALLOWED_BODY_KEYS = ['fixture', 'held', 'label', 'target', 'proposalOpKey'];
 export const MAX_LABEL_LEN = 128;
 
 // Controller validation, budgets and bindings. Any browser-supplied key here
@@ -286,10 +286,6 @@ export function checkCreateBody(raw) {
       return previewRefused('DGM_BAD_BODY', `unexpected browser key ${JSON.stringify(key)}`);
     }
   }
-  const fixture = raw.fixture;
-  if (!FIXTURES.includes(fixture)) {
-    return previewRefused('DGM_BAD_FIXTURE', `fixture must be one of ${FIXTURES.join(', ')}`);
-  }
   const held = raw.held === undefined ? false : raw.held;
   if (typeof held !== 'boolean') {
     return previewRefused('DGM_BAD_BODY', 'held must be a boolean');
@@ -306,7 +302,25 @@ export function checkCreateBody(raw) {
     return previewRefused('DGM_UNKNOWN_TARGET',
       `unknown DGM target ${JSON.stringify(target)}; known targets: ${TARGET_NAME}`);
   }
-  return { body: { fixture, held, label: redactText(label), target: target || TARGET_NAME } };
+  // Optional advisory input: the key of a DELIVERED DGM Muse proposal op.
+  // A delivered proposal's own bounded `fixture:` directive selects the
+  // evaluated input, so `fixture` may be omitted when a proposal reference
+  // is supplied. The router verifies delivery, refuses a direct value that
+  // disagrees with the proposal, and still evaluates through this fixture
+  // table alone.
+  const proposalOpKey = raw.proposalOpKey === undefined ? null : raw.proposalOpKey;
+  if (proposalOpKey !== null && (typeof proposalOpKey !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(proposalOpKey))) {
+    return previewRefused('DGM_BAD_BODY', 'proposalOpKey must be 1..64 id chars');
+  }
+  const fixture = raw.fixture === undefined ? null : raw.fixture;
+  if (fixture !== null && !FIXTURES.includes(fixture)) {
+    return previewRefused('DGM_BAD_FIXTURE', `fixture must be one of ${FIXTURES.join(', ')}`);
+  }
+  if (fixture === null && proposalOpKey === null) {
+    return previewRefused('DGM_BAD_FIXTURE',
+      `fixture is required unless proposalOpKey names a delivered proposal whose input supplies one of ${FIXTURES.join(', ')}`);
+  }
+  return { body: { fixture, held, label: redactText(label), target: target || TARGET_NAME, proposalOpKey } };
 }
 
 // ---- fixture telemetry rows + summaries (pure; operate on stored rows) ----

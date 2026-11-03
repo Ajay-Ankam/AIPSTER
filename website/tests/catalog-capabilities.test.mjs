@@ -164,3 +164,17 @@ test('Codex-sec-P2: spent heartbeat budgets reject capability reports before any
   const r = await t.DB.prepare('SELECT heartbeat_at FROM resources WHERE id = ?').bind(node.id).first();
   assert.equal(r.heartbeat_at, null, 'liveness is untouched by a rejected report');
 });
+
+test('worker freshness mirror matches TELEMETRY_FRESH_MS', async () => {
+  // local-worker/pairing.py schedules reports against CAPABILITY_FRESH_WINDOW_SEC;
+  // if either side drifts, supported-interval math and staleness disagree silently.
+  const { TELEMETRY_FRESH_MS } = await import('../src/lib/catalog/estimate.mjs');
+  const { readFile } = await import('node:fs/promises');
+  const { fileURLToPath } = await import('node:url');
+  const path = await import('node:path');
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const pairing = await readFile(path.join(root, 'local-worker', 'pairing.py'), 'utf8');
+  const mirror = /CAPABILITY_FRESH_WINDOW_SEC\s*=\s*(\d+)/.exec(pairing)?.[1];
+  assert.ok(mirror, 'CAPABILITY_FRESH_WINDOW_SEC found in pairing.py');
+  assert.equal(Number(mirror) * 1000, TELEMETRY_FRESH_MS, 'worker mirror matches server window');
+});

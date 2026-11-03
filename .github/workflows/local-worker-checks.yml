@@ -11,6 +11,21 @@ on:
       - '.github/workflows/local-worker-checks.yml'
       - 'LICENSE'
       - 'NOTICE'
+  # Merged-main coverage for the automatic production gate: the same filters
+  # evaluate the main push, so an applicable merged SHA carries its own
+  # mock-install result. The deploy workflow requires it via WORKER_APPLICABLE.
+  push:
+    branches: [main]
+    paths:
+      - 'local-worker/**'
+      - 'website/src/**'
+      - 'website/migrations/**'
+      - 'website/tests/d1-shim.mjs'
+      - 'website/scripts/pairing-e2e-bridge.mjs'
+      - 'website/package*.json'
+      - '.github/workflows/local-worker-checks.yml'
+      - 'LICENSE'
+      - 'NOTICE'
 permissions:
   contents: read
 jobs:
@@ -37,5 +52,5 @@ jobs:
         working-directory: local-worker
       - run: ./.venv/Scripts/python.exe test_installation.py
         working-directory: local-worker
-      - run: ./.venv/Scripts/python.exe -m unittest test_pairing test_pairing_security test_pairing_windows_storage test_pairing_lifecycle test_pairing_e2e test_sender_lock test_source_update -v
+      - run: ./.venv/Scripts/python.exe -m unittest test_pairing test_pairing_security test_pairing_windows_storage test_pairing_lifecycle test_pairing_e2e test_sender_lock test_source_update test_capability_report -v
         working-directory: local-worker
