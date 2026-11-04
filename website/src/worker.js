@@ -163,6 +163,40 @@ function dispatchGrantFor({ grant, resource, principal_id, model_id, max_tokens,
   return { grant: policy };
 }
 
+// Fabric share lookup for admission: find a committed grant covering this
+// resource for this consumer that still reads back live through the store's
+// fabric read path (connection, recipient ownership, quarantine, denies,
+// incarnation). Returns { grantId } | { refused } | null. The store
+// re-verifies everything at issuance; this only shapes the route response
+// (404 nondisclosure vs 429 quota vs proceed) without granting anything.
+async function fabricGrantForAdmission(store, db, userId, resource, model_id, max_tokens) {
+  let rows = [];
+  try {
+    rows = await all(db, `SELECT id FROM fabric_grants
+      WHERE status = 'enforced' AND (quarantine_reason IS NULL)
+        AND EXISTS (SELECT 1 FROM json_each(snapshot) WHERE json_extract(value, '$.resourceId') = ?)
+        AND EXISTS (SELECT 1 FROM json_each(consumers) WHERE value = ?)
+      ORDER BY id`, resource.id, userId);
+  } catch {
+    return null;
+  }
+  let exhausted = false;
+  for (const row of rows || []) {
+    let view = null;
+    try {
+      view = await store.readGrant({ grant_id: row.id, principal_id: userId, resource_id: resource.id });
+    } catch {
+      view = null;
+    }
+    if (!view) continue;
+    if (!view.models.includes(model_id)) continue;
+    if (max_tokens > view.ceilings.maxTokens) { exhausted = true; continue; }
+    return { grantId: view.id };
+  }
+  if (exhausted) return { refused: 'GRANT_QUOTA_EXHAUSTED' };
+  return null;
+}
+
 function canonicalOrigin(env) {
   const raw = (env && env.BETTER_AUTH_URL) || '';
   if (!raw.startsWith('https://')) return null; // http is local-dev only: no host pinning
@@ -2932,9 +2966,27 @@ async function handleApi(request, env, url) {
     }
     const resource = await first(db, 'SELECT * FROM resources WHERE id = ?', body.resource_id);
     // Owner or live same-side grant with remaining quota; foreign and unknown
-    // resources answer the same 404 so existence is not disclosed.
+    // resources answer the same 404 so existence is not disclosed. A committed
+    // fabric share is checked next with the same shape: the store's fabric
+    // read path (not this route) is the authority, re-verified at issuance.
     const access = resource ? await canUseResource(db, actor.user.id, resource) : { ok: false };
-    if (!access.ok) return json(404, { error: 'Resource not found or not shared with you.', code: 'NOT_FOUND' });
+    let fabricGrantId = null;
+    let fabricRefused = null;
+    if (!access.ok && resource) {
+      const fabricStore = await getDispatchStore(env, db);
+      if (fabricStore) {
+        const found = await fabricGrantForAdmission(
+          fabricStore, db, actor.user.id, resource, body.model_id, body.max_tokens);
+        if (found && found.refused) fabricRefused = found.refused;
+        else if (found && found.grantId) fabricGrantId = found.grantId;
+      }
+    }
+    if (!access.ok && !fabricGrantId) {
+      if (fabricRefused === 'GRANT_QUOTA_EXHAUSTED') {
+        return json(429, { error: 'Grant capacity is exhausted for this request.', code: 'GRANT_QUOTA_EXHAUSTED' });
+      }
+      return json(404, { error: 'Resource not found or not shared with you.', code: 'NOT_FOUND' });
+    }
     // "Reachable" freshness is the dashboard's read-time rule (online plus a
     // heartbeat inside STALE_AFTER_MS), never the persisted flag alone.
     const liveness = resourceLiveness(
@@ -2957,6 +3009,10 @@ async function handleApi(request, env, url) {
         return json(403, { error: 'No single grant covers this request.', code: 'NO_MATCHING_GRANT', reasons: pinned.reasons || [] });
       }
       grant = pinned.grant;
+    } else if (fabricGrantId) {
+      // A fabric grant id only: the store pins recipient-side peer fields,
+      // revision and live incarnation, and re-verifies every term.
+      grant = fabricGrantId;
     }
     const store = await getDispatchStore(env, db);
     if (!store) return json(503, { error: 'Inference dispatch is not available on this deployment.', code: 'DISPATCH_UNAVAILABLE' });
@@ -2971,6 +3027,17 @@ async function handleApi(request, env, url) {
       // A per-principal cap is a stable, retryable refusal, not an outage.
       if (err && err.status === 429 && err.code === 'DISPATCH_LIMIT') {
         return json(429, { error: err.message, code: 'DISPATCH_LIMIT' });
+      }
+      // A fabric grant lost between lookup and issuance answers the same 404
+      // as a stranger, never a 403 oracle or a 503 outage.
+      if (fabricGrantId && err && err.status === 403 && err.code === 'NO_MATCHING_GRANT') {
+        return json(404, { error: 'Resource not found or not shared with you.', code: 'NOT_FOUND' });
+      }
+      // Issuance re-checks cumulative spend against the (possibly revised)
+      // ceiling after lookup passed the per-request ceiling: spent+held over
+      // the revised limit is a stable quota refusal, not an outage.
+      if (fabricGrantId && err && err.status === 429 && err.code === 'GRANT_QUOTA_EXHAUSTED') {
+        return json(429, { error: err.message, code: 'GRANT_QUOTA_EXHAUSTED' });
       }
       return json(503, { error: 'Inference dispatch is not available on this deployment.', code: 'DISPATCH_UNAVAILABLE' });
     }
