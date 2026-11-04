@@ -20,6 +20,7 @@ WM_TRAY = 0x8000 + 1
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0x0, 0x1, 0x2
 NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x1, 0x2, 0x4, 0x10
 IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
+IDI_APPLICATION = 32512  # stock icon resource; LoadIconW takes the id raw
 MF_STRING, MF_SEPARATOR, MF_GRAYED, MF_DISABLED = 0x0, 0x800, 0x1, 0x2
 TPM_LEFTALIGN, TPM_RIGHTBUTTON, TPM_RETURNCMD = 0x0, 0x2, 0x100
 WM_LBUTTONUP, WM_RBUTTONUP = 0x202, 0x205
@@ -61,6 +62,7 @@ class Win32Backend(Backend):
         self.hwnd = None
         self.hicon = None
         self.icon_file = ""
+        self.shared_icon = False  # fallback handle is shared, never destroyed
         self.added = False
 
     # -- lifecycle ------------------------------------------------------
@@ -226,21 +228,57 @@ class Win32Backend(Backend):
             handle = _user32().LoadImageW(None, str(path), IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
         except (OSError, AttributeError) as exc:
             self.log(f"backend=win32 icon load failed {path}: {exc}")
-            return
+            handle = None
+        if not handle:
+            # A missing or corrupt asset must not leave an iconless tray
+            # entry: fall back to the stock application icon. The fallback
+            # handle is shared (never destroyed); see _fallback_icon.
+            self.log(f"backend=win32 icon {path} missing or corrupt; trying fallback icon")
+            handle = self._fallback_icon()
+            self.shared_icon = handle is not None
+        else:
+            self.shared_icon = False
         if handle:
             self.hicon = handle
             self.icon_file = filename
         else:
             self.log(f"backend=win32 icon load failed {path} (missing file?)")
 
+    def _fallback_icon(self):
+        """Stock application icon. Returns a handle or None; never raises.
+
+        LoadIconW takes the resource id raw (no new binding needed); only
+        the restype is pinned here because win32.py types LoadImageW alone
+        (user32() is a cached global, so this set is stable and idempotent).
+        The returned handle is shared and must never be destroyed.
+        """
+        import ctypes
+        try:
+            user32 = _user32()
+            try:
+                # Pin the wide return type: win32.py types LoadImageW alone,
+                # and the default c_int restype would truncate 64-bit
+                # handles. user32() is a cached global, so this set is
+                # stable and idempotent. Recording fakes expose a bound
+                # method with no settable restype and skip this pin.
+                user32.LoadIconW.restype = ctypes.c_void_p
+            except (AttributeError, TypeError):
+                pass
+            return user32.LoadIconW(None, IDI_APPLICATION) or None
+        except (OSError, AttributeError) as exc:
+            self.log(f"backend=win32 fallback icon failed: {exc}")
+            return None
+
     def _free_icon(self):
         if self.hicon:
-            try:
-                _user32().DestroyIcon(self.hicon)
-            except (OSError, AttributeError):
-                pass
+            if not self.shared_icon:
+                try:
+                    _user32().DestroyIcon(self.hicon)
+                except (OSError, AttributeError):
+                    pass
             self.hicon = None
             self.icon_file = ""
+            self.shared_icon = False
 
     def _notify(self, message, flags, tip="", info=None):
         import ctypes

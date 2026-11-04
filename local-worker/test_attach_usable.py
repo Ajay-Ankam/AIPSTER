@@ -29,7 +29,9 @@ RUNTIME = "loopback-llama"
 
 def node_report(**overrides):
     runtime = {"id": RUNTIME, "kind": "llama_cpp", "mode": "attach", "state": "ready",
-               "busy": False, "simulated": False, "last_error": None}
+               "busy": False, "simulated": False, "last_error": None,
+               # What dendrite reports for an attached model (runtimes/llama.py).
+               "loaded_model": MODEL, "model_fingerprint": "attached:" + MODEL}
     model = {"id": MODEL, "runtime": RUNTIME, "available": True, "resident": True,
              "simulated": False}
     runtime.update(overrides.pop("runtime", {}))
@@ -248,7 +250,7 @@ class AttachUsableTests(unittest.TestCase):
         node.body = node_report(model={"resident": False})
         why.clear()
         decide_usable(str(config), self.data, why)
-        self.assertEqual(why, ["attach runtime ready but no model resident/available"])
+        self.assertEqual(why, ["attach runtime ready but no configured model resident/available"])
         node.body = node_report()
         why.clear()
         self.assertTrue(decide_usable(str(config), self.data, why))
@@ -283,6 +285,37 @@ class AttachUsableTests(unittest.TestCase):
             why = []
             self.assertFalse(decide_usable(str(config), self.data, why))
             self.assertEqual(why, ["usable policy error (TypeError)"])
+
+    def test_stale_upstream_identity_is_not_usable(self):
+        # Independent review (Codex, PR #107): a worker still serving the old
+        # upstream after upstream_model changed in config must not count.
+        for label, override in {
+            "old fingerprint": {"model_fingerprint": "attached:OLD-UPSTREAM"},
+            "no fingerprint": {"model_fingerprint": None},
+            "other loaded model": {"loaded_model": "another-model"},
+            "nothing loaded": {"loaded_model": None},
+        }.items():
+            with self.subTest(label):
+                node = self.node(body=node_report(runtime=override))
+                config = write_config(self.data, node.port)
+                why = []
+                self.assertFalse(decide_usable(str(config), self.data, why), label)
+                if label != "nothing loaded" and label != "other loaded model":
+                    self.assertIn("identity does not match", why[0])
+                self.assertEqual(pairing._reportable_runtimes(str(config), self.data), [],
+                                 f"{label}: capability must not be claimed either")
+
+    def test_unconfigured_model_claims_nothing(self):
+        # Independent review (Codex, PR #107): a report naming only a model this
+        # config does not select must not yield usable or a capability.
+        node = self.node(body=node_report(model={"id": "removed-model"},
+                                          runtime={"loaded_model": "removed-model"}))
+        config = write_config(self.data, node.port)
+        self.assertFalse(decide_usable(str(config), self.data))
+        self.assertEqual(pairing.attached_ready_models(
+            __import__("dendrite.config", fromlist=["load_config"]).load_config(config),
+            self.data), set())
+        self.assertEqual(pairing._reportable_runtimes(str(config), self.data), [])
 
     def test_heartbeat_loop_passes_data_dir(self):
         source = (ROOT / "pairing.py").read_text(encoding="utf-8")
@@ -418,6 +451,11 @@ class ManagedLivenessTests(AttachUsableTests.__bases__[0]):
         (self.data / "model.gguf").unlink()
         self.assertFalse(decide_usable(str(config), self.data))
         self.assertEqual(node.seen, [], "file/engine check still gates first")
+
+    def test_unconfigured_managed_model_is_not_usable(self):
+        node = self.node(body=managed_report(model={"id": "removed-model"}))
+        usable, why = self.decide(write_managed_config(self.data, node.port))
+        self.assertFalse(usable, why)
 
 if __name__ == "__main__":
     unittest.main()

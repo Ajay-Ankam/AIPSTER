@@ -11,21 +11,15 @@ on:
       - '.github/workflows/local-worker-checks.yml'
       - 'LICENSE'
       - 'NOTICE'
-  # Merged-main coverage for the automatic production gate: the same filters
-  # evaluate the main push, so an applicable merged SHA carries its own
-  # mock-install result. The deploy workflow requires it via WORKER_APPLICABLE.
+  # Merged-main coverage for the automatic production gate: EVERY main push
+  # runs the suite, with no path filter, so every merged SHA carries its own
+  # mock-install result. The deploy workflow still measures worker
+  # applicability over the cumulative live-to-target range (fail-closed) and
+  # requires the result via WORKER_APPLICABLE; unneeded runs are harmless,
+  # but a registry-only or docs-only push after worker changes must never
+  # leave its target without evidence again (0de5103 bootstrap gap).
   push:
     branches: [main]
-    paths:
-      - 'local-worker/**'
-      - 'website/src/**'
-      - 'website/migrations/**'
-      - 'website/tests/d1-shim.mjs'
-      - 'website/scripts/pairing-e2e-bridge.mjs'
-      - 'website/package*.json'
-      - '.github/workflows/local-worker-checks.yml'
-      - 'LICENSE'
-      - 'NOTICE'
 permissions:
   contents: read
 jobs:

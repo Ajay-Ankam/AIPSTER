@@ -10,9 +10,11 @@ export const WORKER_WORKFLOW_NAME = 'Public local worker installation';
 export const MAIN_REF = 'refs/heads/main';
 export const MIGRATIONS_PREFIX = 'website/migrations/';
 
-// Path filters mirrored from .github/workflows/local-worker-checks.yml
-// (both the pull_request and the push section). The deploy-workflow structure
-// test fails if the two lists drift apart.
+// Path filters mirrored from the pull_request section of
+// .github/workflows/local-worker-checks.yml (the main push trigger runs
+// unfiltered so every release target carries its own result). The structure
+// tests fail if the PR list drifts from these patterns or if push regains a
+// filter.
 export const WORKER_PATH_PATTERNS = ['local-worker/**', 'website/src/**', 'website/migrations/**',
   'website/tests/d1-shim.mjs', 'website/scripts/pairing-e2e-bridge.mjs', 'website/package*.json',
   '.github/workflows/local-worker-checks.yml', 'LICENSE', 'NOTICE'];
