@@ -134,22 +134,30 @@ test('UI repair: pairing checkout uses the published reviewed source pin and qua
   const t = await ui();
   const commands = t.context.workerCommands('windows').join('\n');
   const pin = /git checkout --detach ([a-f0-9]{40})/.exec(commands)[1];
-  assert.equal(pin,'3fa309cb08461ea046ee23e801404911c1f3bcc2');
+  assert.equal(pin,'6af33d4a76765b47f9bed1a14c73d36e5aace592');
   assert.match(commands,/sparse-checkout set --no-cone \/local-worker\/ \/LICENSE/);
   assert.ok(!commands.includes('git clone https://'), 'no full checkout replaces the qualified sparse flow');
   assert.match(t.context.agentSetupPacket('windows', { id: 'p_direct01', code: 'SYNTHETIC-DIRECT-CODE', expiresAt: '2100-01-01T00:00:00Z', account: 'Direct Owner' }), /Use the pinned commands below for pairing/);
 });
 
-test('UI repair: Linux packet states unqualified adaptation, deliberate pins, and mock-only meaning', async () => {
+test('UI repair: Linux packet states real path, deliberate pins, and opt-in-only mock', async () => {
   const t = await ui();
   const packet = t.context.agentSetupPacket('linux', { id: 'p_linux01', code: 'SYNTHETIC-LINUX-CODE', expiresAt: '2100-01-01T00:00:00Z', account: 'Linux Owner' });
-  for (const phrase of ['unqualified adaptation', 'deliberate, not latest', 'simulated=true, usable=false',
-    'NOT GPU readiness', 'NOT fabric dispatch', 'no real-execution claim',
+  const flat = packet.replace(/\s+/g, ' ');
+  for (const phrase of ['real setup path', 'native execution unqualified on every OS',
+    'deliberate, not latest', 'never falls back to mock',
+    'simulated=true, usable=false', 'AIPSTER_WORKER_MOCK_DEMO=1',
+    'NOT GPU readiness', 'NOT fabric dispatch', 'makes no real-execution claim',
+    'runtime_setup.py --config config.toml', 'serve --config config.toml',
+    'do not start a duplicate sender', 'not a fabric route', 'never relabel it',
+    'GET /v1/node', 'pairing.py serve-jobs --once', 'command -v llama-server',
+    'consumer (Step 8, dark unless',
     '.venv/bin/python', '.venv/bin/dendrite', 'preflight (Step 1)']) {
-    assert.ok(packet.includes(phrase), 'Linux packet states: ' + phrase);
+    assert.ok(flat.includes(phrase), 'Linux packet states: ' + phrase);
   }
+  assert.ok(!flat.includes('reflects your configured runtime and model'), 'Linux packet makes no false usable claim');
   assert.ok(!packet.includes('.exe') && !packet.includes('%LOCALAPPDATA%') && !packet.includes('$env:'), 'Linux packet carries no Windows paths');
-  assert.ok(packet.includes('3fa309cb08461ea046ee23e801404911c1f3bcc2'), 'Linux packet keeps the pinned worker');
+  assert.ok(packet.includes('6af33d4a76765b47f9bed1a14c73d36e5aace592'), 'Linux packet keeps the pinned worker');
 });
 
 test('UI repair: dismiss and navigation erase shown codes and invalidate pending mint work', async () => {

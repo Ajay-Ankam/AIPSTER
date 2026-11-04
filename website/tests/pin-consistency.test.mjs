@@ -1,9 +1,12 @@
-// R1: docs links must resolve to a README whose install pin equals the
-// shipped worker pin, and must never instruct installing the blocked
-// f3e115e client. Reads both pins from the exact checked-in app.js, then
-// inspects the referenced README blob. Needs full git history
-// (fetch-depth: 0 in CI). The update procedure may name f3e115e as the
-// upgrade source; only install instructions are forbidden.
+// R1: docs links must resolve to a README that installs the shipped worker
+// pin, and must never instruct installing the blocked f3e115e client. Worker
+// and docs pins are compatible but not required to be equal: the docs pin is
+// the staged docs commit whose README/CHANGELOG describe the same real-first
+// flow, and its README installs WORKER_COMMIT literally. Reads both pins
+// from the exact checked-in app.js, then inspects the referenced README
+// blob. Needs full git history (fetch-depth: 0 in CI). The update procedure
+// may name f3e115e as the upgrade source; only install instructions are
+// forbidden.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';

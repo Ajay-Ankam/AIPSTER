@@ -143,7 +143,7 @@ test('packet carries the synthetic code in a delimited field with the selected s
     assert.match(packet, new RegExp(`PAIRING CODE: ${FAKE_CODE}`), `${os}: delimited code field`);
     assert.ok(!new RegExp(`--code\\s+${FAKE_CODE}`).test(packet), `${os}: code never interpolated into a command`);
     assert.match(packet, new RegExp(FAKE_EXPIRY), `${os}: expiry in packet`);
-    assert.match(packet, /3fa309cb08461ea046ee23e801404911c1f3bcc2/, `${os}: worker pin`);
+    assert.match(packet, /6af33d4a76765b47f9bed1a14c73d36e5aace592/, `${os}: worker pin`);
     assert.match(packet, new RegExp(shell.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${os}: shell label`);
     if (posix) {
       assert.match(packet, /\.venv\/bin\/python/, `${os}: posix interpreter`);
@@ -158,6 +158,15 @@ test('packet carries the synthetic code in a delimited field with the selected s
     assert.ok(!SECRET_SHAPED.test(scrubbed), `${os}: no long-lived credential shapes`);
     assert.match(packet, /x64 only|ARM64/, `${os}: architecture stop rule`);
     assert.match(packet, /usable=false/, `${os}: mock honesty`);
+    assert.match(packet, /pairing\.py serve-jobs --once/, `${os}: dark consumer step present`);
+    assert.match(packet, /GET \/v1\/node/, `${os}: authenticated node verification`);
+    assert.doesNotMatch(packet, /reflects your configured runtime and model/, `${os}: no false usable claim`);
+    if (posix) {
+      assert.match(packet, /command -v llama-server/, `${os}: posix engine probe`);
+      assert.doesNotMatch(packet, /where\.exe/, `${os}: no Windows probe`);
+    } else {
+      assert.match(packet, /where\.exe llama-server/, `${os}: PowerShell engine probe`);
+    }
   }
 });
 

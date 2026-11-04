@@ -19,18 +19,20 @@ import { checkPublic } from '../scripts/check.mjs';
 
 const PUBLIC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 // Reviewed pairing client retaining the #17 local-token and Host/Origin guards.
-const WORKER_COMMIT = '3fa309cb08461ea046ee23e801404911c1f3bcc2';
-// Immutable docs revision; kept independent so docs can be corrected without moving the code pin.
-const DOCS_COMMIT = '47d8f3c779a641d06a71fcf29bdd692b828a7781';
+const WORKER_COMMIT = '6af33d4a76765b47f9bed1a14c73d36e5aace592';
+// Staged docs commit (local, unpublished): README/CHANGELOG describe the same
+// real-first flow and install WORKER_COMMIT (see pin-consistency.test.mjs).
+const DOCS_COMMIT = '28de49febd6460826a9be09805849d92cb43c297';
 const TREE = `https://github.com/synchronic1/AIPSTER/blob/${DOCS_COMMIT}/local-worker/`;
 const EXPECTED_LINKS = [
   `${TREE}README.md`,
   `${TREE}README.md#tested-installation`,
-  `${TREE}README.md#optional-real-engine-preparation-not-needed-for-the-mock-check`,
+  `${TREE}README.md#real-engine-preparation-resident-reuse-preferred`,
   `${TREE}README.md#stop-uninstall-and-troubleshoot`,
   `${TREE}VERIFICATION.md`,
   `${TREE}EXECUTION-GAPS.md`,
   `${TREE}PAIRING-INTEGRATION.md`,
+  `${TREE}CHANGELOG.md`,
   'https://github.com/synchronic1/AIPSTER/pull/17',
   'https://github.com/synchronic1/AIPSTER/pull/20'
 ].sort();
@@ -384,12 +386,16 @@ test('one action mints and copies the code-bearing setup packet once', async () 
     'already paired', 'do not consume the code', 'private no-echo prompt', 'Never pass',
     'command-line argument', 'cannot type into that private prompt',
     'Pairing registers the resource',
-    'pairing.py heartbeat-loop --config configs/mock.toml', 'pairing.py unpair',
+    'pairing.py heartbeat-loop --config config.toml', 'pairing.py unpair',
+    'do not start a duplicate sender', 'not a fabric route', 'never relabel it',
+    'where.exe llama-server', 'pairing.py serve-jobs --once', 'GET /v1/node',
+    'compare fingerprint only, never content_digest',
     'a heartbeat proves reachability only, never inference readiness', 'A running worker is NOT proof of inference readiness',
     'Remove only local-worker/.venv', 'There is no automatic update']) {
     assert.ok(flat.includes(phrase), `missing: ${phrase}`);
   }
   assert.ok(!flat.includes('tray menu') && !flat.includes('aipster-worker pair'), 'no packaged pairing copy while no installer is usable');
+  assert.ok(!flat.includes('reflects your configured runtime and model'), 'no false readiness claim about the heartbeat usable bit');
   assert.ok(!new RegExp(`--code\\s+${FAKE_SETUP_CODE}`).test(packet), 'code never interpolated into a command');
   assert.ok(!SECRET_SHAPED.test(packet), 'no long-lived credential shapes in the packet');
   assert.ok(!/127\.0\.0\.1|localhost|C:\\Users/.test(packet), 'no loopback literal or user path baked in');
@@ -607,7 +613,7 @@ test('Advanced keeps the pinned manual commands, warnings and platform labels', 
   const text = textOf(html);
   for (const phrase of ['refuses to start without DENDRITE_API_TOKEN', 'worker-local token',
     'It is not an AIPSTER API key or heartbeat key', 'never paste it into AIPSTER, a URL or a shared config',
-    'security-fixed revision', 'Windows x64: tested', 'mock check only', 'macOS / Linux: not qualified',
+    'local-token and Host/Origin guards (#17)', 'Windows x64: tested', 'mock check only', 'macOS / Linux: not qualified',
     'untested', 'separate prerequisites', 'Manual repair', 'mint a code to type yourself',
     'Mint a one-time pairing code in Manual repair below',
     'not linked until paired', 'Advanced: manual resource registration',
@@ -628,7 +634,7 @@ test('Advanced keeps the pinned manual commands, warnings and platform labels', 
     'uv run --no-project --python 3.12.14 python install.py',
     '.\\.venv\\Scripts\\python.exe test_installation.py',
     '$env:DENDRITE_API_TOKEN = .\\.venv\\Scripts\\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"',
-    '.\\.venv\\Scripts\\dendrite.exe serve --config configs/mock.toml'
+    '.\\.venv\\Scripts\\dendrite.exe serve --config config.toml'
   ]);
   assert.ok(!/aip_|AIPSTER_(?:API_)?KEY|X-Aipster|\/api\//.test(commands), 'no AIPSTER credential or endpoint in worker commands');
 });
