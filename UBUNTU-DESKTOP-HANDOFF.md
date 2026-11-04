@@ -4,10 +4,9 @@
 
 - Base: `0de5103b078a223546ab422ef16a73436ea39cdb` (upstream `main`)
 - Branch: `muse/ubuntu-desktop-20261104` (sole writer; isolated checkout)
-- Candidate code commit: `e406e187cc6750d27a685e1eced90b0d5e4b025f`
-  (canonical Ai icon, window identity, clipboard, endpoint policy;
-  this handoff ships in a follow-up commit on the same branch;
-  supersedes `55919ed` which superseded `9e3be30`)
+- Candidate code commit: `9e373086b984dbd54086df856c4018a899dca106`
+  (blank first-run window fix; this handoff ships in a follow-up
+  commit on the same branch; supersedes `e406e18`)
 
 ## Scope delivered
 
@@ -69,8 +68,8 @@ Two Linux-only facts the reviewer must know:
 ## Reproducible artifact
 
 - `local-worker/packaging/linux/dist/aipster-worker_0.1.0-1_amd64.deb`
-  (22,030,010 bytes)
-- `sha256 6648f71be89c06b67d2b646c12af021d53374fa89e9588c4ece154c2b8095d92`
+  (22,030,338 bytes)
+- `sha256 1b5262771194ffe43023ddc544e4adaec59348311071098037fd06cf38593202`
 - `manifest.json` + `SHA256SUMS` alongside; locks:
   `requirements.lock`, `build-requirements.lock`,
   `packaging/linux/installer-build.lock`; CPython 3.12.14 via uv,
@@ -203,10 +202,18 @@ Peter's three installed-UI reports, fixed and rebuilt:
   OpenAI-compatible fabric address is configured yet." The local
   serving address is never shown or copied as an endpoint. All labels
   wrap within a minimum window width (fixes the 270px clipping).
-- Evidence: 48 unit tests OK; BackendLinuxTests 7/7 + DebTemplate 13/13
-  under isolated Xvfb (icon 64x64, WM_CLASS, clipboard round-trip, copy
-  disabled + note); rebuild frozen Tk smoke OK; no fabric-owner
-  confirmation is claimed (coordinator owns the fabric contract).
+- Evidence: 49 unit tests OK (48 + first-run initial-render
+  regression); BackendLinuxTests + DebTemplate display tests green under
+  isolated Xvfb (icon 64x64, WM_CLASS, clipboard round-trip, copy
+  disabled + note, render-on-attach without state change); rebuild
+  frozen Tk smoke OK; no fabric-owner confirmation is claimed
+  (coordinator owns the fabric contract).
+- First-run blank-window fix (this candidate): a fresh temp-data app
+  with no elected demo runtime stayed STOPPED with no transition, and
+  `attach()` never rendered — blank gray window (coordinator's
+  screenshots + window.log, no error). `attach()` now calls
+  `refresh_current()` once after `_build`. The mock-demo path had
+  masked it by starting the worker (refresh as a side effect).
 
 ## Verdict: READY-for-demo (installed verification completed)
 
