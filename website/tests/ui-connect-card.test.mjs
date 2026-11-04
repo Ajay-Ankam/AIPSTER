@@ -22,7 +22,7 @@ const PUBLIC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 
 const WORKER_COMMIT = '6af33d4a76765b47f9bed1a14c73d36e5aace592';
 // Staged docs commit (local, unpublished): README/CHANGELOG describe the same
 // real-first flow and install WORKER_COMMIT (see pin-consistency.test.mjs).
-const DOCS_COMMIT = '28de49febd6460826a9be09805849d92cb43c297';
+const DOCS_COMMIT = '33a4b838dec2de70d288d732a5d6c3bcb24f0bec';
 const TREE = `https://github.com/synchronic1/AIPSTER/blob/${DOCS_COMMIT}/local-worker/`;
 const EXPECTED_LINKS = [
   `${TREE}README.md`,

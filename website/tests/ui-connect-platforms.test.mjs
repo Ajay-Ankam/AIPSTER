@@ -160,6 +160,10 @@ test('packet carries the synthetic code in a delimited field with the selected s
     assert.match(packet, /usable=false/, `${os}: mock honesty`);
     assert.match(packet, /pairing\.py serve-jobs --once/, `${os}: dark consumer step present`);
     assert.match(packet, /GET \/v1\/node/, `${os}: authenticated node verification`);
+    assert.match(packet, /stays cold \(resident false\)/, `${os}: managed path needs no resident before explicit load`);
+    assert.match(packet, /POST \/v1\/models\/load/, `${os}: explicit user-approved load only`);
+    assert.match(packet, /Step 0/, `${os}: existing-install migration path present`);
+    assert.match(packet, /restart it with/, `${os}: mock-sender restart on the real config named`);
     assert.doesNotMatch(packet, /reflects your configured runtime and model/, `${os}: no false usable claim`);
     if (posix) {
       assert.match(packet, /command -v llama-server/, `${os}: posix engine probe`);

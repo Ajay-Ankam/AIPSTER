@@ -151,6 +151,7 @@ test('UI repair: Linux packet states real path, deliberate pins, and opt-in-only
     'runtime_setup.py --config config.toml', 'serve --config config.toml',
     'do not start a duplicate sender', 'not a fabric route', 'never relabel it',
     'GET /v1/node', 'pairing.py serve-jobs --once', 'command -v llama-server',
+    'Step 0 - already installed', 'restart it with',
     'consumer (Step 8, dark unless',
     '.venv/bin/python', '.venv/bin/dendrite', 'preflight (Step 1)']) {
     assert.ok(flat.includes(phrase), 'Linux packet states: ' + phrase);
