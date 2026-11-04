@@ -236,7 +236,13 @@ test('advisor ui: shell carries the panel, opt-in default and live region', asyn
   const at = shell.indexOf('id="adv-result"');
   const result = shell.slice(at, at + 120);
   assert.ok(result.includes('aria-live'), 'result needs a live region');
-  assert.equal((shell.match(/<script/g) || []).length, 1);
+  // BACKGROUND166: the panel shell carries exactly its approved entry plus the
+  // namespaced decorative background script, in that order, each as a
+  // single-attribute classic tag. Anything else (inline code, extra
+  // attributes, a third script) fails.
+  const classicScripts = [...shell.matchAll(/<script\s+src="([^"]+)"><\/script>/g)].map((m) => m[1]);
+  assert.deepEqual(classicScripts, ['/app/app.js', '/app/background166.js']);
+  assert.equal((shell.match(/<script/g) || []).length, classicScripts.length, 'no non-classic script tags');
 });
 
 test('advisor ui: tab switch mid-submit cannot strand the panel', async () => {
