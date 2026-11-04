@@ -6,7 +6,7 @@ import {resolve,join,sep} from 'node:path';
 import {checkPublic} from './check.mjs';
 const original=resolve(import.meta.dirname,'../public');
 async function fixture(change,run){const root=await mkdtemp(join(tmpdir(),'aipster-public-check-'));try{await cp(original,root,{recursive:true});await change(root);await run(root);}finally{assert(root.startsWith(resolve(tmpdir())+sep)&&root.includes('aipster-public-check-'));await rm(root,{recursive:true,force:true});}}
-test('valid public-only artifact passes',async()=>{assert.equal((await checkPublic(original)).files.length,46);});
+test('valid public-only artifact passes',async()=>{assert.equal((await checkPublic(original)).files.length,50);});
 
 test('an accidentally copied auth/credential file fails',async()=>fixture(root=>writeFile(resolve(root,'.dev.vars'),'SYNTHETIC_ONLY=1'),root=>assert.rejects(checkPublic(root),/allowlist/)));
 test('inline active HTML fails',async()=>fixture(async root=>{const path=resolve(root,'index.html');await writeFile(path,(await readFile(path,'utf8')).replace('</body>','<script>1</script></body>'));},root=>assert.rejects(checkPublic(root),/Active/)));
@@ -95,6 +95,8 @@ for (const [name, path, value] of [
   ['module credential shape', 'app/experiments/dsh-dgm/src/adapter.mjs', '// ghp_' + 'SYNTHETIC'.repeat(4)],
   ['module private endpoint', 'app/experiments/dsh-dgm/admin-gate.mjs', '// http://127.0.0.1:4327'],
   ['module escaped private endpoint', 'app/experiments/dsh-dgm/src/checks.mjs', String.raw`const host = "127.0.0.1";`],
+  ['demo module credential shape', 'app/experiments/inference-demo/contract.mjs', '// ghp_' + 'SYNTHETIC'.repeat(4)],
+  ['demo module private endpoint', 'app/experiments/inference-demo/app.js', '// http://127.0.0.1:4327'],
 ]) test(`rejects ${name}`, async () => fixture(
   root => edit(root, path, text => text + '\n' + value),
   root => assert.rejects(checkPublic(root), /Private/),
@@ -104,7 +106,7 @@ test('semantic approved script and link spellings remain allowed', async () => f
   await edit(root, 'app/index.html', text => text.replace('<script src="/app/app.js"></script>', "<script SRC = '/app/app.js'></script>"));
   await edit(root, 'index.html', text => text.replace('href="#overview"', "HREF = '#overview'"));
   await edit(root, 'styles.css', text => text + '\nbody{background-image:url(/favicon.svg)}');
-}, async root => assert.equal((await checkPublic(root)).files.length, 46)));
+}, async root => assert.equal((await checkPublic(root)).files.length, 50)));
 
 test('approved script cannot acquire inline code or be duplicated', async () => {
   for (const replacement of [
@@ -112,6 +114,19 @@ test('approved script cannot acquire inline code or be duplicated', async () => 
     '<script src="/app/app.js"></script><script src="/app/app.js"></script>',
   ]) await fixture(
     root => edit(root, 'app/index.html', text => text.replace('<script src="/app/app.js"></script>', replacement)),
+    root => assert.rejects(checkPublic(root), /Active|exactly/),
+  );
+});
+
+test('demo shell pins exactly its approved module script', async () => {
+  for (const replacement of [
+    '<script src="/app/experiments/inference-demo/app.js" type="module">alert(1)</script>',
+    '<script src="/app/experiments/dsh-dgm/dsh-dgm.js"></script>',
+    '<script src="/app/experiments/inference-demo/app.js"></script>',
+    '<script src="/app/experiments/inference-demo/app.js" type="text/javascript"></script>',
+    '<script src="/app/experiments/inference-demo/app.js" type="module" async></script>',
+  ]) await fixture(
+    root => edit(root, 'app/experiments/inference-demo/index.html', text => text.replace('<script src="/app/experiments/inference-demo/app.js" type="module"></script>', replacement)),
     root => assert.rejects(checkPublic(root), /Active|exactly/),
   );
 });
