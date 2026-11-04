@@ -2,47 +2,56 @@
 //
 // Pure server-side helpers only: no I/O, no D1, no fetch, no grants, no
 // admissions, no transport. Nothing here authorizes, reserves, places, or
-// dispatches. The deployed route (owned by WEB066; worker.js wiring is NOT
-// part of this module) must still:
-//   1. resolve the principal through the existing session/API-key boundary
-//      (needAuthz('inference'); heartbeat-scoped keys authorize nothing here),
-//   2. build candidates from fresh authorized inventory and select placement
-//      server-side (placement-binding.mjs; eligibility stays server-side),
-//   3. mint an admission through the existing authority
-//      (POST /api/inference/admissions shape via store.issueAdmission),
-//   4. drive the dispatch coordinator and reconcile the job,
-//   5. map every outcome through this module.
+// dispatches. The deployed handler (fabric-openai-route.mjs, called by the
+// worker.js owner) must still resolve the principal through the existing
+// session/API-key boundary, build candidates from fresh authorized
+// inventory, select placement server-side, mint an admission, and drive the
+// coordinator; every outcome maps through this module.
+//
+// Initial-route compatibility (explicit, not silent): this route accepts
+// EXACTLY ONE user text message. Multi-message and multi-role conversations
+// are refused with `limited_compatibility`: the underlying EIF task contract
+// carries a single prompt string, and wrapping roles in caller-visible XML
+// is not role-preserving chat. Tool calling and coding-agent use are NOT
+// claimed; they are a separate qualification.
 //
 // A requested logical model (or 'auto') only constrains selection; the
 // central fabric chooses the worker. Unknown, unready, or absent workers
 // yield truthful typed OpenAI errors, never a silent fallback to a direct
 // local runtime (8090/8124/8471 are never referenced here by design).
 //
-// Streaming and tool calling are separate qualifications: when the real
-// transport cannot carry them they are refused with explicit typed errors
-// BEFORE dispatch, never faked with a token stream and never auto-executed.
+// Streaming is refused with an explicit typed error BEFORE dispatch, never
+// faked with a token stream. `stream: false` is an ordinary explicit
+// non-streaming request and is accepted.
+//
+// Usage and finish evidence are honest: token counts pass through ONLY when
+// the worker reported real numbers, otherwise usage is null (unknown is not
+// zero); finish_reason is 'unknown' because the EIF result carries no stop/
+// length evidence.
 import { CONTRACT_VERSION, MAX_DEADLINE_MS } from './dispatch-coordinator.mjs';
 import { decodeCpuTask } from './eif-task-contract.mjs';
 
 export const FABRIC_OPENAI_INTERFACE = 'aipster-fabric-openai/1';
-export const FABRIC_OPENAI_VERSION = 'fabric-openai/1';
+export const FABRIC_OPENAI_VERSION = 'fabric-openai/2';
 
 export const OPENAI_MODEL_MAX = 256;
-export const OPENAI_MESSAGES_MAX = 128;
 export const OPENAI_MESSAGE_CONTENT_MAX = 65536;
 export const OPENAI_MAX_TOKENS_CEILING = 4096;
 export const OPENAI_DEFAULT_MAX_TOKENS = 64;
-export const OPENAI_ROLES = Object.freeze(['system', 'user', 'assistant', 'tool']);
 
 // Bounds shared with the dispatch store result normalizer so the HTTP
 // validator and the durable store accept exactly the same completions.
 export const OPENAI_CONTENT_MAX = 65536;
 
-const ALLOWED_REQUEST_FIELDS = new Set(['model', 'messages', 'max_tokens']);
-const ALLOWED_MESSAGE_FIELDS = new Set(['role', 'content', 'name']);
+// Mirrors the coordinator's key/reference shapes so generated keys reconcile.
+export const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+export const ADMISSION_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+const ALLOWED_REQUEST_FIELDS = new Set(['model', 'messages', 'max_tokens', 'stream']);
+const ALLOWED_MESSAGE_FIELDS = new Set(['role', 'content']);
 // Refused before dispatch with their own honest codes (never stripped).
-const STREAM_FIELDS = new Set(['stream', 'stream_options']);
-const TOOL_FIELDS = new Set(['tools', 'tool_choice', 'functions', 'function_call', 'parallel_tool_calls']);
+const TOOL_FIELDS = new Set(['tools', 'tool_choice', 'functions', 'function_call', 'parallel_tool_calls',
+  'stream_options']);
 const SAMPLING_FIELDS = new Set(['temperature', 'top_p', 'top_k', 'seed', 'stop',
   'n', 'presence_penalty', 'frequency_penalty', 'logit_bias', 'logprobs',
   'top_logprobs', 'response_format', 'user']);
@@ -57,14 +66,16 @@ export function openAIError(http, code, message, type = 'server_error') {
 
 /**
  * Validate an OpenAI chat-completions request body with bounded fields.
- * Roles and tools are never flattened away silently: unknown roles are
- * rejected, and stream/tools parameters are refused with explicit codes.
- * @returns {{ok:true,value:{model:string|null,messages:object[],max_tokens:number}}|{ok:false,error:object}}
+ * Initial-route rule: exactly one `{role:'user', content}` message. Anything
+ * wider is refused with `limited_compatibility`, never squeezed into the
+ * single-prompt contract silently.
+ * @returns {{ok:true,value:{model:string|null,content:string,max_tokens:number}}|{ok:false,error:object}}
  */
 export function validateChatCompletionRequest(body) {
   if (!isObj(body)) return { ok: false, error: openAIError(400, 'invalid_request', 'A JSON object is required.', 'invalid_request_error') };
   for (const k of Object.keys(body)) {
-    if (STREAM_FIELDS.has(k)) {
+    if (k === 'stream') {
+      if (body.stream === false) continue; // ordinary explicit non-streaming client
       return { ok: false, error: openAIError(400, 'unsupported_stream',
         'Streaming is not supported by the fabric transport; the request was not dispatched.', 'invalid_request_error') };
     }
@@ -78,7 +89,7 @@ export function validateChatCompletionRequest(body) {
     }
     if (!ALLOWED_REQUEST_FIELDS.has(k)) {
       return { ok: false, error: openAIError(400, 'unsupported_field',
-        `Field ${JSON.stringify(k)} is not accepted. Only model, messages and max_tokens are accepted.`, 'invalid_request_error') };
+        'Only model, messages, max_tokens and stream:false are accepted.', 'invalid_request_error') };
     }
   }
   const rawModel = body.model === undefined ? 'auto' : body.model;
@@ -88,41 +99,28 @@ export function validateChatCompletionRequest(body) {
   // 'auto' (or omitted) constrains nothing: eligibility/placement stays
   // server-side. Any other string is a constraint the admission must match.
   const model = rawModel === 'auto' ? null : rawModel;
-  if (!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > OPENAI_MESSAGES_MAX) {
-    return { ok: false, error: openAIError(400, 'invalid_messages',
-      `messages must be an array of 1..${OPENAI_MESSAGES_MAX} entries.`, 'invalid_request_error') };
+  if (!Array.isArray(body.messages) || body.messages.length !== 1) {
+    return { ok: false, error: openAIError(400, 'limited_compatibility',
+      'This initial route accepts exactly one user text message; multi-message conversations are not supported and were not dispatched.', 'invalid_request_error') };
   }
-  const messages = [];
-  for (let i = 0; i < body.messages.length; i += 1) {
-    const m = body.messages[i];
-    if (!isObj(m) || Object.keys(m).some((k) => !ALLOWED_MESSAGE_FIELDS.has(k))) {
-      return { ok: false, error: openAIError(400, 'invalid_message', `messages[${i}] must contain only role, content and name.`, 'invalid_request_error') };
-    }
-    if (!OPENAI_ROLES.includes(m.role)) {
-      return { ok: false, error: openAIError(400, 'invalid_role',
-        `messages[${i}].role ${JSON.stringify(m.role)} is not one of: ${OPENAI_ROLES.join(', ')}. Roles are never re-labelled silently.`, 'invalid_request_error') };
-    }
-    if (typeof m.content !== 'string' || !m.content.trim() || m.content.length > OPENAI_MESSAGE_CONTENT_MAX) {
-      return { ok: false, error: openAIError(400, 'invalid_message',
-        `messages[${i}].content must be non-empty text of at most ${OPENAI_MESSAGE_CONTENT_MAX} characters.`, 'invalid_request_error') };
-    }
-    messages.push({ role: m.role, content: m.content, ...(m.name === undefined ? {} : { name: m.name }) });
+  const m = body.messages[0];
+  if (!isObj(m) || Object.keys(m).some((k) => !ALLOWED_MESSAGE_FIELDS.has(k))) {
+    return { ok: false, error: openAIError(400, 'invalid_message', 'messages[0] must contain only role and content.', 'invalid_request_error') };
+  }
+  if (m.role !== 'user') {
+    return { ok: false, error: openAIError(400, 'limited_compatibility',
+      `messages[0].role ${JSON.stringify(m.role)} is not servable: this initial route accepts exactly one user text message. Roles are never re-labelled silently.`, 'invalid_request_error') };
+  }
+  if (typeof m.content !== 'string' || !m.content.trim() || m.content.length > OPENAI_MESSAGE_CONTENT_MAX) {
+    return { ok: false, error: openAIError(400, 'invalid_message',
+      `messages[0].content must be non-empty text of at most ${OPENAI_MESSAGE_CONTENT_MAX} characters.`, 'invalid_request_error') };
   }
   const maxTokens = body.max_tokens === undefined ? OPENAI_DEFAULT_MAX_TOKENS : body.max_tokens;
   if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > OPENAI_MAX_TOKENS_CEILING) {
     return { ok: false, error: openAIError(400, 'invalid_max_tokens',
       `max_tokens must be an integer in 1..${OPENAI_MAX_TOKENS_CEILING}.`, 'invalid_request_error') };
   }
-  return { ok: true, value: { model, messages, max_tokens: maxTokens } };
-}
-
-/**
- * Render validated messages into the single-prompt EIF task with EXPLICIT
- * role labels. This is a documented, labeled projection — not a silent
- * flattening: every role survives verbatim in the prompt text.
- */
-export function renderPrompt(messages) {
-  return messages.map((m) => `<${m.role}>${m.content}</${m.role}>`).join('\n');
+  return { ok: true, value: { model, content: m.content, max_tokens: maxTokens } };
 }
 
 /**
@@ -143,32 +141,31 @@ export function resolveModel(requestedModel, admission) {
   return { ok: true, value: admitted };
 }
 
-const KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
-const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-
 /**
- * Build the coordinator submit body from a validated request. Carries no
- * placement, node, tenant, or grant fields: the target comes only from the
+ * Build the coordinator submit body from a validated request. The single
+ * user content passes through VERBATIM as the task prompt: no role framing,
+ * no caller machine/tenant/placement fields. The target comes only from the
  * server-side admission record resolved inside the coordinator.
  */
 export function buildDispatchRequest(valid, { admission_ref, idempotency_key, deadline_at, model_id }) {
-  if (typeof admission_ref !== 'string' || !REF_RE.test(admission_ref)) throw new Error('INVALID_ADMISSION_REF');
-  if (typeof idempotency_key !== 'string' || !KEY_RE.test(idempotency_key)) throw new Error('INVALID_IDEMPOTENCY_KEY');
+  if (typeof admission_ref !== 'string' || !ADMISSION_REF_RE.test(admission_ref)) throw new Error('INVALID_ADMISSION_REF');
+  if (typeof idempotency_key !== 'string' || !IDEMPOTENCY_KEY_RE.test(idempotency_key)) throw new Error('INVALID_IDEMPOTENCY_KEY');
   if (!Number.isSafeInteger(deadline_at) || !isId(model_id)) throw new Error('INVALID_DISPATCH_TARGET');
   if (!Number.isInteger(valid.max_tokens) || valid.max_tokens < 1 || valid.max_tokens > OPENAI_MAX_TOKENS_CEILING) {
     throw new Error('INVALID_MAX_TOKENS');
   }
-  const body = {
+  if (typeof valid.content !== 'string' || !valid.content.trim() || valid.content.length > OPENAI_CONTENT_MAX) {
+    throw new Error('INVALID_PROMPT');
+  }
+  return {
     contract_version: CONTRACT_VERSION,
     admission_ref,
     idempotency_key,
     model_id,
-    prompt: renderPrompt(valid.messages),
+    prompt: valid.content,
     max_tokens: valid.max_tokens,
     deadline_at,
   };
-  if (body.prompt.length > OPENAI_CONTENT_MAX) throw new Error('PROMPT_TOO_LARGE');
-  return body;
 }
 
 /**
@@ -196,13 +193,21 @@ export function noEligibleWorker(requestedModel) {
     'server_error');
 }
 
-const coerceUsage = (usage) => {
-  const num = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : 0);
+const knownCount = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+
+/**
+ * Pass worker-reported token counts through ONLY when every value is real.
+ * Unknown stays null: unmeasured usage is never fabricated as zero.
+ */
+export function coerceUsage(usage) {
   const u = isObj(usage) ? usage : {};
-  const prompt = num(u.prompt_tokens ?? u.prompt ?? u.input_tokens);
-  const completion = num(u.completion_tokens ?? u.completion ?? u.output_tokens);
-  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion };
-};
+  const prompt = knownCount(u.prompt_tokens ?? u.prompt ?? u.input_tokens);
+  const completion = knownCount(u.completion_tokens ?? u.completion ?? u.output_tokens);
+  let total = knownCount(u.total_tokens ?? u.total);
+  if (total === null && prompt !== null && completion !== null) total = prompt + completion;
+  if (prompt === null || completion === null || total === null) return null;
+  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total };
+}
 
 function chatCompletion({ jobId, model, content, usage, provenance, created }) {
   return {
@@ -210,7 +215,10 @@ function chatCompletion({ jobId, model, content, usage, provenance, created }) {
     object: 'chat.completion',
     created: Number.isSafeInteger(created) ? created : Math.floor(Date.now() / 1000),
     model,
-    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+    // The EIF result carries no stop/length evidence: 'unknown' is the only
+    // honest finish_reason. Usage is null when the worker reported no real
+    // counts (unknown is not zero).
+    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'unknown' }],
     usage: coerceUsage(usage),
     // Proof of the fabric path: the chosen machine correlated with job/output.
     provenance: {
@@ -260,8 +268,9 @@ export function mapSettledJobToCompletion(job, binding, { created } = {}) {
 /**
  * Map any coordinator outcome (submit/reconcile/cancel/viewOf) onto an HTTP
  * response. Interim states use an explicit fabric envelope; ONLY a verified
- * settled success becomes an OpenAI chat.completion. Unknown outcomes are
- * never retried automatically and never claimed as remote-stopped.
+ * settled success becomes an OpenAI chat.completion, and a 202 dispatch
+ * envelope is NEVER presented as one. Unknown outcomes are never retried
+ * automatically and never claimed as remote-stopped.
  */
 export function mapDispatchResult(out, { job = null, binding = null, created } = {}) {
   if (!isObj(out) || typeof out.status !== 'string') {
@@ -306,7 +315,7 @@ export function mapDispatchResult(out, { job = null, binding = null, created } =
     case 'rejected': {
       const code = typeof out.code === 'string' ? out.code : 'dispatch_rejected';
       const http = Number.isSafeInteger(out.http) && out.http >= 100 && out.http <= 599 ? out.http : 400;
-      const type = http >= 500 ? 'server_error' : (http === 401 || http === 403 || http === 404 ? 'invalid_request_error' : 'invalid_request_error');
+      const type = http >= 500 ? 'server_error' : 'invalid_request_error';
       return err(http, code.toLowerCase(), `Fabric dispatch refused the request (${code}); nothing was dispatched.`, type);
     }
     case 'uncertain':

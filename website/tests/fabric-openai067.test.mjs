@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  validateChatCompletionRequest, renderPrompt, resolveModel, buildDispatchRequest,
+  validateChatCompletionRequest, resolveModel, buildDispatchRequest,
   buildModelsList, noEligibleWorker, mapSettledJobToCompletion, mapDispatchResult,
-  OPENAI_DEFAULT_MAX_TOKENS,
+  coerceUsage, OPENAI_DEFAULT_MAX_TOKENS,
 } from '../src/inference/fabric-openai.mjs';
 
 const msg = (role, content) => ({ role, content });
@@ -13,40 +13,50 @@ const binding = { node_id: 'node-fixture', runtime_id: 'llama-server', model_id:
   runtime_instance: 'instance-fixture', model_fingerprint: 'fingerprint-fixture' };
 const expected = { id: 'job-fixture-0001', node_id: binding.node_id,
   runtime_id: binding.runtime_id, model_id: binding.model_id };
-const goodJob = () => ({ ...expected, status: 'succeeded', result: { request_id: expected.id,
-  node_id: expected.node_id, runtime_id: expected.runtime_id, model_id: expected.model_id,
-  runtime_instance: binding.runtime_instance, model_fingerprint: binding.model_fingerprint,
-  simulated: false, content: 'ok', elapsed_ms: 3, usage: { prompt_tokens: 4, completion_tokens: 1 }, cache: {} } });
+const goodJob = (usage = { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 }) => ({
+  ...expected, status: 'succeeded', result: { request_id: expected.id,
+    node_id: expected.node_id, runtime_id: expected.runtime_id, model_id: expected.model_id,
+    runtime_instance: binding.runtime_instance, model_fingerprint: binding.model_fingerprint,
+    simulated: false, content: 'ok', elapsed_ms: 3, usage, cache: {} } });
 
-test('valid auto request validates with bounded defaults (no inference)', () => {
+test('valid single user message validates with bounded defaults (no inference)', () => {
   const out = validateChatCompletionRequest({ messages: [msg('user', 'hi')] });
   assert.equal(out.ok, true);
-  assert.deepEqual(out.value, { model: null, messages: [{ role: 'user', content: 'hi' }], max_tokens: OPENAI_DEFAULT_MAX_TOKENS });
+  assert.deepEqual(out.value, { model: null, content: 'hi', max_tokens: OPENAI_DEFAULT_MAX_TOKENS });
+});
+
+test('explicit stream:false is accepted as ordinary non-streaming', () => {
+  const out = validateChatCompletionRequest({ ...validBody(), stream: false });
+  assert.equal(out.ok, true);
 });
 
 test('explicit model is preserved as a server-side constraint', () => {
-  const out = validateChatCompletionRequest(validBody());
-  assert.equal(out.ok, true);
-  assert.equal(out.value.model, null);
   const named = validateChatCompletionRequest({ ...validBody(), model: 'qwen3-fixture' });
   assert.equal(named.value.model, 'qwen3-fixture');
 });
 
-for (const [field, code] of [['stream', 'unsupported_stream'], ['tools', 'unsupported_tools'],
-  ['tool_choice', 'unsupported_tools'], ['temperature', 'unsupported_parameter'], ['top_p', 'unsupported_parameter'],
-  ['mystery', 'unsupported_field']]) {
+for (const [field, code, value] of [['stream', 'unsupported_stream', true], ['stream_options', 'unsupported_tools', {}],
+  ['tools', 'unsupported_tools', []], ['tool_choice', 'unsupported_tools', 'auto'],
+  ['temperature', 'unsupported_parameter', 0.5], ['top_p', 'unsupported_parameter', 1],
+  ['mystery', 'unsupported_field', 1]]) {
   test(`refuses ${field} before dispatch (${code})`, () => {
-    const out = validateChatCompletionRequest({ ...validBody(), [field]: field === 'stream' ? true : field === 'mystery' ? 1 : 0 });
+    const out = validateChatCompletionRequest({ ...validBody(), [field]: value });
     assert.equal(out.ok, false);
     assert.equal(out.error.body.error.code, code);
     assert.equal(out.error.http, 400);
   });
 }
 
-test('rejects unknown roles instead of relabelling them', () => {
-  const out = validateChatCompletionRequest({ ...validBody(), messages: [msg('developer', 'x')] });
-  assert.equal(out.ok, false);
-  assert.equal(out.error.body.error.code, 'invalid_role');
+test('initial route restricts to one user message: multi/role/name refused honestly', () => {
+  const multi = validateChatCompletionRequest({ ...validBody(), messages: [msg('user', 'a'), msg('user', 'b')] });
+  assert.equal(multi.ok, false);
+  assert.equal(multi.error.body.error.code, 'limited_compatibility');
+  const system = validateChatCompletionRequest({ ...validBody(), messages: [msg('system', 'Be brief')] });
+  assert.equal(system.ok, false);
+  assert.equal(system.error.body.error.code, 'limited_compatibility');
+  const named = validateChatCompletionRequest({ ...validBody(), messages: [{ role: 'user', content: 'x', name: 'n' }] });
+  assert.equal(named.ok, false);
+  assert.equal(named.error.body.error.code, 'invalid_message');
 });
 
 for (const bad of [{ messages: [] }, { messages: [{ role: 'user', content: ' ' }] },
@@ -57,12 +67,6 @@ for (const bad of [{ messages: [] }, { messages: [{ role: 'user', content: ' ' }
   });
 }
 
-test('rendered prompt keeps every role label explicitly', () => {
-  const prompt = renderPrompt([msg('system', 'Be brief'), msg('user', 'Go'), msg('assistant', 'Ok')]);
-  assert.ok(prompt.includes('<system>Be brief</system>') && prompt.includes('<user>Go</user>')
-    && prompt.includes('<assistant>Ok</assistant>'));
-});
-
 test('model resolution: auto takes admission, mismatch is model_not_found', () => {
   assert.equal(resolveModel(null, admission).value, 'qwen3-fixture');
   assert.equal(resolveModel('qwen3-fixture', admission).value, 'qwen3-fixture');
@@ -72,23 +76,23 @@ test('model resolution: auto takes admission, mismatch is model_not_found', () =
   assert.equal(resolveModel(null, {}).ok, false);
 });
 
-test('dispatch request carries coordinator fields only: no node, tenant, or placement', () => {
+test('dispatch request carries coordinator fields only: verbatim prompt, no placement', () => {
   const checked = validateChatCompletionRequest(validBody()).value;
   const req = buildDispatchRequest(checked, { admission_ref: 'admission-0001', idempotency_key: 'operation-0001',
     deadline_at: 1800000001000, model_id: 'qwen3-fixture' });
   assert.deepEqual(Object.keys(req).sort(),
     ['admission_ref', 'contract_version', 'deadline_at', 'idempotency_key', 'max_tokens', 'model_id', 'prompt']);
+  assert.equal(req.prompt, 'Say ok');
   assert.ok(!JSON.stringify(req).includes('node-fixture') && !JSON.stringify(req).includes('tenant'));
-  assert.ok(req.prompt.includes('<user>Say ok</user>'));
 });
 
 test('dispatch request rejects bad refs and oversized prompts', () => {
   const checked = validateChatCompletionRequest(validBody()).value;
   assert.throws(() => buildDispatchRequest(checked, { admission_ref: 'bad ref!', idempotency_key: 'operation-0001',
     deadline_at: 1, model_id: 'm' }), /INVALID_ADMISSION_REF/);
-  const big = { ...checked, messages: [{ role: 'user', content: 'y'.repeat(65536) }] };
+  const big = { ...checked, content: 'y'.repeat(65537) };
   assert.throws(() => buildDispatchRequest(big, { admission_ref: 'admission-0001',
-    idempotency_key: 'operation-0001', deadline_at: 1, model_id: 'm' }), /PROMPT_TOO_LARGE/);
+    idempotency_key: 'operation-0001', deadline_at: 1, model_id: 'm' }), /INVALID_PROMPT/);
 });
 
 test('models list advertises only usable+online entries, deduped and sorted', () => {
@@ -107,17 +111,30 @@ test('models list advertises only usable+online entries, deduped and sorted', ()
   assert.equal(noEligible.body.error.code, 'no_eligible_worker');
 });
 
-test('maps a verified settled job to a chat.completion proving the chosen machine', () => {
+test('usage passes through real counts only; unknown is null, never zero', () => {
+  assert.deepEqual(coerceUsage({ prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 }),
+    { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 });
+  assert.deepEqual(coerceUsage({ prompt_tokens: 4, completion_tokens: 1 }),
+    { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 });
+  assert.equal(coerceUsage({}), null);
+  assert.equal(coerceUsage({ prompt_tokens: 4 }), null);
+  assert.equal(coerceUsage(null), null);
+});
+
+test('verified settled job maps to chat.completion with honest finish and usage', () => {
   const mapped = mapSettledJobToCompletion(goodJob(), binding, { created: 1700000000 });
   assert.equal(mapped.ok, true);
   const body = mapped.value;
   assert.equal(body.object, 'chat.completion');
   assert.equal(body.choices[0].message.role, 'assistant');
   assert.equal(body.choices[0].message.content, 'ok');
+  assert.equal(body.choices[0].finish_reason, 'unknown');
   assert.deepEqual(body.usage, { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 });
   assert.deepEqual(body.provenance, { path: 'fabric', job_id: expected.id, node_id: binding.node_id,
     runtime_id: binding.runtime_id, model_id: binding.model_id,
     runtime_instance: binding.runtime_instance, model_fingerprint: binding.model_fingerprint, simulated: false });
+  const unknownUsage = mapSettledJobToCompletion(goodJob({}), binding, { created: 1700000000 });
+  assert.equal(unknownUsage.value.usage, null);
 });
 
 for (const change of [{ node_id: 'wrong-node' }, { model_id: 'wrong-model' }, { simulated: true },
@@ -155,6 +172,7 @@ test('interim and terminal dispatch states map honestly', () => {
   const dispatched = mapDispatchResult({ status: 'dispatched', op_id: 'op-1', job_id: expected.id });
   assert.equal(dispatched.http, 202);
   assert.equal(dispatched.body.status, 'dispatched');
+  assert.ok(dispatched.body.object !== 'chat.completion');
   assert.equal(mapDispatchResult({ status: 'pending', code: 'OPERATION_IN_PROGRESS' }).http, 409);
   assert.equal(mapDispatchResult({ status: 'released', code: 'NOT_ADMITTED' }).http, 409);
   const cancelled = mapDispatchResult({ status: 'cancelled_before_start', op_id: 'op-1', code: 'CANCELLED' });

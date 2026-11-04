@@ -1,36 +1,50 @@
-"""FABRIC067: tests for the loopback fabric OpenAI proxy (stdlib only).
+"""FABRIC067: regression tests for the loopback fabric OpenAI proxy.
 
-Real HTTP protocol against a local fixture fabric entrypoint; no model is
-contacted and no generation runs. The fixture stands in for the trusted
-fabric origin only. Cases: bounded validation, honest stream/tool refusal,
-fixed-origin SSRF guard, user-key authority (heartbeat key never accepted),
-fabric-down 503 with no direct-runtime fallback, Host/query guards, and key
-redaction in logs and responses.
+Covers the six independently reproduced defects against synthetic local HTTP
+only (fixture fabric origin; no model, no real credential):
 
-Run:  python -m pytest test_fabric_openai_proxy.py -q
+  1. unauthenticated / foreign-Origin / wrong-Content-Type callers are refused
+     before any forward; the caller-supplied key is forwarded verbatim and no
+     ambient credential exists;
+  2. upstream redirects are never followed and no credential leaves the origin;
+  3. rejected query strings never reach the logs; logs are bounded lines only;
+  4. upstream typed errors keep their status; transport failure (including a
+     hung upstream after the POST) is uncertain with no auto-retry and no
+     false undispatched claim; responses are size-bounded; proxy env is ignored;
+  5. stream:false is accepted; stream:true and tools fail before dispatch;
+  6. (JS side) single-message honesty is covered in website tests.
+
+Run:  python -m unittest test_fabric_openai_proxy
 """
 
 import io
 import json
 import os
+import re
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import fabric_openai_proxy as proxy  # noqa: E402
 
+CALLER_KEY = "caller-supplied-synthetic-not-a-credential"
+QUERY_MARKER = "SYNTHETIC_QUERY_MARKER_067"
+
 
 class FixtureFabricHandler(BaseHTTPRequestHandler):
-    """Minimal trusted-origin stand-in: records auth + payload, answers compat."""
+    """Trusted-origin stand-in with scripted modes. Records Authorization."""
 
     seen = []
+    mode = "ok"  # ok | redirect | unauthorized | hang | huge
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
@@ -44,19 +58,52 @@ class FixtureFabricHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _record(self, extra=None):
+        FixtureFabricHandler.seen.append({
+            "method": self.command, "path": self.path,
+            "authorization": self.headers.get("Authorization"), "extra": extra,
+        })
+
     def do_GET(self):  # noqa: N802
-        FixtureFabricHandler.seen.append(("GET", self.path, self.headers.get("Authorization")))
-        self._send(200, {"object": "list", "data": [{"id": "qwen3-fixture", "object": "model"}]})
+        self._record()
+        self._reply(None)
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
-        payload = json.loads(self.rfile.read(length).decode())
-        FixtureFabricHandler.seen.append(("POST", self.path, self.headers.get("Authorization"), payload))
-        self._send(200, {"id": "chatcmpl-fixture", "object": "chat.completion", "created": 1700000000,
-                         "model": payload["model"],
-                         "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
-                                      "finish_reason": "stop"}],
-                         "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}})
+        payload = json.loads(self.rfile.read(length).decode() or "null")
+        self._record(payload)
+        self._reply(payload)
+
+    def _reply(self, payload):
+        mode = FixtureFabricHandler.mode
+        if mode == "hang":
+            time.sleep(5)
+            self._send(200, {"object": "list", "data": []})
+            return
+        if mode == "redirect":
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:9/capture")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if mode == "unauthorized":
+            self._send(401, {"error": {"message": "bad key", "type": "auth_error", "code": "invalid_api_key"}})
+            return
+        if mode == "huge":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(proxy.RESPONSE_MAX_BYTES + 100))
+            self.end_headers()
+            self.wfile.write(b'{"object":"list","data":["' + b"x" * (proxy.RESPONSE_MAX_BYTES + 100) + b'"]}')
+            return
+        if self.command == "GET":
+            self._send(200, {"object": "list", "data": [{"id": "qwen3-fixture", "object": "model"}]})
+        else:
+            self._send(200, {"id": "chatcmpl-fixture", "object": "chat.completion", "created": 1700000000,
+                             "model": (payload or {}).get("model"),
+                             "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                                          "finish_reason": "stop"}],
+                             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}})
 
 
 def start_server(handler):
@@ -66,137 +113,186 @@ def start_server(handler):
     return server
 
 
-def post(port, path, obj, extra_headers=None):
-    req = Request("http://127.0.0.1:%d%s" % (port, path),
-                  data=json.dumps(obj).encode(), headers={"Content-Type": "application/json",
-                                                           **(extra_headers or {})}, method="POST")
+def raw_request(port, method, path, body=None, headers=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = Request("http://127.0.0.1:%d%s" % (port, path), data=data,
+                  headers={"Content-Type": "application/json", **(headers or {})}, method=method)
     try:
         with urlopen(req, timeout=10) as resp:
-            return resp.status, json.loads(resp.read().decode())
-    except Exception as exc:
-        return int(exc.status), json.loads(exc.read().decode())
+            return resp.status, resp.read().decode()
+    except HTTPError as exc:
+        return int(exc.code), exc.read().decode()
 
 
-def get(port, path):
-    try:
-        with urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=10) as resp:
-            return resp.status, json.loads(resp.read().decode())
-    except Exception as exc:
-        return int(exc.status), json.loads(exc.read().decode())
+def authed(extra=None):
+    headers = {"Authorization": "Bearer " + CALLER_KEY}
+    if extra:
+        headers.update(extra)
+    return headers
 
 
 class ProxyCase(unittest.TestCase):
     def setUp(self):
         FixtureFabricHandler.seen = []
+        FixtureFabricHandler.mode = "ok"
         self.fabric = start_server(FixtureFabricHandler)
-        fabric_port = self.fabric.server_port
-        self.origin = "http://127.0.0.1:%d" % fabric_port
         self.server = start_server(proxy.FabricOpenAIProxyHandler)
-        proxy.FabricOpenAIProxyHandler.fabric_origin = self.origin
-        proxy.FabricOpenAIProxyHandler.api_key_env = "FABRIC067_TEST_KEY"
+        proxy.FabricOpenAIProxyHandler.fabric_origin = "http://127.0.0.1:%d" % self.fabric.server_port
         proxy.FabricOpenAIProxyHandler.timeout = 10.0
         self.port = self.server.server_port
-        os.environ["FABRIC067_TEST_KEY"] = "user-key-not-a-secret"
 
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
         self.fabric.shutdown()
         self.fabric.server_close()
-        os.environ.pop("FABRIC067_TEST_KEY", None)
 
-    def test_models_passthrough_advertises_fabric_models(self):
-        status, body = get(self.port, "/v1/models")
-        self.assertEqual(status, 200)
-        self.assertEqual(body["data"][0]["id"], "qwen3-fixture")
-        method, path, auth = FixtureFabricHandler.seen[0]
-        self.assertEqual((method, path), ("GET", "/v1/models"))
-        self.assertEqual(auth, "Bearer user-key-not-a-secret")
+    def chat(self, obj, headers=None):
+        status, text = raw_request(self.port, "POST", "/v1/chat/completions", obj, headers)
+        return status, json.loads(text)
 
-    def test_chat_validates_bounds_then_forwards_with_user_key(self):
-        status, body = post(self.port, "/v1/chat/completions",
-                            {"model": "auto", "messages": [{"role": "user", "content": "Say ok"}], "max_tokens": 16})
-        self.assertEqual(status, 200)
-        self.assertEqual(body["object"], "chat.completion")
-        method, path, auth, payload = FixtureFabricHandler.seen[0]
-        self.assertEqual(auth, "Bearer user-key-not-a-secret")
-        self.assertEqual(payload["max_tokens"], 16)
-        self.assertNotIn("node_id", json.dumps(payload))
-
-    def test_stream_and_tools_refused_before_any_forward(self):
-        for extra in ({"stream": True}, {"tools": []}, {"temperature": 0.5}, {"mystery": 1}):
-            body = {"model": "auto", "messages": [{"role": "user", "content": "x"}], "max_tokens": 8}
-            body.update(extra)
-            status, out = post(self.port, "/v1/chat/completions", body)
-            self.assertEqual(status, 400, extra)
-            self.assertIn(out["error"]["code"],
-                          ("unsupported_stream", "unsupported_tools", "unsupported_parameter", "unsupported_field"))
-        self.assertEqual(FixtureFabricHandler.seen, [])
-
-    def test_unknown_role_and_bad_tokens_refused(self):
-        status, out = post(self.port, "/v1/chat/completions",
-                           {"model": "auto", "messages": [{"role": "developer", "content": "x"}]})
-        self.assertEqual(status, 400)
-        self.assertEqual(out["error"]["code"], "invalid_role")
-        status, out = post(self.port, "/v1/chat/completions",
-                           {"model": "auto", "messages": [{"role": "user", "content": "x"}], "max_tokens": 5000})
-        self.assertEqual(status, 400)
-        self.assertEqual(FixtureFabricHandler.seen, [])
-
-    def test_missing_user_key_is_401_and_heartbeat_store_is_never_read(self):
-        os.environ.pop("FABRIC067_TEST_KEY", None)
-        status, out = post(self.port, "/v1/chat/completions",
-                           {"model": "auto", "messages": [{"role": "user", "content": "x"}]})
+    # -- defect 1: deliberate authenticated local-caller contract ------------
+    def test_unauthenticated_cross_origin_plaintext_is_refused_without_forward(self):
+        n = len(FixtureFabricHandler.seen)
+        status, out = self.chat(
+            {"model": "auto", "messages": [{"role": "user", "content": "x"}]},
+            {"Origin": "https://untrusted.example", "Content-Type": "text/plain"})
         self.assertEqual(status, 401)
         self.assertEqual(out["error"]["code"], "auth_required")
-        # The proxy must not import pairing or touch its store for authority:
-        # no import statement and no runtime reference outside documentation.
+        self.assertEqual(len(FixtureFabricHandler.seen), n)
+
+    def test_caller_key_is_forwarded_verbatim_and_no_ambient_credential_exists(self):
+        status, out = self.chat({"model": "auto", "messages": [{"role": "user", "content": "Say ok"}],
+                                 "max_tokens": 16}, authed())
+        self.assertEqual(status, 200)
+        self.assertEqual(out["object"], "chat.completion")
+        method = FixtureFabricHandler.seen[0]
+        self.assertEqual(method["authorization"], "Bearer " + CALLER_KEY)
+        self.assertNotIn("node_id", json.dumps(method["extra"]))
+        # No ambient authority: real AST import check (docstring prose about
+        # pairing is documentation, not a dependency) plus no env-key lookup.
+        import ast
         import inspect
-        import re
-        source = inspect.getsource(proxy)
-        self.assertIsNone(re.search(r'^\s*(import|from)\s+pairing\b', source, re.M))
-        # Attribute access on a pairing module (the docstring's "pairing.py"
-        # filename mention is documentation, not a runtime reference).
-        self.assertIsNone(re.search(r'pairing\.(?!py\b)\w+', source))
+        tree = ast.parse(inspect.getsource(proxy))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        self.assertNotIn("pairing", imported)
+        self.assertIsNone(re.search(r'getenv\([\'"]AIPSTER_FABRIC_API_KEY', inspect.getsource(proxy)))
+
+    def test_foreign_origin_and_bad_content_type_refused(self):
+        status, out = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}]},
+                                authed({"Origin": "https://untrusted.example"}))
+        self.assertEqual(status, 403)
+        self.assertEqual(out["error"]["code"], "foreign_origin")
+        status, out = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}]},
+                                authed({"Content-Type": "text/plain"}))
+        self.assertEqual(status, 415)
         self.assertEqual(FixtureFabricHandler.seen, [])
 
-    def test_fabric_down_is_503_with_no_direct_runtime_fallback(self):
-        self.fabric.shutdown()
-        self.fabric.server_close()
-        status, out = post(self.port, "/v1/chat/completions",
-                           {"model": "auto", "messages": [{"role": "user", "content": "x"}], "max_tokens": 8})
-        self.assertEqual(status, 503)
-        self.assertEqual(out["error"]["code"], "fabric_unavailable")
-        # One send path only: a dead origin raises instead of falling back to
-        # any direct runtime, and the fixed paths are the only forward targets.
-        self.assertEqual((proxy.FABRIC_MODELS_PATH, proxy.FABRIC_CHAT_PATH), ("/v1/models", "/v1/chat/completions"))
-        with self.assertRaises(OSError):
-            proxy.forward_to_fabric("http://127.0.0.1:9", proxy.FABRIC_CHAT_PATH, "k", b"{}", 1.0)
+    def test_self_origin_is_allowed(self):
+        status, _ = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}]},
+                              authed({"Origin": "http://127.0.0.1:%d" % self.port}))
+        self.assertEqual(status, 200)
 
-    def test_host_and_query_token_guards(self):
-        req = Request("http://127.0.0.1:%d/v1/models" % self.port, method="GET",
-                      headers={"Host": "evil.example"})
-        try:
-            with urlopen(req, timeout=10):
-                self.fail("foreign Host must be refused")
-        except Exception as exc:
-            self.assertEqual(int(exc.status), 403)
-        status, out = get(self.port, "/v1/models?api_key=secret-value")
+    def test_host_must_match_loopback_and_serving_port_exactly(self):
+        self.assertTrue(proxy.host_allowed("127.0.0.1:%d" % self.port, self.port))
+        self.assertTrue(proxy.host_allowed("localhost:%d" % self.port, self.port))
+        self.assertTrue(proxy.host_allowed("[::1]:%d" % self.port, self.port))
+        for bad in ("localhost:1", "127.0.0.1:9", "evil.example:%d" % self.port,
+                    "127.0.0.1", "127.0.0.1:notaport", "user@127.0.0.1:%d" % self.port,
+                    "127.0.0.1:%d, evil.example" % self.port, "", None):
+            self.assertFalse(proxy.host_allowed(bad, self.port), bad)
+        # Surrounding whitespace is legal header OWS and strips to the exact
+        # authority; anything else about it must still match exactly.
+        self.assertTrue(proxy.host_allowed(" 127.0.0.1:%d " % self.port, self.port))
+        status, _ = raw_request(self.port, "GET", "/v1/models", headers={"Host": "localhost:1"})
+        self.assertEqual(status, 403)
+
+    def test_identity_material_in_query_refused(self):
+        status, out = raw_request(self.port, "GET", "/v1/models?api_key=" + QUERY_MARKER, headers=authed())
         self.assertEqual(status, 400)
-        self.assertEqual(out["error"]["code"], "identity_in_url")
+        self.assertEqual(json.loads(out)["error"]["code"], "identity_in_url")
+        self.assertEqual(FixtureFabricHandler.seen, [])
 
-    def test_key_never_logged_nor_returned(self):
+    # -- defect 2: redirects never followed, secrets never leave -------------
+    def test_redirect_is_refused_and_carries_no_credential_onward(self):
+        FixtureFabricHandler.mode = "redirect"
+        status, out = raw_request(self.port, "GET", "/v1/models", headers=authed())
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(out)["error"]["code"], "fabric_bad_redirect")
+        leaked = [e for e in FixtureFabricHandler.seen if e["authorization"] == "Bearer " + CALLER_KEY
+                  and e["path"] == "/capture"]
+        self.assertEqual(leaked, [])
+
+    # -- defect 3: bounded logs only ------------------------------------------
+    def test_rejected_query_never_logged_and_logs_are_bounded(self):
         sink = io.StringIO()
         with patch.object(proxy.sys, "stderr", sink):
-            post(self.port, "/v1/chat/completions",
-                 {"model": "auto", "messages": [{"role": "user", "content": "Say ok"}], "max_tokens": 8})
-            get(self.port, "/v1/models")
-            status, out = post(self.port, "/v1/chat/completions",
-                               {"model": "auto", "messages": [{"role": "user", "content": "x"}],
-                                "max_tokens": 8})
+            raw_request(self.port, "GET", "/v1/models?api_key=" + QUERY_MARKER, headers=authed())
+            self.chat({"model": "auto", "messages": [{"role": "user", "content": "Say ok"}],
+                       "max_tokens": 8}, authed())
+            raw_request(self.port, "GET", "/v1/models", headers=authed())
         logged = sink.getvalue()
-        self.assertNotIn("user-key-not-a-secret", logged)
-        self.assertNotIn("user-key-not-a-secret", json.dumps(out))
+        self.assertNotIn(QUERY_MARKER, logged)
+        self.assertNotIn(CALLER_KEY, logged)
+        self.assertNotIn("/v1/", logged.replace("fabric-openai-proxy: status=", ""))
+        for line in logged.strip().splitlines():
+            self.assertRegex(line, r"^fabric-openai-proxy: status=\d+ route=(models|chat|other) corr=\d+$")
+
+    # -- defect 4: honest upstream mapping, uncertainty, bounds ----------------
+    def test_upstream_401_preserved_with_status_not_rewritten_to_503(self):
+        FixtureFabricHandler.mode = "unauthorized"
+        status, text = raw_request(self.port, "GET", "/v1/models", headers=authed())
+        out = json.loads(text)
+        self.assertEqual(status, 401)
+        self.assertEqual(out["error"]["code"], "invalid_api_key")
+        self.assertNotIn("not dispatched", out["error"]["message"])
+
+    def test_hung_upstream_after_post_is_uncertain_without_retry_claim(self):
+        FixtureFabricHandler.mode = "hang"
+        proxy.FabricOpenAIProxyHandler.timeout = 1.0
+        try:
+            status, out = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}],
+                                     "max_tokens": 8}, authed())
+        finally:
+            proxy.FabricOpenAIProxyHandler.timeout = 10.0
+        self.assertEqual(status, 503)
+        self.assertEqual(out["error"]["code"], "fabric_uncertain")
+        self.assertFalse(out["automatic_retry"])
+        self.assertNotIn("not dispatched", out["error"]["message"])
+
+    def test_oversized_upstream_response_refused(self):
+        FixtureFabricHandler.mode = "huge"
+        status, out = raw_request(self.port, "GET", "/v1/models", headers=authed())
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(out)["error"]["code"], "fabric_bad_response")
+
+    def test_proxy_environment_cannot_route_user_secrets_elsewhere(self):
+        with patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
+                                     "http_proxy": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9"}):
+            status, _ = raw_request(self.port, "GET", "/v1/models", headers=authed())
+        self.assertEqual(status, 200)
+        self.assertEqual(FixtureFabricHandler.seen[-1]["authorization"], "Bearer " + CALLER_KEY)
+
+    # -- defect 5: stream:false accepted ---------------------------------------
+    def test_stream_false_accepted_and_stream_true_refused_before_forward(self):
+        status, _ = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}],
+                               "stream": False}, authed())
+        self.assertEqual(status, 200)
+        n = len(FixtureFabricHandler.seen)
+        status, out = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}],
+                                 "stream": True}, authed())
+        self.assertEqual(status, 400)
+        self.assertEqual(out["error"]["code"], "unsupported_stream")
+        status, out = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}],
+                                 "tools": []}, authed())
+        self.assertEqual(status, 400)
+        self.assertEqual(out["error"]["code"], "unsupported_tools")
+        self.assertEqual(len(FixtureFabricHandler.seen), n)
 
 
 class OriginCase(unittest.TestCase):
@@ -207,26 +303,24 @@ class OriginCase(unittest.TestCase):
                     "http://user:pass@127.0.0.1:8787", "ftp://127.0.0.1/x", ""):
             with self.assertRaises(proxy.ProxyConfigError, msg=bad):
                 proxy.resolve_fabric_origin(bad)
-        # No default origin: the operator must configure the trusted fabric
-        # entrypoint explicitly, so a direct runtime is never the silent choice.
+        self.assertTrue(proxy.resolve_fabric_origin("http://192.168.1.9:8787", allow_non_loopback=True)
+                        .startswith("http://"))
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop(proxy.FABRIC_ORIGIN_ENV, None)
             self.assertEqual(proxy.build_parser().parse_args([]).fabric_origin, "")
             with self.assertRaises(proxy.ProxyConfigError):
                 proxy.resolve_fabric_origin(proxy.build_parser().parse_args([]).fabric_origin)
-        # An explicit operator opt-in is the only non-loopback http path.
-        self.assertTrue(proxy.resolve_fabric_origin("http://192.168.1.9:8787", allow_non_loopback=True)
-                        .startswith("http://"))
 
     def test_validate_mirrors_js_bounds(self):
         ok, value = proxy.validate_chat_body({"messages": [{"role": "user", "content": "hi"}]})
         self.assertTrue(ok)
         self.assertEqual(value["model"], "auto")
         self.assertEqual(value["max_tokens"], 64)
-        bad_cases = [{"messages": []}, {"model": ""}, {"max_tokens": 0}, {"max_tokens": 4097},
-                     {"messages": [{"role": "user", "content": "x"}], "stream": True},
-                     {"messages": [{"role": "user", "content": "x"}], "tools": []}]
-        for bad in bad_cases:
+        ok, _ = proxy.validate_chat_body({"messages": [{"role": "user", "content": "hi"}], "stream": False})
+        self.assertTrue(ok)
+        for bad in [{"messages": []}, {"model": ""}, {"max_tokens": 0}, {"max_tokens": 4097},
+                    {"messages": [{"role": "user", "content": "x"}], "stream": True},
+                    {"messages": [{"role": "user", "content": "x"}], "tools": []}]:
             ok, _ = proxy.validate_chat_body(bad)
             self.assertFalse(ok, bad)
 

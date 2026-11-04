@@ -101,3 +101,41 @@ Files: `website/src/inference/fabric-openai.mjs`,
 `local-worker/test_fabric_openai_proxy.py`,
 `docs/fabric-openai067-integration-contract.md`,
 `docs/fabric-openai067-e2e-plan.md`, this packet.
+
+## 10. HOLD resolution (independent review, head 1bb6a47 preserved)
+
+All six reproduced defects are fixed and regression-tested; the suite output
+above (sections 6-7) is retained as the evidence for candidate `1bb6a47` and
+was not rewritten.
+
+1. Caller contract: every proxy request now requires caller-supplied
+   `Authorization` (forwarded verbatim; ambient env authority removed),
+   exact loopback Host with serving port (robust authority parse), absent-or-
+   self `Origin` (foreign origins 403), and `Content-Type: application/json`
+   on POST (415). Unauthenticated callers get 401 with zero forwarding.
+2. Redirects are never followed (refusing handler + no-proxy opener); a 3xx
+   becomes 502 and the fixture sink proves no credential leaves the origin.
+3. Logs are `status=N route=R corr=N` lines only: `log_request` emits
+   nothing; no request line, URL, header, body, or exception text.
+4. Upstream typed errors keep their status (bounded); transport failure —
+   including a hung upstream after the POST — is 503 `fabric_uncertain`
+   with `automatic_retry: false` and no undispatched claim; responses are
+   1 MiB-bounded.
+5. `stream: false` is accepted in both validators; `stream: true` and tools
+   fail pre-dispatch.
+6. Adapter honesty: the initial route accepts exactly one user text message
+   (`limited_compatibility` otherwise — no XML role wrapping, no
+   coding-agent/tool claims); usage is null when unmeasured; finish_reason is
+   'unknown' (the EIF result carries no stop/length evidence).
+
+Real integration is finished in the owned handler module
+`website/src/inference/fabric-openai-route.mjs` (15 tests, green): fresh
+owner-scoped candidates, server-side `selectPlacement` (route clock passed
+explicitly), real `issueAdmission`, real coordinator submit, bounded
+reconcile that never polls at/past the deadline, idempotent replay via
+read-only reconcile, settled surfacing only from the re-verified durable job
+row, and a 202 fabric receipt — never a chat completion — on budget expiry.
+The worker.js insertion is now one import plus one gated block calling the
+imported handler with the worker's own `needAuthz`/actor (exact text in the
+integration contract). Runner prerequisite: explicit operator-started
+`serve-jobs` on the chosen host; no code change needed there.
