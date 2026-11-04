@@ -163,11 +163,22 @@ a second sender there (the production heartbeat unit owns that lock).
 - Shared-dir `tray.lock` planted by an early creating probe: removed
   (0 bytes, unheld); probes are now non-creating (`r+b`).
 
-## Verdict: READY-for-demo (reviewer runtime proof completed)
+## Installed verification (coordinator, system install)
 
-Independent final review extracted this exact artifact (verified SHA256
-above) and confirmed packaged start/stop/restart, healthz, and clean
-quit — runtime proof from the extracted payload, not a package
-installation claim and not a rebuild of this evidence. No known
-blockers. The single intermittent bring-up timeout in the unit suite
-remains open as observed (cause not established; see incident log).
+- Coordinator installed this exact artifact with `sudo dpkg -i` at
+  18:13:55Z: install ok, version 0.1.0-1, SHA256 `d8a4e5cc…2de2830`
+  as above.
+- Installed `/usr/bin/aipster-tray` verified under an isolated Xvfb
+  with temp data: native window attached, mock worker healthz ok, live
+  status running, quit delivered rc 0 and launcher exit 0 at 18:14Z.
+- Existing heartbeat unit unchanged: MainPID 1536738 active,
+  NRestarts 0; production pairing/sender state untouched.
+- Real inference remains unproven by design: the bundled engine is
+  simulated, `/api/jobs` stays disabled, and heartbeats prove
+  reachability only — never inference readiness.
+
+## Verdict: READY-for-demo (installed verification completed)
+
+No known blockers. The earlier intermittent bring-up timeout is
+resolved (root cause + fix in the incident log above); no open
+product questions remain from this work.
