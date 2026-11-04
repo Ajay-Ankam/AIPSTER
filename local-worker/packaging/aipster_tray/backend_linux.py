@@ -241,8 +241,23 @@ class LinuxBaseBackend(Backend):
                 return ""
             return validate_fabric_url(value.get("fabric_base_url", ""),
                                        self.controller.endpoint_label())
-        except (ValueError, OSError):
+        except Exception:  # noqa: BLE001 - any doubt hides the address (fail closed)
             return ""
+
+    def _node_address(self):
+        """(host, port) of the loaded config, or ("", 0) when unknown.
+
+        Tolerates any controller shape (loaded None, a bool, or a config
+        without .node): unknown means no probe and no external claim, never
+        a render exception that blanks the window.
+        """
+        node = getattr(getattr(self.controller, "loaded", None), "node", None)
+        host = getattr(node, "host", "")
+        port = getattr(node, "port", 0)
+        if not isinstance(host, str) or not isinstance(port, int) \
+                or isinstance(port, bool):
+            return "", 0
+        return host, port
 
     def external_health(self, state):
         """True only when the port is busy AND its holder answers /healthz ok.
@@ -250,11 +265,10 @@ class LinuxBaseBackend(Backend):
         Read-only loopback GET via the controller's own probe; never touches
         systemd or any service. Cached for EXTERNAL_PROBE_TTL seconds.
         """
-        ctl = self.controller
-        loaded = getattr(ctl, "loaded", None) if ctl is not None else None
-        if state != st.PORT_BUSY or loaded is None:
+        host, port = self._node_address()
+        if state != st.PORT_BUSY or not host or not port:
             return False
-        key = (loaded.node.host, loaded.node.port)
+        key = (host, port)
         now = time.monotonic()
         cached = getattr(self, "_health_cache", None)
         if cached and cached[0] == key and now - cached[1] < EXTERNAL_PROBE_TTL:
@@ -276,9 +290,7 @@ class LinuxBaseBackend(Backend):
                                   "sender": "Sender: stopped"}
         endpoint = self.configured_fabric_endpoint()
         healthy = self.external_health(state)
-        loaded = getattr(ctl, "loaded", None)
-        host = loaded.node.host if loaded is not None else ""
-        port = loaded.node.port if loaded is not None else 0
+        host, port = self._node_address()
         # The local serving address is never passed as the endpoint.
         items = st.menu_model(state, "", detail, overlay)
         header, external_note, items = ext.present(state, detail, host, port,
