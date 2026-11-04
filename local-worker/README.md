@@ -69,8 +69,10 @@ git status --short
 Continue only if the single modified file is `local-worker/pairing.py`. If
 anything else changed, back it up and use a fresh clone instead.
 
-1. Stop the running `heartbeat-loop` sender terminal with Ctrl+C. Old senders
-   hold no lock, so confirm only one sender runs afterwards.
+1. Stop the running `heartbeat-loop` sender terminal with Ctrl+C. Mock-era
+   senders hold no lock; newer senders enforce one sender per data directory
+   (a second one exits SENDER_RUNNING) — either way, confirm only one sender
+   runs afterwards.
 2. Fetch the reviewed revision (current pin `0e6b608`):
 ```powershell
 git fetch origin 0e6b60890c736207664d122c62e39d8c4affd2fa

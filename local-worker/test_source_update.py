@@ -6,11 +6,15 @@ then execute the README's literal hash-gate command and git steps: the
 pass case must update to the reviewed revision with .venv preserved,
 and both negative cases (extra local change, tampered overlay) must
 STOP before anything is discarded. Real-pin tests assert the documented
-f3e115e -> 3fa309c claims (ancestry, no lock/vendor changes, reviewed
-blob present) against this checkout's history, skipping honestly when
-the pins are unreachable (shallow clone). No network fetch, no global
-git config mutation, no touch of the real checkout: the fixture lives
-in a temp dir and the real-pin layer only reads history.
+claims against this checkout's history, skipping honestly when the pins
+are unreachable (shallow clone): the f3e115e -> reviewed ancestry, the
+reviewed blob presence, the historical f3e115e -> 3fa309c no-change claim
+at immutable pins, and the live contract that retaining .venv is allowed
+only when the lock/vendor trees are identical between the pins (a changed
+vendor upgrade requires the documented fresh-environment procedure). No
+network fetch, no global git config mutation, no touch of the real
+checkout: the fixture lives in a temp dir and the real-pin layer only
+reads history.
 """
 import re
 import shutil
@@ -25,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 REPO_ROOT = ROOT.parent
 OLD_PIN = "f3e115e"  # historical broken pin; the moving pin parses from README
+HISTORICAL_PIN = "3fa309c"  # last pin whose update kept .venv (lock/vendor identical)
 
 V1 = b"WORKER_PIN = 1\n"
 V2 = b"WORKER_PIN = 2\n"
@@ -145,7 +150,7 @@ def real_pins_reachable():
         pin = readme_reviewed_pin()
     except (OSError, AssertionError):
         return False
-    for rev in (pin + "^{commit}", OLD_PIN):
+    for rev in (pin + "^{commit}", OLD_PIN, HISTORICAL_PIN):
         proc = subprocess.run(["git", "cat-file", "-e", rev], cwd=REPO_ROOT,
                               capture_output=True)
         if proc.returncode != 0:
@@ -157,7 +162,7 @@ def real_pins_reachable():
 @unittest.skipUnless(real_pins_reachable(),
                      "reviewed pins not reachable (shallow clone?)")
 class ReviewedPinTests(unittest.TestCase):
-    """The documented f3e115e -> 3fa309c claims, read from real history."""
+    """The documented update claims, read from real history."""
 
     def test_reviewed_blob_resolves(self):
         proc = subprocess.run(
@@ -174,14 +179,40 @@ class ReviewedPinTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, "update direction must be old -> reviewed")
 
     def test_no_lock_or_vendor_changes(self):
+        """Retaining .venv is allowed only when lock/vendor are unchanged.
+
+        The README update step either keeps `.venv` (allowed only when the
+        lock and vendor trees are identical between the pins) or requires a
+        fresh environment (required when they changed). Either direction must
+        match the actual diff; a stale keep instruction over a changed vendor
+        fails here instead of shipping a broken overlay update.
+        """
+        pin = readme_reviewed_pin()
         proc = subprocess.run(
-            ["git", "diff", "--name-only", OLD_PIN, readme_reviewed_pin(), "--",
+            ["git", "diff", "--name-only", OLD_PIN, pin, "--",
+             "local-worker/requirements.lock", "local-worker/build-requirements.lock",
+             "local-worker/vendor"],
+            cwd=REPO_ROOT, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        changed = proc.stdout.strip()
+        section = update_section()
+        if changed:
+            self.assertIn("Do NOT keep `.venv`", section,
+                          "changed lock/vendor requires the fresh-environment procedure")
+        else:
+            self.assertIn("Keep `.venv` and do not rerun", section,
+                          "unchanged lock/vendor must keep the retain procedure")
+
+    def test_historical_pins_had_no_lock_or_vendor_changes(self):
+        """The documented f3e115e -> 3fa309c claim, at immutable pins."""
+        proc = subprocess.run(
+            ["git", "diff", "--name-only", OLD_PIN, HISTORICAL_PIN, "--",
              "local-worker/requirements.lock", "local-worker/build-requirements.lock",
              "local-worker/vendor"],
             cwd=REPO_ROOT, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), "",
-                         "step 6 keeps .venv only when no lock/vendor changes")
+                         "historical f3e115e -> 3fa309c range kept lock/vendor identical")
 
 
 if __name__ == "__main__":

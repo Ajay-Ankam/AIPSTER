@@ -1,5 +1,15 @@
 # local-worker install changelog
 
+## 2026-11-04 — Update-procedure contract: fresh env iff lock/vendor changed
+
+- The update overlay now encodes the live contract: retaining `.venv` is
+  allowed only when the lock and vendor trees are identical between the
+  pins; the `test_source_update.py` reviewed-pin test asserts whichever
+  direction the actual diff requires, instead of assuming no vendor change.
+  The historical `f3e115e` → `3fa309c` no-change claim is pinned literally.
+  Step 1 notes mock-era senders hold no lock while newer senders enforce one
+  sender per data directory. STOP checks (status gate, hash gate) unchanged.
+
 ## 2026-11-04 — Repin to reviewed main 0e6b608; sender token propagation (N4)
 
 - Worker pin moves to `0e6b60890c736207664d122c62e39d8c4affd2fa` (reviewed
