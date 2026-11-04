@@ -788,6 +788,7 @@ def _reportable_runtimes(config_path, data_dir=None):
         return []
     found = []
     attached = None  # probed lazily, at most once per report
+    attach_pairs = set()
     for runtime in getattr(config, "runtimes", []) or []:
         name = CAPABILITY_RUNTIME_NAMES.get(getattr(runtime, "kind", ""))
         if name is None:
@@ -797,9 +798,21 @@ def _reportable_runtimes(config_path, data_dir=None):
             if data_dir is None and not _worker_token(config, None):
                 continue
             if attached is None:
-                attached = {rid for rid, _ in attach_readiness(config, data_dir)[0]}
+                attach_pairs = attach_readiness(config, data_dir)[0]
+                attached = {rid for rid, _ in attach_pairs}
             if runtime.id in attached and all(r["name"] != name for r in found):
-                found.append({"name": name, "formats": list(CAPABILITY_FORMATS)})
+                entry = {"name": name, "formats": list(CAPABILITY_FORMATS)}
+                # Worker-origin model IDs (FABRIC067 integration): attach
+                # the probed models for qualified runtimes only. The helper
+                # returns {} for foreign names and never raises; a missing
+                # module keeps the report model-less rather than breaking it.
+                try:
+                    from model_readiness import runtime_models_entry
+                    entry.update(runtime_models_entry(
+                        name, sorted({m for r, m in attach_pairs if r == runtime.id})[:32]))
+                except Exception:
+                    pass
+                found.append(entry)
             continue
         if mode != "managed":
             continue

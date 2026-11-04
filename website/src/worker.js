@@ -24,6 +24,7 @@ import { workerTransport, transportAvailable, TERMINAL_STATES, WORKER_STATES } f
 import { grantPartiesSameSide, grantUsage, canUseResource } from './lib/access.js';
 import { createDispatchCoordinator } from './inference/dispatch-coordinator.mjs';
 import { createWorkerTransport, validateWorkerResultReport, WORKER_RESULT_MAX_BYTES } from './inference/worker-transport.mjs';
+import { createFabricOpenAIRoute } from './inference/fabric-openai-route.mjs';
 import { getDispatchStore } from './inference/dispatch-wiring.mjs';
 import { matchGrant } from './fabric/policy.mjs';
 
@@ -3086,6 +3087,43 @@ async function handleApi(request, env, url) {
       return json(dispatchHttp(out), out);
     }
   }
+  // ---- fabric OpenAI entrypoint (FABRIC067; flag-gated, default off) ----
+  // Real /v1/models, /v1/chat/completions and /v1/operations/<key> with
+  // the existing inference auth (needAuthz('inference') + session CSRF),
+  // owner-bound model inventory and honest typed outcomes. Reached only
+  // through the top-level /v1 branch below — never via ASSETS.
+  if ((path === '/v1/models' && method === 'GET')
+    || (path === '/v1/chat/completions' && method === 'POST')
+    || (method === 'GET' && path.startsWith('/v1/operations/'))) {
+    if (!inferenceEnabled(env)) {
+      return json(403, { error: 'Inference is not enabled on this deployment.', code: 'INFERENCE_DISABLED' });
+    }
+    if (actor.kind === 'session') { const c = needCsrf(); if (c) return deny(c); }
+    if (method === 'GET' && path.startsWith('/v1/operations/')) {
+      const m = /^\/v1\/operations\/([A-Za-z0-9][A-Za-z0-9._:-]{7,127})$/.exec(path);
+      if (!m) return json(404, { error: 'Unknown API route.', code: 'UNKNOWN_API_ROUTE' });
+      const out = await createFabricOpenAIRoute({ needAuthz, actor, db, env })
+        .handleStatus({ idempotencyKey: m[1] });
+      if (out && out.passthrough) return out.passthrough;
+      return json(out.http, out.body);
+    }
+    const route = createFabricOpenAIRoute({ needAuthz, actor, db, env });
+    let out;
+    if (path === '/v1/models') {
+      out = await route.handleModels();
+    } else {
+      let chatBody;
+      try {
+        chatBody = await readJson(request, 262144);
+      } catch (error) {
+        if (error && error.status) return json(error.status, { error: error.message, code: error.code || 'BAD_REQUEST' });
+        throw error;
+      }
+      out = await route.handleChat({ body: chatBody, idempotencyKey: request.headers.get('Idempotency-Key') });
+    }
+    if (out && out.passthrough) return out.passthrough;
+    return json(out.http, out.body);
+  }
   {
     const m = /^\/api\/jobs\/([A-Za-z0-9_-]{1,64})$/.exec(path);
     if (m && method === 'GET' && !inferenceEnabled(env)) {
@@ -3381,7 +3419,8 @@ export default {
         }
         return serveApp(request, env, url.pathname);
       }
-      if (url.pathname.startsWith('/api/') || url.pathname === '/v1/fabric/mcp' || url.pathname.startsWith('/v1/fabric/')) {
+      if (url.pathname.startsWith('/api/') || url.pathname === '/v1/fabric/mcp' || url.pathname.startsWith('/v1/fabric/')
+        || url.pathname === '/v1/models' || url.pathname === '/v1/chat/completions' || url.pathname.startsWith('/v1/operations/')) {
         try {
           return await handleApi(request, env, url);
         } catch (error) {
