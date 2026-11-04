@@ -94,15 +94,7 @@ class DendriteContractTests(unittest.TestCase):
         self.llama = FakeLlama()
         self.port = free_port()
         self.config_path = self.data / "config.toml"
-        self.config_path.write_text(
-            f'[node]\nid = "contract"\nhost = "127.0.0.1"\nport = {self.port}\n'
-            f'state_dir = "{(self.data / "state").as_posix()}"\n\n'
-            '[[runtimes]]\nid = "mock"\nkind = "mock"\n\n'
-            '[[models]]\nid = "mock-summary"\nruntime = "mock"\ncapabilities = ["summarize"]\n\n'
-            '[[runtimes]]\nid = "attached"\nkind = "llama_cpp"\nmode = "attach"\n'
-            f'base_url = "http://127.0.0.1:{self.llama.port}"\n\n'
-            f'[[models]]\nid = "qwen"\nruntime = "attached"\ncapabilities = ["completion"]\n'
-            f'upstream_model = "{UPSTREAM}"\n', encoding="utf-8")
+        self.config_path.write_text(self.config_text(), encoding="utf-8")
         env = patch.dict(os.environ, {"DENDRITE_API_TOKEN": TOKEN})
         env.start()
         self.addCleanup(env.stop)
@@ -118,6 +110,17 @@ class DendriteContractTests(unittest.TestCase):
             time.sleep(0.05)
         # The sender reads the token from the data dir, not the env.
         os.environ.pop("DENDRITE_API_TOKEN", None)
+
+    def config_text(self):
+        return "\n".join([
+            "[node]", 'id = "contract"', 'host = "127.0.0.1"', f"port = {self.port}",
+            f'state_dir = "{(self.data / "state").as_posix()}"', "",
+            "[[runtimes]]", 'id = "mock"', 'kind = "mock"', "",
+            "[[models]]", 'id = "mock-summary"', 'runtime = "mock"', 'capabilities = ["summarize"]', "",
+            "[[runtimes]]", 'id = "attached"', 'kind = "llama_cpp"', 'mode = "attach"',
+            f'base_url = "http://127.0.0.1:{self.llama.port}"', "",
+            "[[models]]", 'id = "qwen"', 'runtime = "attached"', 'capabilities = ["completion"]',
+            f'upstream_model = "{UPSTREAM}"', ""])
 
     def tearDown(self):
         self.server.should_exit = True
@@ -170,6 +173,37 @@ class DendriteContractTests(unittest.TestCase):
         self.assertFalse(usable)
         self.assertIn("unreachable", why)
 
+
+
+class ManagedDendriteContractTests(DendriteContractTests):
+    """Managed usable needs the real worker up, not just files on disk."""
+
+    def config_text(self):
+        model = self.data / "model.gguf"
+        model.write_bytes(b"GGUF" + bytes(28))
+        exe = Path(sys.executable).as_posix()
+        return "\n".join([
+            "[node]", 'id = "contract"', 'host = "127.0.0.1"', f"port = {self.port}",
+            f'state_dir = "{(self.data / "state").as_posix()}"', "",
+            "[[runtimes]]", 'id = "cpu"', 'kind = "ik_llama"', f'executable = "{exe}"', "",
+            "[[models]]", 'id = "small"', 'runtime = "cpu"', 'capabilities = ["completion"]',
+            f'path = "{model.as_posix()}"', ""])
+
+    def test_healthy_attached_model_is_usable(self):
+        usable, why = self.decide()
+        self.assertTrue(usable, why)
+        self.assertEqual(why, "managed model available: cpu/small")
+
+    def test_unavailable_states_then_recovery(self):
+        (self.data / "model.gguf").write_bytes(b"NOPE" + bytes(28))
+        usable, why = self.decide()
+        self.assertFalse(usable, why)
+        (self.data / "model.gguf").write_bytes(b"GGUF" + bytes(28))
+        usable, why = self.decide()
+        self.assertTrue(usable, f"recovery: {why}")
+
+    def test_llama_down_then_recovery(self):
+        self.skipTest("managed runtime has no attached server to take down")
 
 if __name__ == "__main__":
     unittest.main()

@@ -309,5 +309,85 @@ class AttachUsableTests(unittest.TestCase):
         self.assertEqual(pairing._reportable_runtimes(str(config), self.data), [])
 
 
+def write_managed_config(directory, port):
+    """Managed runtime whose model file (GGUF magic) and engine exist."""
+    model = Path(directory) / "model.gguf"
+    model.write_bytes(b"GGUF" + bytes(28))
+    exe = Path(sys.executable).as_posix()
+    text = "\n".join([
+        "[node]", 'id = "t"', 'host = "127.0.0.1"', f"port = {port}", 'state_dir = "state"', "",
+        "[[runtimes]]", f'id = "{RUNTIME}"', 'kind = "ik_llama"', f'executable = "{exe}"', "",
+        "[[models]]", f'id = "{MODEL}"', f'runtime = "{RUNTIME}"',
+        'capabilities = ["completion"]', f'path = "{model.as_posix()}"', ""])
+    path = Path(directory) / "managed.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def managed_report(**overrides):
+    runtime = {"id": RUNTIME, "kind": "ik_llama", "mode": "managed", "state": "unloaded",
+               "busy": False, "simulated": False, "last_error": None}
+    model = {"id": MODEL, "runtime": RUNTIME, "available": True, "resident": False,
+             "simulated": False}
+    runtime.update(overrides.pop("runtime", {}))
+    model.update(overrides.pop("model", {}))
+    return {"runtimes": [runtime], "models": [model]}
+
+
+class ManagedLivenessTests(AttachUsableTests.__bases__[0]):
+    """Managed usable also needs the worker daemon up (Mac 8aa6066a finding:
+    usable=True for ~60 s while the daemon could not bind after a restart)."""
+
+    setUp = AttachUsableTests.setUp
+    tearDown = AttachUsableTests.tearDown
+    node = AttachUsableTests.node
+
+    def decide(self, config):
+        why = []
+        return decide_usable(str(config), self.data, why), why[0]
+
+    def test_cold_managed_model_with_worker_up_is_usable(self):
+        node = self.node(body=managed_report())
+        usable, why = self.decide(write_managed_config(self.data, node.port))
+        self.assertTrue(usable, why)
+        self.assertEqual(why, f"managed model available: {RUNTIME}/{MODEL}")
+
+    def test_worker_down_is_not_usable_even_with_files(self):
+        node = self.node(body=managed_report())
+        port = node.port
+        node.close()
+        self.nodes.remove(node)
+        usable, why = self.decide(write_managed_config(self.data, port))
+        self.assertFalse(usable)
+        self.assertIn("unreachable", why)
+
+    def test_unhealthy_reports_are_not_usable(self):
+        for label, override in {
+            "runtime error": {"runtime": {"state": "error"}},
+            "runtime simulated": {"runtime": {"simulated": True}},
+            "model unavailable": {"model": {"available": False}},
+            "model simulated": {"model": {"simulated": None}},
+            "other model": {"model": {"id": "other"}},
+        }.items():
+            with self.subTest(label):
+                node = self.node(body=managed_report(**override))
+                usable, why = self.decide(write_managed_config(self.data, node.port))
+                self.assertFalse(usable, f"{label}: {why}")
+
+    def test_missing_token_is_not_usable(self):
+        node = self.node(body=managed_report())
+        (self.data / "api-token.txt").unlink()
+        usable, why = self.decide(write_managed_config(self.data, node.port))
+        self.assertFalse(usable)
+        self.assertIn("token unavailable", why)
+        self.assertEqual(node.seen, [])
+
+    def test_missing_files_never_probe(self):
+        node = self.node(body=managed_report())
+        config = write_managed_config(self.data, node.port)
+        (self.data / "model.gguf").unlink()
+        self.assertFalse(decide_usable(str(config), self.data))
+        self.assertEqual(node.seen, [], "file/engine check still gates first")
+
 if __name__ == "__main__":
     unittest.main()
