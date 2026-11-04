@@ -233,8 +233,16 @@ export function createDispatchCoordinator({ resolvePrincipal = null, authority =
     // Advisory live pre-check with the existing no-stitching matcher. It is
     // not the admission decision; the CAS re-pins the same revision.
     let grant;
-    try { grant = await call(authority.readGrant, { grant_id: admission.grant_id }); }
-    catch { return uncertain('lookup', 'AUTHORITY_UNAVAILABLE', { http: 503 }); }
+    // Fabric-backed grants resolve recipient/consumers off persisted
+    // relationships, so the read needs the pinned principal and resource;
+    // the admission pins the independent peer/consumer side and matchGrant
+    // below re-verifies it. Extra fields are ignored by the app-grant path
+    // and by test fakes.
+    try {
+      grant = await call(authority.readGrant, {
+        grant_id: admission.grant_id, principal_id: admission.principal_id, resource_id: admission.resource_id,
+      });
+    } catch { return uncertain('lookup', 'AUTHORITY_UNAVAILABLE', { http: 503 }); }
     const grantRequest = {
       resourceId: admission.resource_id, incarnation: admission.incarnation, action: 'inference',
       model: admission.model_id, peerNode: admission.peer_node, peerWorkspace: admission.peer_workspace,

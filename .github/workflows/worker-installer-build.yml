@@ -11,8 +11,15 @@ on:
   pull_request:
     paths:
       - 'local-worker/**'
-      - 'LICENSE'
+      - 'website/src/**'
+      - 'website/migrations/**'
+      - 'website/tests/d1-shim.mjs'
+      - 'website/scripts/pairing-e2e-bridge.mjs'
+      - 'website/package*.json'
+      - '.github/workflows/local-worker-checks.yml'
       - '.github/workflows/worker-installer-build.yml'
+      - 'LICENSE'
+      - 'NOTICE'
   workflow_dispatch:
 permissions:
   contents: read

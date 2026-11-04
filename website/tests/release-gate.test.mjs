@@ -50,7 +50,7 @@ const siteCheck = (over = {}) => ({id: 9, name: 'Public site asset and build che
   app: {slug: 'github-actions'}, check_suite: {id: SITE_SUITE_ID}, ...over});
 const siteSuiteRuns = () => ({workflow_runs: [{id: 4242, head_sha: HEAD,
   check_suite_id: SITE_SUITE_ID}]});
-const SITE_RUNS_ROUTE = 'actions/workflows/.github/workflows/public-site-checks.yml/runs';
+const SITE_RUNS_ROUTE = 'actions/workflows/public-site-checks.yml/runs';
 const workerCheck = (over = {}) => ({id: 7, name: 'mock-install', head_sha: HEAD,
   status: 'completed', conclusion: 'success', app: {slug: 'github-actions'}, ...over});
 
@@ -653,7 +653,7 @@ test('spoofed same-name check from another workflow is refused', async () => {
 });
 test('producer binding: suite linkage, caps, and failures', async () => {
   const file = '.github/workflows/public-site-checks.yml';
-  const runsKey = `actions/workflows/${file}/runs`;
+  const runsKey = 'actions/workflows/public-site-checks.yml/runs';
   const run = {head_sha: HEAD, check_suite_id: SITE_SUITE_ID};
   const {request} = mockRequest({[runsKey]: {workflow_runs: [run,
     {head_sha: OTHER, check_suite_id: 12345},
@@ -843,5 +843,23 @@ test('loader never requests code or artifact endpoints', async () => {
   await holdRelationTo(request, HOLD_SHA, HEAD);
   assert(seen.length >= 5);
   assertNoCodeFetch(seen);
+});
+// FIX-019 provenance: the workflow-runs listing accepts a workflow ID or
+// file NAME (documented route), never a repository path. Interpolating
+// '.github/workflows/...' yields HTTP 404 against the real API, which the
+// advisory reruns proved. This pins the documented file-name route with
+// the exact SHA filter and pagination, not merely a passing mock.
+test('workflow-runs listing uses the documented file-name route', async () => {
+  const file = '.github/workflows/public-site-checks.yml';
+  const {seen, request} = mockRequest({'actions/workflows/public-site-checks.yml/runs':
+    {workflow_runs: [{head_sha: HEAD, check_suite_id: SITE_SUITE_ID}]}});
+  assert.deepEqual(await fetchWorkflowSuiteIds(request, file, HEAD),
+    [SITE_SUITE_ID]);
+  assert(seen.length > 0, 'expected at least one listing request');
+  assert(seen[0].startsWith(
+    'actions/workflows/public-site-checks.yml/runs?head_sha=' + HEAD + '&per_page=100&page=1'),
+  'documented route with exact SHA filter and pagination: ' + seen[0]);
+  assert(!seen.some((p) => p.includes('.github/workflows/')),
+    'raw repository path must never appear in the route');
 });
 

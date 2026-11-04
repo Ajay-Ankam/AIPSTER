@@ -20,7 +20,7 @@ import { fixtureSnapshot } from '../src/lib/catalog/fixtures.mjs';
 const PUBLIC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const SECRET_SHAPED = /aip_[a-z0-9_]{8,}|gh[pousr]_|sk-[\w]{8,}|token=|secret=|key=|[?&](?:code|auth)=/i;
 
-async function makeUi({ asDemo = false, failPaths = [] } = {}) {
+async function makeUi({ asDemo = false, failPaths = [], detailVariants = null } = {}) {
   const source = await readFile(path.join(PUBLIC, 'app', 'app.js'), 'utf8');
   const t = await createTestEnv({ CATALOG_FIXTURES: '1' });
   const elements = new Map();
@@ -28,11 +28,26 @@ async function makeUi({ asDemo = false, failPaths = [] } = {}) {
   function el(id) {
     if (!elements.has(id)) {
       const element = {
-        id, hidden: false, textContent: '', value: '', attrs: {}, listeners: {}, dataset: {},
+        id, value: '', attrs: {}, listeners: {}, dataset: {},
         addEventListener(type, fn) { this.listeners[type] = fn; },
         setAttribute(name, value) { this.attrs[name] = value; },
         querySelectorAll() { return []; },
       };
+      // Property writes are client signals (compat errors, picker state);
+      // surface them like innerHTML mutations so deadline waits observe
+      // genuine completion instead of tick counts.
+      const notifyAll = () => { for (const notify of [...domObservers]) notify(); };
+      let hidden = false, text = '';
+      Object.defineProperty(element, 'hidden', {
+        configurable: true, enumerable: true,
+        get() { return hidden; },
+        set(v) { hidden = v; notifyAll(); },
+      });
+      Object.defineProperty(element, 'textContent', {
+        configurable: true, enumerable: true,
+        get() { return text; },
+        set(v) { text = v; notifyAll(); },
+      });
       let html = '';
       Object.defineProperty(element, 'innerHTML', {
         configurable: true, enumerable: true,
@@ -62,12 +77,24 @@ async function makeUi({ asDemo = false, failPaths = [] } = {}) {
     demoUser = { id: 'u_demo_models' };
   }
   const calls = [];
+  const posted = [];
   const fetchImpl = async (fetchPath, opts = {}) => {
     calls.push(`${opts.method ?? 'GET'} ${fetchPath}`);
+    if ((opts.method ?? 'GET') === 'POST' && (fetchPath === '/api/catalog/compat' || fetchPath === '/api/catalog/plans')) {
+      try { posted.push({ path: fetchPath, body: JSON.parse(opts.body) }); } catch { posted.push({ path: fetchPath, body: null }); }
+    }
     if (failPaths.some((p) => fetchPath.startsWith(p))) {
       return new Response(JSON.stringify({ error: 'injected failure' }), { status: 500 });
     }
-    return t.call(fetchPath, { method: opts.method ?? 'GET', headers: { Cookie: cookie, Origin: 'http://localhost:8787', ...opts.headers }, body: opts.body });
+    const res = await t.call(fetchPath, { method: opts.method ?? 'GET', headers: { Cookie: cookie, Origin: 'http://localhost:8787', ...opts.headers }, body: opts.body });
+    // Synthetic variant augmentation for ONE real asset's detail response:
+    // the compat/plan handlers below stay 100% real, so unknown files hit
+    // genuine server fail-closed paths. Only the listed variants render.
+    if (detailVariants && fetchPath === '/api/catalog/assets/' + encodeURIComponent(detailVariants.repo) && res.status === 200) {
+      const data = await res.json();
+      return new Response(JSON.stringify({ ...data, variants: detailVariants.variants }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return res;
   };
   const logs = [];
   const globals = {
@@ -94,7 +121,7 @@ async function makeUi({ asDemo = false, failPaths = [] } = {}) {
     timer = deadline(() => { cleanup(); reject(new assert.AssertionError({ message })); }, 10000);
     check();
   });
-  return { t, el, calls, logs, clickTab, flush, waitForDOM, demoUser };
+  return { t, el, calls, posted, logs, clickTab, flush, waitForDOM, demoUser };
 }
 
 function nodesOf(html) {
@@ -399,6 +426,140 @@ test('blocked decisions offer no plan action', async () => {
   assert.ok(textOf(out).includes('blocked'), 'over-budget evaluation blocks');
   assert.ok(out.includes('Deploy (unavailable)'), 'blocked keeps deploy honestly disabled');
   assert.ok(!out.includes('data-plan'), 'no plan action without estimated-compatible');
+});
+
+// ---- GGUF file picker (PR83 blocker): explicit per-file choice ----
+const PICKER_REPO = 'fixture-org/tiny-instruct-gguf';
+const REAL_FILE = 'tiny-instruct-Q4_K_M.gguf';
+// One real variant plus synthetic siblings. Only REAL_FILE resolves
+// server-side; the rest exercise rendering, exact-string propagation and
+// genuine server fail-closed paths. Metadata only — no bytes change.
+const PICKER_VARIANTS = [
+  { file: REAL_FILE, quant: 'Q4_K_M', bytes: 2415919104 },
+  { file: 'tiny-instruct-Q8_0.gguf', quant: 'Q8_0', bytes: 1260000000 },
+  { file: 'quants/nested/tiny-instruct-Q6_K.gguf', quant: 'Q6_K', bytes: 900000000 },
+  { file: '<img src=x onerror=alert(1)>.gguf', quant: 'unknown', bytes: 100 },
+];
+const withPicker = () => makeUi({ detailVariants: { repo: PICKER_REPO, variants: PICKER_VARIANTS } });
+const compatPosts = (ui) => ui.posted.filter((p) => p.path === '/api/catalog/compat');
+const planPosts = (ui) => ui.posted.filter((p) => p.path === '/api/catalog/plans');
+
+async function fillCompat(ui, node, context = '2048') {
+  ui.el('compat-node').value = node.id;
+  ui.el('compat-runtime').value = 'fixture-llama';
+  ui.el('compat-context').value = context;
+  ui.el('compat-concurrency').value = '1';
+}
+
+test('single-variant asset keeps the unchanged path (no picker, no file sent)', async () => {
+  const ui = await makeUi();
+  const node = await registerResource(ui, 'bare-box');
+  await openDetail(ui, PICKER_REPO);
+  assert.ok(!ui.el('asset-detail').innerHTML.includes('compat-file'), 'no picker for a single variant');
+  fillCompat(ui, node);
+  ui.el('compat-form').listeners.submit({ preventDefault() {} });
+  await ui.waitForDOM(() => ui.el('compat-out').innerHTML.includes('Decision:'), 'compat never rendered');
+  assert.equal(compatPosts(ui).length, 1, 'exactly one compat request');
+  assert.ok(!('file' in compatPosts(ui)[0].body), 'no file key on the unchanged path');
+});
+
+test('multi-variant asset renders an exact-file picker with escaped options', async () => {
+  const ui = await withPicker();
+  await openDetail(ui, PICKER_REPO);
+  const html = ui.el('asset-detail').innerHTML;
+  assert.ok(html.includes('id="compat-file"'), 'picker rendered for multiple variants');
+  assert.ok(html.includes('required'), 'explicit choice is required');
+  assert.ok(html.includes('Choose one GGUF file'), 'placeholder names the choice, no silent pick');
+  for (const v of [REAL_FILE, 'tiny-instruct-Q8_0.gguf', 'quants/nested/tiny-instruct-Q6_K.gguf']) {
+    assert.ok(html.includes(`value="${v}"`), 'exact selector preserved: ' + v);
+  }
+  assert.ok(!/<img[\s>]/.test(html), 'no live element from the hostile filename');
+  assert.ok(html.includes('&lt;img'), 'hostile filename is entity-escaped');
+  assert.equal(ui.el('compat-file').value, '', 'picker starts unselected');
+});
+
+test('unselected multi-variant submit sends no compat request and explains', async () => {
+  const ui = await withPicker();
+  const node = await registerResource(ui, 'bare-box');
+  await openDetail(ui, PICKER_REPO);
+  fillCompat(ui, node);
+  ui.el('compat-form').listeners.submit({ preventDefault() {} });
+  await ui.waitForDOM(() => ui.el('compat-error').textContent.includes('Choose one GGUF file'), 'refusal never explained');
+  await ui.flush();
+  assert.equal(compatPosts(ui).length, 0, 'ambiguity never reaches the server as a silent pick');
+  assert.ok(!ui.el('compat-out').innerHTML.includes('Decision:'), 'no decision without an explicit file');
+});
+
+test('selected real file binds through compat and plan with the exact name', async () => {
+  const ui = await withPicker();
+  const node = await seedBigBox(ui);
+  await openDetail(ui, PICKER_REPO);
+  ui.el('compat-file').value = REAL_FILE;
+  fillCompat(ui, node);
+  ui.el('compat-form').listeners.submit({ preventDefault() {} });
+  await ui.waitForDOM(() => ui.el('compat-out').innerHTML.includes('Decision:'), 'compat never rendered');
+  assert.equal(compatPosts(ui).length, 1, 'exactly one compat request');
+  assert.equal(compatPosts(ui)[0].body.file, REAL_FILE, 'exact file sent, not a label or sum');
+  const out = ui.el('compat-out').innerHTML;
+  assert.ok(textOf(out).includes('estimated compatible'), 'real file evaluates: ' + textOf(out).slice(0, 120));
+  assert.ok(out.includes('evaluated file') && out.includes(REAL_FILE), 'server-bound file is displayed');
+  clickOut(ui, { plan: '1' });
+  await ui.waitForDOM(() => ui.el('deploy-out').innerHTML.includes('Deployment plan'), 'plan never rendered');
+  assert.equal(planPosts(ui).length, 1, 'exactly one plan request');
+  assert.equal(planPosts(ui)[0].body.file, REAL_FILE, 'plan carries the evaluated file');
+});
+
+test('unknown file fails closed with VARIANT_NOT_FOUND, nothing plannable', async () => {
+  const ui = await withPicker();
+  const node = await seedBigBox(ui);
+  await openDetail(ui, PICKER_REPO);
+  ui.el('compat-file').value = 'tiny-instruct-Q8_0.gguf';
+  fillCompat(ui, node);
+  ui.el('compat-form').listeners.submit({ preventDefault() {} });
+  await ui.waitForDOM(() => ui.el('compat-out').innerHTML.includes('Decision:'), 'compat never rendered');
+  assert.equal(compatPosts(ui)[0].body.file, 'tiny-instruct-Q8_0.gguf', 'synthetic file still travels exactly');
+  const out = ui.el('compat-out').innerHTML;
+  assert.ok(textOf(out).includes('blocked'), 'unresolvable file blocks, never estimated');
+  assert.ok(out.includes('VARIANT_NOT_FOUND'), 'fail-closed code rendered from the real decision');
+  assert.ok(!out.includes('Plan deployment') && !out.includes('data-plan'), 'no plan action without a bound file');
+});
+
+test('nested path travels exactly and fails closed with its own name', async () => {
+  const ui = await withPicker();
+  const node = await seedBigBox(ui);
+  await openDetail(ui, PICKER_REPO);
+  ui.el('compat-file').value = 'quants/nested/tiny-instruct-Q6_K.gguf';
+  fillCompat(ui, node);
+  ui.el('compat-form').listeners.submit({ preventDefault() {} });
+  await ui.waitForDOM(() => ui.el('compat-out').innerHTML.includes('Decision:'), 'compat never rendered');
+  assert.equal(compatPosts(ui)[0].body.file, 'quants/nested/tiny-instruct-Q6_K.gguf', 'nested path preserved exactly, not flattened');
+  assert.ok(ui.el('compat-out').innerHTML.includes('VARIANT_NOT_FOUND'), 'fail-closed code names the unknown file');
+});
+
+test('hostile filename renders inert and fails closed without execution', async () => {
+  const ui = await withPicker();
+  const node = await seedBigBox(ui);
+  await openDetail(ui, PICKER_REPO);
+  ui.el('compat-file').value = '<img src=x onerror=alert(1)>.gguf';
+  fillCompat(ui, node);
+  ui.el('compat-form').listeners.submit({ preventDefault() {} });
+  await ui.waitForDOM(() => ui.el('compat-out').innerHTML.includes('VARIANT_NOT_FOUND'), 'fail-closed code never shown');
+  assert.ok(!/<img[\s>]/.test(ui.el('compat-out').innerHTML + ui.el('asset-detail').innerHTML), 'no live element anywhere');
+});
+
+test('stale selection cannot leak: new model clears picker and file', async () => {
+  const ui = await withPicker();
+  const node = await seedBigBox(ui);
+  await openDetail(ui, PICKER_REPO);
+  ui.el('compat-file').value = REAL_FILE;
+  await openDetail(ui, 'fixture-org/tiny-base');
+  assert.ok(!ui.el('asset-detail').innerHTML.includes('compat-file'), 'no picker for the single-variant model');
+  fillCompat(ui, node);
+  ui.el('compat-form').listeners.submit({ preventDefault() {} });
+  await ui.waitForDOM(() => ui.el('compat-out').innerHTML.includes('Decision:'), 'compat never rendered');
+  assert.ok(!('file' in compatPosts(ui)[0].body), 'previous model file never leaks into the new request');
+  await openDetail(ui, PICKER_REPO);
+  assert.equal(ui.el('compat-file').value, '', 're-opened picker starts unselected');
 });
 
 test('S-F10: logout clears deployment state (no previous-identity residue)', async () => {

@@ -144,10 +144,45 @@ test('preflight precedes wrangler deploy and live verification follows it', () =
   assert(wrangler < verify, 'live verification must run after the deployment');
 });
 
-test('worker checks run on main with the same path filters as PRs', () => {
-  assert(worker.includes('push:'), 'worker checks need a main push trigger');
-  assert(worker.includes('branches: [main]'), 'push trigger is scoped to main');
-  const lists = [...worker.matchAll(/paths:\n((?: {6}- '[^\n']+'\n)+)/g)].map(m => m[1]);
-  assert.equal(lists.length, 2, 'pull_request and push must both declare paths');
-  assert.equal(lists[0], lists[1], 'PR and push filters must stay identical');
+// The `on:` block runs from its column-0 header to the next column-0 key;
+// a trigger section runs to the next two-space key within it.
+function triggerSection(text, name) {
+  const start = text.search(/^on:$/m);
+  assert(start >= 0, 'workflow must declare on:');
+  const tail = text.slice(start).slice(3);
+  const end = tail.search(/^[a-z]+:/m);
+  const block = end < 0 ? text.slice(start) : text.slice(start, start + 3 + end);
+  const parts = block.split(new RegExp(`^  ${name}:`, 'm'));
+  assert.equal(parts.length, 2, `workflow must declare exactly one ${name} trigger`);
+  return parts[1].split(/^  \w[\w-]*:/m)[0];
+}
+
+test('worker checks run on every canonical-main push', () => {
+  // Regression for the 0de5103 bootstrap gap: the release gate measures
+  // worker applicability over the cumulative live-to-target range, but a
+  // path-filtered push trigger only qualifies the pushed files. A
+  // registry-only or docs-only push after worker changes then leaves the
+  // new target without its own mock-install result. Every main push runs
+  // the suite; the gate still decides applicability (fail-closed), so
+  // unneeded runs are harmless but missing runs are impossible.
+  const push = triggerSection(worker, 'push');
+  assert(push.includes('branches: [main]'), 'push trigger is scoped to canonical main');
+  assert(!/^\s*paths:/m.test(push), 'push trigger must not filter paths');
+});
+
+test('worker checks keep PR path filters with fork-safe triggers and permissions', () => {
+  const pr = triggerSection(worker, 'pull_request');
+  assert(/^\s*paths:/m.test(pr), 'pull_request keeps its path filters');
+  assert(!worker.includes('pull_request_target'), 'PR checks run on head code, never the base version');
+  assert(!worker.includes('secrets.'), 'worker checks reference no secrets (fork-safe)');
+  assert(worker.includes('contents: read'), 'worker checks keep read-only contents');
+  assert(!/^ +\w[\w-]*: write$/m.test(worker), 'no write grants allowed');
+});
+
+test('worker check keeps the gate-bound mock-install job identity', () => {
+  const at = worker.search(/^  mock-install:$/m);
+  assert(at >= 0, 'mock-install job must exist');
+  const job = worker.slice(worker.indexOf('\n', at)).split(/^  \w[\w-]*:/m)[0];
+  assert(job.includes('runs-on: windows-2025'), 'mock-install keeps its qualified runner');
+  assert(!/^\s*name:/m.test(job), 'mock-install keeps its job-id check name (the gate binds on it)');
 });

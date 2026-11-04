@@ -48,12 +48,18 @@ function invalid(code, message, http = 400) {
 function validSucceededResult(result) {
   if (!isObj(result)) return false;
   const allowed = new Set(['request_id', 'node_id', 'runtime_id', 'model_id', 'runtime_instance',
-    'model_fingerprint', 'simulated', 'content', 'elapsed_ms', 'usage', 'cache', 'truncated']);
+    'model_fingerprint', 'simulated', 'content', 'elapsed_ms', 'usage', 'cache', 'truncated', 'finish_reason']);
   if (Object.keys(result).some((k) => !allowed.has(k))) return false;
   if (!isStr(result.request_id) || !isStr(result.node_id) || !isStr(result.runtime_id) || !isStr(result.model_id)) return false;
   if (!isStr(result.runtime_instance) || !isStr(result.model_fingerprint)) return false;
   if (result.simulated !== false) return false; // never report simulated execution as success
   if (result.truncated !== undefined && result.truncated !== false) return false;
+  // Upstream terminal finish evidence only; legacy results without the key
+  // stay acceptable. Anything else (notably tool_calls) fails closed here,
+  // matching the dispatch-store normalizer exactly.
+  if (result.finish_reason !== undefined
+    && (typeof result.finish_reason !== 'string'
+      || !['stop', 'length', 'content_filter'].includes(result.finish_reason))) return false;
   if (typeof result.content !== 'string' || !result.content.trim() || result.content.length > CONTENT_MAX) return false;
   if (!Number.isFinite(result.elapsed_ms) || result.elapsed_ms < 0) return false;
   if (!isObj(result.usage) || !isObj(result.cache)) return false;

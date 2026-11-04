@@ -1,0 +1,116 @@
+{
+  "tool": "Lighthouse 12.8.2",
+  "chromium": "145.0.7632.6 (Chrome for Testing, headless=new)",
+  "target": "local wrangler dev, local D1; before = 5b3fdb7 on :8798 (public/ served directly), after = candidate build (dist/) on :8799",
+  "note": "/app/ and /admin/ are scored signed out (the sign-in view and the admin access-required state), as in PR #88.",
+  "runs": {
+    "before/admin-desktop": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 96,
+      "seo": 100,
+      "lcp_s": 0.33,
+      "cls": 0.005,
+      "tbt_ms": 0
+    },
+    "before/admin-mobile": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 96,
+      "seo": 100,
+      "lcp_s": 1.36,
+      "cls": 0.004,
+      "tbt_ms": 0
+    },
+    "before/app-desktop": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 91,
+      "lcp_s": 0.37,
+      "cls": 0,
+      "tbt_ms": 0
+    },
+    "before/app-mobile": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 91,
+      "lcp_s": 1.52,
+      "cls": 0,
+      "tbt_ms": 0
+    },
+    "before/landing-desktop": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 100,
+      "lcp_s": 0.42,
+      "cls": 0,
+      "tbt_ms": 0
+    },
+    "before/landing-mobile": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 100,
+      "lcp_s": 1.66,
+      "cls": 0,
+      "tbt_ms": 0
+    },
+    "after/admin-desktop": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 96,
+      "seo": 100,
+      "lcp_s": 0.36,
+      "cls": 0,
+      "tbt_ms": 0
+    },
+    "after/admin-mobile": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 96,
+      "seo": 100,
+      "lcp_s": 1.44,
+      "cls": 0,
+      "tbt_ms": 0
+    },
+    "after/app-desktop": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 91,
+      "lcp_s": 0.37,
+      "cls": 0,
+      "tbt_ms": 0
+    },
+    "after/app-mobile": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 91,
+      "lcp_s": 1.52,
+      "cls": 0,
+      "tbt_ms": 0
+    },
+    "after/landing-desktop": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 100,
+      "lcp_s": 0.4,
+      "cls": 0,
+      "tbt_ms": 0
+    },
+    "after/landing-mobile": {
+      "performance": 100,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 100,
+      "lcp_s": 1.59,
+      "cls": 0,
+      "tbt_ms": 0
+    }
+  }
+}

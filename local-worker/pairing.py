@@ -356,36 +356,261 @@ def probe_hardware(config_path=None):
     return snapshot
 
 
-def decide_usable(config_path=None):
+ATTACH_PROBE_TIMEOUT_SEC = 3.0
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _worker_token(config, data_dir):
+    """The local worker's API token: its env var first, then the data dir file.
+
+    Same precedence as the Windows launcher. Read only; never generated here.
+    """
+    name = getattr(getattr(config, "node", None), "token_env", None)
+    if name and os.environ.get(name):
+        return os.environ[name]
+    if not data_dir:
+        return None
+    try:
+        value = (Path(data_dir) / "api-token.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+ATTACH_NODE_MAX_BYTES = 1_048_576
+
+
+def _is_str(value):
+    return isinstance(value, str) and bool(value)
+
+
+def attach_readiness(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
+    """(ready, reason) for configured attach models, from the RUNNING worker.
+
+    Readiness comes from the worker's own authenticated loopback
+    `GET /v1/node`, so the bit also proves the worker that would execute is
+    up and has already applied its attach quarantine/identity checks. A model
+    counts only when the node reports it available, resident and not
+    simulated, and its runtime as attach, ready, without last_error and not
+    simulated. `ready` is a set of (runtime_id, model_id).
+
+    Never raises. Any error, non-loopback listener, missing token, redirect,
+    oversized body or unexpected shape yields an empty set with a fixed,
+    secret-free `reason` (no token, no response bytes) for the sender log.
+    """
+    try:
+        return _attach_readiness(config, data_dir, timeout)
+    except Exception as exc:  # fail closed: a probe bug must not stop the sender
+        return set(), f"attach probe error ({type(exc).__name__})"
+
+
+def _fetch_node_report(config, data_dir, timeout):
+    """(report, reason): the running worker's authenticated loopback /v1/node.
+
+    `report` is a dict with `runtimes` and `models` lists, or None with a
+    fixed secret-free reason. Never logs the token or response bytes.
+    """
+    node = getattr(config, "node", None)
+    host = str(getattr(node, "host", "") or "")
+    port = getattr(node, "port", None)
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    if host not in _LOOPBACK_HOSTS or not isinstance(port, int) or isinstance(port, bool):
+        return None, "worker listener is not loopback; readiness not probed"
+    token = _worker_token(config, data_dir)
+    if not token:
+        return None, "worker API token unavailable; readiness not probed"
+    connection = None
+    try:
+        connection = http.client.HTTPConnection(host, port, timeout=timeout)
+        connection.request("GET", "/v1/node", headers={
+            "Authorization": "Bearer " + token, "Accept": "application/json"})
+        response = connection.getresponse()
+        if response.status != 200:
+            return None, f"worker /v1/node returned HTTP {int(response.status)}"
+        raw = response.read(ATTACH_NODE_MAX_BYTES + 1)
+    except (OSError, http.client.HTTPException) as exc:
+        return None, f"worker /v1/node unreachable ({type(exc).__name__})"
+    finally:
+        if connection is not None:
+            connection.close()
+    if len(raw) > ATTACH_NODE_MAX_BYTES:
+        return None, "worker /v1/node response too large"
+    try:
+        report = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None, "worker /v1/node response is not JSON"
+    if not isinstance(report, dict):
+        return None, "worker /v1/node response is not an object"
+    if not isinstance(report.get("runtimes"), list) or not isinstance(report.get("models"), list):
+        return None, "worker /v1/node response lacks runtimes/models lists"
+    return report, "worker /v1/node ok"
+
+
+def _attach_readiness(config, data_dir, timeout):
+    report, reason = _fetch_node_report(config, data_dir, timeout)
+    if report is None:
+        return set(), reason
+    runtimes, models = report["runtimes"], report["models"]
+    configured = {r.id for r in getattr(config, "runtimes", []) or []
+                  if getattr(r, "mode", "") == "attach" and getattr(r, "kind", "") != "mock"}
+    # Only models THIS config selects, with the upstream identity it selects:
+    # a worker started from an older config (same ids, different
+    # upstream_model) or reporting removed models must not count.
+    wanted = {(getattr(m, "runtime", None), getattr(m, "id", None)):
+              getattr(m, "upstream_model", None)
+              for m in getattr(config, "models", []) or []
+              if getattr(m, "runtime", None) in configured}
+    reported, live = set(), {}
+    for runtime in runtimes:
+        if not isinstance(runtime, dict) or not _is_str(runtime.get("id")):
+            continue
+        rid = runtime["id"]
+        if rid not in configured:
+            continue
+        reported.add(rid)
+        if (runtime.get("mode") == "attach" and runtime.get("state") in ("ready", "generating")
+                and runtime.get("simulated") is False and not runtime.get("last_error")):
+            live[rid] = runtime
+    if not reported:
+        return set(), "no configured attach runtime in worker report"
+    if not live:
+        return set(), "attach runtime not ready (state/error/simulated)"
+    ready, stale = set(), False
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        rid, mid = model.get("runtime"), model.get("id")
+        if not (_is_str(rid) and _is_str(mid) and rid in live and (rid, mid) in wanted
+                and model.get("available") is True and model.get("resident") is True
+                and model.get("simulated") is False):
+            continue
+        upstream = wanted[(rid, mid)]
+        runtime = live[rid]
+        if (_is_str(upstream) and runtime.get("loaded_model") == mid
+                and runtime.get("model_fingerprint") == "attached:" + upstream):
+            ready.add((rid, mid))
+        else:
+            stale = True
+    if not ready:
+        if stale:
+            return set(), "attach model identity does not match config (restart the worker)"
+        return set(), "attach runtime ready but no configured model resident/available"
+    return ready, "attach model ready"
+
+
+MANAGED_LIVE_STATES = ("unloaded", "loading", "ready", "generating")
+"""Runtime states that count as managed capacity, from the vendored lifecycle
+(dendrite runtimes/base.py: "unloaded" initial/cold, "ready"; runtimes/llama.py:
+"loading" transient startup, "ready"; both use "generating" while serving).
+Cold/on-demand runtimes stay usable without residency; "loading" is a genuine
+transient, not a failure. "unavailable"/"error" are failure states; anything
+else (missing, null, non-string, unknown) is a malformed report: fail closed."""
+
+
+def managed_readiness(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
+    """(ready, reason) for configured MANAGED models, from the RUNNING worker.
+
+    A managed model is cold until requested, so this does not require it to
+    be resident: the running worker's /v1/node must list it available and
+    not simulated (dendrite's own file + executable check) on a configured
+    managed, non-simulated runtime whose reported state is an explicit live
+    lifecycle state (MANAGED_LIVE_STATES). Failure states ("unavailable",
+    "error") and any malformed state (missing, null, non-string, unknown)
+    fail closed. This makes the usable bit false while the worker daemon is
+    down or restarting. Never raises.
+    """
+    try:
+        report, reason = _fetch_node_report(config, data_dir, timeout)
+        if report is None:
+            return set(), reason
+        configured = {r.id for r in getattr(config, "runtimes", []) or []
+                      if getattr(r, "mode", "") == "managed" and getattr(r, "kind", "") != "mock"}
+        live = set()
+        for runtime in report["runtimes"]:
+            if (isinstance(runtime, dict) and _is_str(runtime.get("id"))
+                    and runtime["id"] in configured and runtime.get("mode") == "managed"
+                    and runtime.get("simulated") is False
+                    and runtime.get("state") in MANAGED_LIVE_STATES):
+                live.add(runtime["id"])
+        if not live:
+            return set(), "managed runtime not reported healthy by worker"
+        wanted = {(getattr(m, "runtime", None), getattr(m, "id", None))
+                  for m in getattr(config, "models", []) or []
+                  if getattr(m, "runtime", None) in configured}
+        ready = set()
+        for model in report["models"]:
+            if not isinstance(model, dict):
+                continue
+            rid, mid = model.get("runtime"), model.get("id")
+            if (_is_str(rid) and _is_str(mid) and rid in live and (rid, mid) in wanted
+                    and model.get("available") is True and model.get("simulated") is False):
+                ready.add((rid, mid))
+        if not ready:
+            return set(), "managed model not available in worker report"
+        return ready, "managed model available"
+    except Exception as exc:  # fail closed
+        return set(), f"managed probe error ({type(exc).__name__})"
+
+
+def attached_ready_models(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
+    """Set of (runtime_id, model_id) the running worker reports ready. Never raises."""
+    return attach_readiness(config, data_dir, timeout)[0]
+
+
+def decide_usable(config_path=None, data_dir=None, diagnostics=None):
     """Heartbeat usable-bit policy. False unless real capacity is verified.
 
     Mock/simulated engines always report usable=false: the worker is
     reachable but explicitly not acceptable for inference. A real engine
-    reports true only when a configured non-mock runtime has a usable model
-    (attached and ready, or GGUF magic on disk plus its executable on PATH).
-    Anything uncertain — missing config, missing worker install, load
-    failure — is false. Reachability is reported by the beat itself.
+    reports true only when a configured non-mock runtime has a usable model:
+    managed, GGUF magic on disk plus its executable on PATH; attach, the
+    running local worker's authenticated `/v1/node` reports that exact
+    configured model resident and its runtime ready (needs `data_dir` or the
+    token env var). Anything uncertain — missing config, missing worker
+    install, load failure, worker down, malformed report — is false.
+    Reachability is reported by the beat itself.
+
+    Never raises. When `diagnostics` is a list, one fixed secret-free reason
+    for the decision is appended to it.
     """
+    try:
+        usable, reason = _decide_usable(config_path, data_dir)
+    except Exception as exc:  # fail closed; the sender must keep beating
+        usable, reason = False, f"usable policy error ({type(exc).__name__})"
+    if isinstance(diagnostics, list):
+        diagnostics.append(reason)
+    return usable
+
+
+def _decide_usable(config_path, data_dir):
     if not config_path:
-        return False
+        return False, "no worker config"
     try:
         from dendrite.config import load_config
         from dendrite.hardware import file_identity
     except ImportError:
-        return False
+        return False, "worker package unavailable"
     try:
         config = load_config(Path(config_path))
     except Exception:
-        return False
+        return False, "worker config failed to load"
     runtimes = {r.id: r for r in getattr(config, "runtimes", []) or []}
     if not runtimes or all(getattr(r, "kind", "") == "mock" for r in runtimes.values()):
-        return False
+        return False, "mock/simulated runtime only"
+    attached = None  # probed lazily, at most once per decision
+    managed, managed_reason = None, ""
+    reason = "no configured real model is ready"
     for model in getattr(config, "models", []) or []:
         runtime = runtimes.get(getattr(model, "runtime", None))
         if runtime is None or getattr(runtime, "kind", "") == "mock":
             continue
         if getattr(runtime, "mode", "") == "attach":
-            continue  # attach readiness needs a live daemon probe; stay false
+            if attached is None:
+                attached, reason = attach_readiness(config, data_dir)
+            if (runtime.id, getattr(model, "id", None)) in attached:
+                return True, f"attach model ready: {runtime.id}/{model.id}"
+            continue
         path = getattr(model, "path", None)
         executable = getattr(runtime, "executable", None)
         try:
@@ -393,8 +618,14 @@ def decide_usable(config_path=None):
         except Exception:
             cached = False
         if cached and executable and shutil.which(str(executable)):
-            return True
-    return False
+            # Files alone are not capacity: the worker that would run the
+            # engine must be up and agree the model is available.
+            if managed is None:
+                managed, managed_reason = managed_readiness(config, data_dir)
+            if (runtime.id, getattr(model, "id", None)) in managed:
+                return True, f"managed model available: {runtime.id}/{model.id}"
+            reason = managed_reason
+    return False, reason
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -557,11 +788,13 @@ def _disk_bytes(path):
         return None
 
 
-def _reportable_runtimes(config_path):
+def _reportable_runtimes(config_path, data_dir=None):
     """Runtimes this node can honestly claim, from its own worker config.
 
     Conservative by design (never claims what it cannot see): mock runtimes
-    are not capacity, attach-mode readiness needs a live daemon probe, and a
+    are not capacity; an attach runtime counts only when the running local
+    worker reports one of its configured models ready (attach_readiness,
+    needs `data_dir` or the token env var, never probed otherwise); a
     managed runtime counts only when its engine executable resolves on PATH.
     Unknown kinds and unreadable configs report nothing.
     """
@@ -573,9 +806,34 @@ def _reportable_runtimes(config_path):
     except Exception:
         return []
     found = []
+    attached = None  # probed lazily, at most once per report
+    attach_pairs = set()
     for runtime in getattr(config, "runtimes", []) or []:
         name = CAPABILITY_RUNTIME_NAMES.get(getattr(runtime, "kind", ""))
-        if name is None or getattr(runtime, "mode", "") != "managed":
+        if name is None:
+            continue
+        mode = getattr(runtime, "mode", "")
+        if mode == "attach":
+            if data_dir is None and not _worker_token(config, None):
+                continue
+            if attached is None:
+                attach_pairs = attach_readiness(config, data_dir)[0]
+                attached = {rid for rid, _ in attach_pairs}
+            if runtime.id in attached and all(r["name"] != name for r in found):
+                entry = {"name": name, "formats": list(CAPABILITY_FORMATS)}
+                # Worker-origin model IDs (FABRIC067 integration): attach
+                # the probed models for qualified runtimes only. The helper
+                # returns {} for foreign names and never raises; a missing
+                # module keeps the report model-less rather than breaking it.
+                try:
+                    from model_readiness import runtime_models_entry
+                    entry.update(runtime_models_entry(
+                        name, sorted({m for r, m in attach_pairs if r == runtime.id})[:32]))
+                except Exception:
+                    pass
+                found.append(entry)
+            continue
+        if mode != "managed":
             continue
         executable = getattr(runtime, "executable", None)
         if not executable or not shutil.which(str(executable)):
@@ -610,7 +868,7 @@ def build_capability_report(config_path=None, data_dir=None):
         "schema_version": CAPABILITY_SCHEMA_VERSION,
         "os": (platform.system() or "unknown")[:64],
         "arch": (platform.machine() or "unknown")[:64],
-        "runtimes": _reportable_runtimes(config_path),
+        "runtimes": _reportable_runtimes(config_path, data_dir),
         "mem": {"ramTotalBytes": ram_total, "ramAvailBytes": ram_avail},
         "disk": {"totalBytes": disk_total, "availBytes": disk_avail},
     }
@@ -1103,7 +1361,8 @@ def cmd_heartbeat(args, loop):
             first_beat = False
             # Recomputed per beat (Codex P2): installed/removed models and
             # engines change readiness, and a stale true would misreport ready.
-            usable = decide_usable(args.config)
+            usable_why = []
+            usable = decide_usable(args.config, data_dir, usable_why)
             try:
                 result = send_heartbeat(meta["api_base"], meta["resource_id"],
                                         meta["heartbeat_key"], usable)
@@ -1160,8 +1419,10 @@ def cmd_heartbeat(args, loop):
             failures = 0
             write_status(data_dir, {"at": time.time(), "ok": True, "usable": usable,
                                     "heartbeatAt": result.get("heartbeatAt"),
+                                    "usable_reason": (usable_why or ["unknown"])[0],
                                     "note": "reachability only; not inference-ready"}, meta)
-            print(f"heartbeat ok: usable={usable} at={result.get('heartbeatAt')}")
+            print(f"heartbeat ok: usable={usable} at={result.get('heartbeatAt')} "
+                  f"({(usable_why or ['unknown'])[0]})")
             # After the beat, never before: the report moves heartbeat_at
             # server-side, and the next beat is >= HEARTBEAT_MIN_INTERVAL_SEC
             # away, clear of the 25s window.
