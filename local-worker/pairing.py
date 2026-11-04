@@ -483,15 +483,26 @@ def _attach_readiness(config, data_dir, timeout):
     return ready, "attach model ready"
 
 
+MANAGED_LIVE_STATES = ("unloaded", "loading", "ready", "generating")
+"""Runtime states that count as managed capacity, from the vendored lifecycle
+(dendrite runtimes/base.py: "unloaded" initial/cold, "ready"; runtimes/llama.py:
+"loading" transient startup, "ready"; both use "generating" while serving).
+Cold/on-demand runtimes stay usable without residency; "loading" is a genuine
+transient, not a failure. "unavailable"/"error" are failure states; anything
+else (missing, null, non-string, unknown) is a malformed report: fail closed."""
+
+
 def managed_readiness(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
     """(ready, reason) for configured MANAGED models, from the RUNNING worker.
 
     A managed model is cold until requested, so this does not require it to
     be resident: the running worker's /v1/node must list it available and
     not simulated (dendrite's own file + executable check) on a configured
-    managed, non-simulated runtime that is not in an error state. This makes
-    the usable bit false while the worker daemon is down or restarting.
-    Never raises.
+    managed, non-simulated runtime whose reported state is an explicit live
+    lifecycle state (MANAGED_LIVE_STATES). Failure states ("unavailable",
+    "error") and any malformed state (missing, null, non-string, unknown)
+    fail closed. This makes the usable bit false while the worker daemon is
+    down or restarting. Never raises.
     """
     try:
         report, reason = _fetch_node_report(config, data_dir, timeout)
@@ -503,7 +514,8 @@ def managed_readiness(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
         for runtime in report["runtimes"]:
             if (isinstance(runtime, dict) and _is_str(runtime.get("id"))
                     and runtime["id"] in configured and runtime.get("mode") == "managed"
-                    and runtime.get("simulated") is False and runtime.get("state") != "error"):
+                    and runtime.get("simulated") is False
+                    and runtime.get("state") in MANAGED_LIVE_STATES):
                 live.add(runtime["id"])
         if not live:
             return set(), "managed runtime not reported healthy by worker"
