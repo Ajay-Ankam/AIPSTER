@@ -449,9 +449,11 @@ async function loadOverview() {
       cell('Tokens', tokens === null ? null : String(tokens), tokens === null ? coverage : `${usage.totals.tokensIn} in · ${usage.totals.tokensOut} out`),
       { label: 'Measured rate', hatch: 'Not measured', note: 'no tok/s exist in this build' }
     ]);
+    const reqDisplay = count(usage.totals.requests) ?? 'unknown';
+    const tokDisplay = tokens === null ? 'unknown' : String(tokens);
     el.innerHTML = `<div class="card"><h2>My resources</h2><p class="tile-v">${inv.total} total · ${reachable} reachable</p></div>
       <div class="card"><h2>Shared with me</h2><p class="tile-v">${shared.total} active grant(s)</p></div>
-      <div class="card"><h2>Usage</h2><p class="tile-v">${usage.totals.requests} requests · ${usage.totals.tokensIn + usage.totals.tokensOut} tokens</p></div>
+      <div class="card"><h2>Usage</h2><p class="tile-v">${reqDisplay} requests · ${tokDisplay} tokens</p></div>
       <div class="card"><h2>Models & adapters</h2><p class="tile-v">${catalog.privateAssets} private · ${catalog.activeDeployments} active deployment(s)</p><div class="actions"><button type="button" class="btn secondary" data-goto="models">Browse catalog</button></div></div>`;
     $('ov-note').innerHTML = me && me.demo
       ? '<p class="muted">DEMO DATA: simulated fixtures for exploration. Grants and live actions are disabled. Inference dispatch needs a deployment flag this view does not verify.</p>'
@@ -1266,10 +1268,12 @@ async function loadUsage() {
     const data = await api('/api/usage?limit=50');
     const fmt = (v) => (v === null || v === undefined ? 'unknown' : '$' + Number(v).toFixed(4));
     const cost = (label, v) => fmt(v) === 'unknown' ? { label, hatch: 'unknown', note: 'unmeasured' } : { label, value: fmt(v), note: 'tracked separately' };
+    const count = (v) => Number.isSafeInteger(v) && v >= 0 ? String(v) : null;
+    const cell = (label, value) => value === null ? { label, hatch: 'unknown', note: 'unmeasured' } : { label, value };
     t.innerHTML = kpiStrip([
-      { label: 'Requests', value: String(data.totals.requests) },
-      { label: 'Tokens in', value: String(data.totals.tokensIn) },
-      { label: 'Tokens out', value: String(data.totals.tokensOut) },
+      cell('Requests', count(data.totals.requests)),
+      cell('Tokens in', count(data.totals.tokensIn)),
+      cell('Tokens out', count(data.totals.tokensOut)),
       cost('Model cost', data.totals.modelCostUsd),
       cost('Execution cost', data.totals.executionCostUsd)
     ], 'Usage totals') + '<p class="muted note">Model cost and execution cost are tracked separately; unmeasured stays unknown, never zero.</p>';
