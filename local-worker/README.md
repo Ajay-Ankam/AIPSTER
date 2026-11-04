@@ -25,8 +25,8 @@ From PowerShell in a fresh directory (historical tested Windows x64 mock check â
 git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
 cd AIPSTER
 git sparse-checkout set --no-cone /local-worker/ /LICENSE
-git fetch origin 6af33d4a76765b47f9bed1a14c73d36e5aace592
-git checkout --detach 6af33d4a76765b47f9bed1a14c73d36e5aace592
+git fetch origin 6483c2f379795beec188d3cda2641b3c891e2098
+git checkout --detach 6483c2f379795beec188d3cda2641b3c891e2098
 cd local-worker
 uv run --no-project --python 3.12.14 python install.py
 .\.venv\Scripts\dendrite.exe inspect --config configs/mock.toml
@@ -71,15 +71,15 @@ anything else changed, back it up and use a fresh clone instead.
 
 1. Stop the running `heartbeat-loop` sender terminal with Ctrl+C. Old senders
    hold no lock, so confirm only one sender runs afterwards.
-2. Fetch the reviewed revision (current pin `6af33d4`):
+2. Fetch the reviewed revision (current pin `6483c2f`):
 ```powershell
-git fetch origin 6af33d4a76765b47f9bed1a14c73d36e5aace592
+git fetch origin 6483c2f379795beec188d3cda2641b3c891e2098
 ```
 3. Hash-gate the overlay: the LF-normalized local `pairing.py` must equal the
    reviewed blob:
 ```powershell
 $blob = .\local-worker\.venv\Scripts\python.exe -c "import hashlib,pathlib;b=pathlib.Path('local-worker/pairing.py').read_bytes().replace(b'\r\n',b'\n');print(hashlib.sha1(b'blob '+str(len(b)).encode()+b'\x00'+b).hexdigest())"
-$want = git rev-parse 6af33d4a76765b47f9bed1a14c73d36e5aace592:local-worker/pairing.py
+$want = git rev-parse 6483c2f379795beec188d3cda2641b3c891e2098:local-worker/pairing.py
 if ($blob.Trim() -ne $want.Trim()) { Write-Output 'STOP: pairing.py does not match the reviewed overlay; use a fresh clone instead' }
 ```
    If it prints STOP, do not continue; use a fresh clone.
@@ -89,10 +89,11 @@ git checkout -- local-worker/pairing.py
 ```
 5. Move to the reviewed revision:
 ```powershell
-git checkout --detach 6af33d4a76765b47f9bed1a14c73d36e5aace592
+git checkout --detach 6483c2f379795beec188d3cda2641b3c891e2098
 ```
-6. Do NOT keep `.venv`: the vendored `dendrite` package changed between
-   `3fa309c` and `6af33d4`, and `install.py` installs `vendor/eif`
+6. Do NOT keep `.venv`: the vendored `dendrite` package changed across these
+   pins (including the `pairing.py` readiness rework in the merged revision),
+   and `install.py` installs `vendor/eif`
    non-editable into `.venv` while refusing an existing `.venv`. Remove
    `local-worker/.venv` and rerun `install.py` (quickstart step) so the
    installed package matches the new checkout.
@@ -428,8 +429,8 @@ latest: on any pin mismatch, stop and report instead of adapting silently.
 git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
 cd AIPSTER
 git sparse-checkout set --no-cone /local-worker/ /LICENSE
-git fetch origin 6af33d4a76765b47f9bed1a14c73d36e5aace592
-git checkout --detach 6af33d4a76765b47f9bed1a14c73d36e5aace592
+git fetch origin 6483c2f379795beec188d3cda2641b3c891e2098
+git checkout --detach 6483c2f379795beec188d3cda2641b3c891e2098
 cd local-worker
 uv run --no-project --python 3.12.14 python install.py
 .venv/bin/python test_installation.py
@@ -453,8 +454,13 @@ attach mode must show resident true. A running worker, a completed pairing,
 a green heartbeat, and a reachable dashboard status prove reachability only â€”
 never GPU readiness and never fabric dispatch; dispatch stays disabled and
 no fabric endpoint is configured (loopback is local-only, not a fabric
-route). The heartbeat usable bit at this pin is file-and-PATH presence only,
-not readiness; attach mode always reports false. If a sender is already
+route). The heartbeat usable bit at this pin is verified readiness from the running
+worker, not file presence: managed needs GGUF magic on disk, the executable
+on PATH, and the worker reporting the model available and not simulated on
+a live managed runtime (cold counts; loading is transient); attach needs the
+exact configured model resident on a ready runtime. Worker down or
+restarting, a non-loopback listener, a missing token, or any mock config
+always reports false. If a sender is already
 serving, reuse it; do not start a duplicate. Prefer a resident loopback
 engine where one exists (generated prompt Step 1): bind it as the consumer
 upstream or attach runtime; after pairing, `pairing.py serve-jobs --once`

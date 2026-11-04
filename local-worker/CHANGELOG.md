@@ -1,5 +1,27 @@
 # local-worker install changelog
 
+## 2026-11-04 — Repin to merged readiness 6483c2f; usable is verified readiness
+
+- Worker pin moves to `6483c2f379795beec188d3cda2641b3c891e2098` (current
+  main: merge of PR102 website redesign and PR107 worker readiness; PR107
+  head `c1c2a69...` carried independent PASS 370/370 plus owner acceptance).
+  Under `local-worker/` the only change vs `6af33d4` is `pairing.py`
+  (+266/−18): authenticated `/v1/node` readiness for managed and attach.
+- Heartbeat usable is now verified readiness from the running worker, not
+  file presence. Managed needs GGUF magic on disk, the executable on PATH,
+  and the worker reporting the model available and not simulated on a live
+  managed runtime (`unloaded`/`loading`/`ready`/`generating`; cold counts,
+  loading is transient; failure/malformed states fail closed). Attach needs
+  the exact configured model resident on a ready runtime with matching
+  fingerprint. Worker down/restarting, non-loopback listener, missing token,
+  or mock always reports false — attach can now become eligible, resolving
+  the prior S1 source block.
+- Repin evidence: `verify_vendor.py` exit 0 at the pin (16 files: 10
+  upstream-identical, 6 locally patched; vendor bundle `536508832b…`). The
+  planner still reports setup-required exit 2 with no model configured and
+  takes no action without consent. No native install/run proof; real setup
+  remains unqualified on every OS.
+
 ## 2026-11-04 — Real setup path on all OS prompts; worker pin moves to 6af33d4
 
 - Worker pin moves to `6af33d4a76765b47f9bed1a14c73d36e5aace592` (published
