@@ -8,6 +8,7 @@ and reapplies the recorded patches.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,16 +24,24 @@ def apply_patches(files, patches, reverse=False):
     """Apply recorded patches to {path: bytes} in a temporary directory, returning new bytes.
 
     Inside a repository subdirectory `git apply` silently skips paths it considers outside
-    that directory, so patches are only ever applied in an isolated temporary tree.
+    that directory, so patches are only ever applied in an isolated temporary tree. The
+    tree is made its own repository root: the system temp directory may itself sit inside
+    some other repository (e.g. a stray `git init` in the home directory), which would
+    otherwise make `git apply` skip every path without an error. Ambient repository
+    selection variables are dropped for the same reason.
     """
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX")}
     with tempfile.TemporaryDirectory(prefix="aipster-vendor-patch-") as temp:
+        subprocess.run(["git", "init", "-q", temp], check=True, env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for path, data in files.items():
             (Path(temp) / path).parent.mkdir(parents=True, exist_ok=True)
             (Path(temp) / path).write_bytes(data)
         for patch in (reversed(patches) if reverse else patches):
             subprocess.run(["git", "-c", "core.autocrlf=false", "apply", "--whitespace=nowarn",
                             *(["-R"] if reverse else []), str(ROOT / patch["path"])],
-                           cwd=temp, check=True)
+                           cwd=temp, check=True, env=env)
         return {path: (Path(temp) / path).read_bytes() for path in files}
 
 
