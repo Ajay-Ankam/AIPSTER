@@ -100,7 +100,9 @@ test('recipient-issued inference key executes on the exporter share as the recip
   assert.deepEqual(await spent(s.t, s.grantId), { n: 100, j: 1 }, 'charged once on the fabric grant');
   // The exporter cannot read the recipient's operation by key/idempotency.
   const peek = await readJson(await s.t.call('/api/jobs/bob-key-op-000001', { headers: S(s.t, s.t.alice) }));
-  assert.notEqual(peek.json && peek.json.outcome && peek.json.outcome.content, 'hello');
+  assert.equal(peek.status, 404, `exporter must not read the recipient operation: ${peek.text}`);
+  assert.equal(peek.json.code, 'OPERATION_NOT_FOUND');
+  assert.ok(!peek.text.includes('hello'), 'no recipient content reaches the exporter');
 });
 
 test('key initiation cannot broaden scope, name another principal, or survive key revocation', async () => {
@@ -200,6 +202,15 @@ for (const [label, narrow] of Object.entries(narrowings)) {
     const l = await lease(s.t, s.hb);
     assert.equal(l.status, 204, `a ${label} grant must not route to the worker: ${await l.text()}`);
     assert.equal(await count(s.t, "SELECT COUNT(*) AS n FROM dispatch_jobs WHERE status = 'leased'"), 0);
+    // Safe disposition: the never-executed job is terminal, not uncertain.
+    assert.equal(await count(s.t, "SELECT COUNT(*) AS n FROM dispatch_jobs WHERE status = 'expired'"), 1);
+    const out = await readJson(await s.t.call(`/api/jobs/bob-queued-${label}`, { headers: B(s.bobKey.secret) }));
+    assert.equal(out.status, 200, out.text);
+    assert.equal(out.json.status, 'settled', out.text);
+    assert.equal(out.json.outcome.finish, 'expired');
+    assert.equal(out.json.outcome.content, undefined);
+    // Existing accounting preserved: the post-start reservation stays charged once.
+    assert.deepEqual(await spent(s.t, s.grantId), { n: 100, j: 1 });
   });
 }
 

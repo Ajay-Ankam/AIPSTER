@@ -75,7 +75,7 @@ export async function listReadinessSnapshots({ db, principalId, nowMs } = {}) {
   const page = await db.prepare(
     `SELECT r.id, r.owner_id, r.usable, r.online, r.heartbeat_at, c.reported_at, c.runtimes_json
      FROM resources r LEFT JOIN node_capabilities c ON c.node_id = r.id
-     WHERE r.owner_id = ? LIMIT ${ROUTE_CANDIDATE_LIMIT}`).bind(principalId).all();
+     WHERE r.owner_id = ? ORDER BY r.id LIMIT ${ROUTE_CANDIDATE_LIMIT}`).bind(principalId).all();
   const rows = page && Array.isArray(page.results) ? page.results : [];
   return rows
     .filter((row) => isObj(row) && typeof row.id === 'string' && row.id)
@@ -85,6 +85,63 @@ export async function listReadinessSnapshots({ db, principalId, nowMs } = {}) {
       reportedAt: typeof row.reported_at === 'string' ? row.reported_at : null,
       runtimesJson: typeof row.runtimes_json === 'string' ? row.runtimes_json : null,
     }, { nowMs: now, tenantId: principalId }));
+}
+
+/**
+ * Grant-derived recipient candidates (CLAUDE135 G3). Tenant isolation is not
+ * relaxed: owner rows keep the owner-only listing above. A shared row exists
+ * only for a resource named by a LIVE fabric share for this principal
+ * (store.listLiveShares re-derives every consent term), and it is qualified
+ * by the same qualifySnapshot with tenantId = the grant's recorded exporter,
+ * so a row whose owner drifted from the exporter is TENANT_MISMATCH-excluded.
+ * Tuples are restricted to the grant's consented models. Excluded shared
+ * rows are dropped (no foreign resource id leaves this function in an
+ * exclusion list). Each surviving row carries its candidate grants so
+ * issuance names one explicitly; nothing here authorizes anything.
+ */
+export async function listSharedSnapshots({ db, store, principalId, nowMs } = {}) {
+  if (!store || typeof store.listLiveShares !== 'function') return [];
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const shares = await store.listLiveShares({ principal_id: principalId });
+  const byResource = new Map();
+  for (const sh of Array.isArray(shares) ? shares : []) {
+    if (!isObj(sh) || typeof sh.resource_id !== 'string' || typeof sh.grant_id !== 'string'
+      || typeof sh.exporter_id !== 'string' || !Array.isArray(sh.models)) continue;
+    if (sh.exporter_id === principalId) continue; // own resources use the owner path only
+    const entry = byResource.get(sh.resource_id) || { exporterId: sh.exporter_id, grants: [] };
+    if (entry.exporterId !== sh.exporter_id) continue; // one exporter per live resource row
+    entry.grants.push({ grantId: sh.grant_id, models: sh.models, maxTokens: sh.maxTokens });
+    byResource.set(sh.resource_id, entry);
+  }
+  const out = [];
+  for (const [resourceId, entry] of byResource) {
+    const row = await db.prepare(
+      `SELECT r.id, r.owner_id, r.usable, r.online, r.heartbeat_at, c.reported_at, c.runtimes_json
+       FROM resources r LEFT JOIN node_capabilities c ON c.node_id = r.id WHERE r.id = ?`).bind(resourceId).first();
+    if (!isObj(row) || typeof row.id !== 'string') continue;
+    const q = qualifySnapshot({
+      resourceId: row.id, ownerId: row.owner_id, usable: Number(row.usable) === 1,
+      online: Number(row.online) === 1, heartbeatAt: row.heartbeat_at ?? null,
+      reportedAt: typeof row.reported_at === 'string' ? row.reported_at : null,
+      runtimesJson: typeof row.runtimes_json === 'string' ? row.runtimes_json : null,
+    }, { nowMs: now, tenantId: entry.exporterId });
+    if (q.excluded) continue;
+    const consented = new Set(entry.grants.flatMap((g) => g.models));
+    const tuples = q.tuples.filter((tp) => consented.has(tp.model_id));
+    if (tuples.length === 0) continue;
+    out.push({ ...q, tuples, shared: true, grants: entry.grants });
+  }
+  return out;
+}
+
+// The first (by grant id) live share on the selected resource that consents
+// to the selected model at this request size.
+function shareGrantFor(snapshots, resourceId, modelId, maxTokens) {
+  const row = (snapshots || []).find((q) => q && q.resourceId === resourceId && q.shared === true);
+  if (!row) return null;
+  const fit = row.grants.filter((g) => g.models.includes(modelId) && Number(g.maxTokens) >= maxTokens)
+    .sort((a, b) => (a.grantId < b.grantId ? -1 : a.grantId > b.grantId ? 1 : 0));
+  return fit.length ? fit[0].grantId : null;
 }
 
 const defaultGenerateKey = () => {
@@ -122,7 +179,7 @@ function bindingPreview(admission, principal, deadlineAt) {
 
 export function createFabricOpenAIRoute({
   needAuthz, actor, db = null, env = null, getStore = getDispatchStore,
-  candidateProvider = listReadinessSnapshots, clock = () => Date.now(),
+  candidateProvider = listReadinessSnapshots, sharedProvider = listSharedSnapshots, clock = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
   generateKey = defaultGenerateKey, maxWaitMs = ROUTE_MAX_WAIT_MS, pollIntervalMs = ROUTE_POLL_MS,
 } = {}) {
@@ -271,7 +328,13 @@ export function createFabricOpenAIRoute({
     if (!db) return unavailable();
     let snapshots;
     try {
-      snapshots = await candidateProvider({ db, principalId: auth.principal.principal_id, nowMs: clock() });
+      const nowMs = clock();
+      snapshots = await candidateProvider({ db, principalId: auth.principal.principal_id, nowMs });
+      let store = null;
+      try { store = await getStore(env, db); } catch { store = null; }
+      // Shared models are listed by id only: no exporter, resource or grant
+      // identity reaches the response.
+      if (store) snapshots = [...snapshots, ...await sharedProvider({ db, store, principalId: auth.principal.principal_id, nowMs })];
     } catch {
       return unavailable();
     }
@@ -396,11 +459,39 @@ export function createFabricOpenAIRoute({
       return unavailable();
     }
     let selection;
+    const request = { tenantId: principal.principal_id,
+      ...(checked.value.model === null ? {} : { model: checked.value.model }) };
     try {
-      selection = selectModelCandidate(snapshots, { tenantId: principal.principal_id,
-        ...(checked.value.model === null ? {} : { model: checked.value.model }) });
+      selection = selectModelCandidate(snapshots, request);
     } catch {
       return { http: 400, body: openAIError(400, 'invalid_request', 'The placement request was malformed.', 'invalid_request_error').body };
+    }
+    // Owner resources first; only when none can serve does a live fabric
+    // share become a candidate, and then with its grant named explicitly.
+    let shareGrant = null;
+    if (!selection || !selection.selected) {
+      let shared = [];
+      try {
+        shared = await sharedProvider({ db, store, principalId: principal.principal_id, nowMs });
+      } catch {
+        return unavailable();
+      }
+      if (shared.length > 0) {
+        let picked = null;
+        try {
+          picked = selectModelCandidate(shared, request);
+        } catch {
+          picked = null;
+        }
+        if (picked && picked.selected) {
+          shareGrant = shareGrantFor(shared, picked.selected.resourceId, picked.selected.modelId, checked.value.max_tokens);
+          if (!shareGrant) {
+            return { http: 429, body: openAIError(429, 'grant_quota_exhausted',
+              'Grant capacity is exhausted for this request.', 'server_error').body };
+          }
+          selection = picked;
+        }
+      }
     }
     if (!selection || !selection.selected) {
       if (selection && selection.code === 'MODEL_NOT_ADVERTISED') {
@@ -416,7 +507,7 @@ export function createFabricOpenAIRoute({
       admission = await store.issueAdmission({ principal: { principal_id: principal.principal_id,
         tenant_id: principal.tenant_id }, resource_id: selection.selected.resourceId,
       model_id: selection.selected.modelId, max_tokens: checked.value.max_tokens,
-      runtime_id: selection.selected.runtimeId });
+      runtime_id: selection.selected.runtimeId, ...(shareGrant ? { grant: shareGrant } : {}) });
     } catch (err) {
       return issuanceError(err);
     }

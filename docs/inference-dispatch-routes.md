@@ -47,7 +47,7 @@ The issuer checks, before calling `store.issueAdmission`:
 default) or a plain `llama-server` on Metal, for hosts that have no Ganglion
 yet. The issuer passes the validated value to `store.issueAdmission`, which
 pins both halves of the identity in the admission binding — `runtime_id` and
-`runtime_instance` (`<node_id>#<runtime_id>`). The coordinator carries them
+`runtime_instance` (documented target `<node_id>#<runtime_id>`; the D1 store currently binds `runtime_instance = runtime_id` and `model_fingerprint = model_id` — server-chosen labels, NOT attestation of which weights ran). The coordinator carries them
 unchanged into `task.placement.runtime_id` and `binding.runtime_instance`, and
 the worker echoes the binding back in its result, so a `llama-server` job can
 never present itself as Ganglion. The test double rejects an out-of-allowlist

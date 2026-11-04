@@ -50,7 +50,7 @@ const succeeded = (l) => ({
   result: { request_id: l.job_id, node_id: l.envelope.task.placement.node_id,
     runtime_id: l.envelope.task.placement.runtime_id, model_id: l.envelope.task.model_id,
     runtime_instance: l.envelope.binding.runtime_instance, model_fingerprint: l.envelope.binding.model_fingerprint,
-    simulated: false, content: 'hello', elapsed_ms: 9, usage: { output_tokens: 1 }, cache: {} },
+    simulated: false, content: 'hello', finish_reason: 'stop', elapsed_ms: 9, usage: { output_tokens: 1 }, cache: {} },
 });
 const count = async (t, sql, ...b) => (await t.DB.prepare(sql).bind(...b).first()).n;
 
@@ -205,8 +205,25 @@ test('R4: concurrent first requests with one idempotency key converge on one ope
   for (const r of [r1, r2]) {
     assert.notEqual(r.json?.error?.code, 'idempotency_conflict', `same payload must never conflict: ${r.text}`);
   }
+  assert.ok([r1, r2].some((r) => r.status === 200), 'one caller receives the completion');
+  for (const r of [r1, r2]) assert.ok([200, 409].includes(r.status), r.text);
   assert.equal(await count(t, 'SELECT COUNT(*) AS n FROM dispatch_operations'), 1, 'one durable operation');
   assert.equal(await count(t, 'SELECT COUNT(*) AS n FROM dispatch_jobs'), 1, 'one job');
   const extra = await t.call('/api/worker/jobs/next', { headers: B(hb) });
   assert.equal(extra.status, 204);
+});
+
+test('R4: concurrent requests with one key but different payloads still conflict, never execute twice', async () => {
+  const { t, hb } = await ownerModelEnv();
+  const headers = { ...S(t, t.alice), 'Idempotency-Key': 'r4-diff-key-000001' };
+  const mk = (content) => ({ model: MODEL, max_tokens: 64, messages: [{ role: 'user', content }] });
+  const p1 = t.call('/v1/chat/completions', { method: 'POST', headers, body: mk('first') });
+  const p2 = t.call('/v1/chat/completions', { method: 'POST', headers, body: mk('second') });
+  await SLEEP(300);
+  const l = await readJson(await t.call('/api/worker/jobs/next', { headers: B(hb) }));
+  assert.equal(l.status, 200, l.text);
+  await t.call(`/api/worker/jobs/${l.json.job_id}/result`, { method: 'POST', headers: B(hb), body: succeeded(l.json) });
+  const rs = await Promise.all([readJson(await p1), readJson(await p2)]);
+  assert.equal(rs.filter((r) => r.json?.error?.code === 'idempotency_conflict').length, 1, rs.map((r) => r.text).join(' | '));
+  assert.equal(await count(t, 'SELECT COUNT(*) AS n FROM dispatch_jobs'), 1);
 });

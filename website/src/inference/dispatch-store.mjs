@@ -48,6 +48,8 @@ import { matchDeny } from '../fabric/policy.mjs';
 export const ADMISSION_TTL_MS = 10 * 60 * 1000;
 // Queued jobs examined per worker lease poll (bounded scan; skipped jobs age out).
 const LEASE_SCAN_LIMIT = 16;
+// Grant x resource rows examined for recipient share discovery (bounded).
+const SHARE_SCAN_LIMIT = 64;
 // Per-principal limits. Three independent caps, because one number cannot
 // express "how much may run at once", "how much new work may arrive" and "how
 // much history may be kept":
@@ -621,6 +623,34 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       ceilings, route: g.route,
     };
   }
+  // Live shares this principal may execute on as a fabric RECIPIENT, for
+  // grant-derived candidate discovery (OpenAI route). Read-only: every row is
+  // re-derived through fabricGrantLive (federation flag, explicit internal
+  // route, connection, exporter-held incarnation, recipient-node ownership,
+  // consumers, denies, strict spend counters) plus the time window. Nothing
+  // is authorized here: issuance re-verifies every term again.
+  async function listLiveShares({ principal_id } = {}) {
+    if (!isStr(principal_id) || !federationOn()) return [];
+    const rows = await all(db, `SELECT g.id AS grant_id, json_extract(s.value, '$.resourceId') AS resource_id
+      FROM fabric_grants g, json_each(g.snapshot) s
+      WHERE g.status = 'enforced' AND g.quarantine_reason IS NULL AND g.route = 'internal'
+        AND EXISTS (SELECT 1 FROM json_each(g.consumers) WHERE value = ?)
+      ORDER BY g.id, resource_id LIMIT ${SHARE_SCAN_LIMIT}`, principal_id);
+    const t = clock();
+    const out = [];
+    for (const row of rows) {
+      if (!isStr(row.grant_id) || !isStr(row.resource_id)) continue;
+      const live = await fabricGrantLive({ grant_id: row.grant_id, principal_id, resource_id: row.resource_id });
+      if (!live || !(Date.parse(live.grant.expiry) > t)) continue;
+      const maxTokens = Number(live.ceilings.maxTokens);
+      if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) continue;
+      if (!live.actions.includes('inference')) continue;
+      out.push({ grant_id: live.grant.id, resource_id: live.resource.id, exporter_id: live.grant.exporter_id,
+        models: live.models.filter((m) => isStr(m)), maxTokens });
+    }
+    return out;
+  }
+
   async function readGrant({ grant_id, principal_id, resource_id } = {}) {
     if (!isStr(grant_id)) return null;
     if (isOwnerGrant(grant_id)) {
@@ -1342,10 +1372,23 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
           const authority = {
             grant_id: binding.grant_id, grant_revision: binding.grant_revision, incarnation: binding.incarnation,
           };
-          if (await authorityProblem(op, binding, authority)) continue;
-          const g = await first(db, 'SELECT expiry FROM fabric_grants WHERE id = ?', binding.grant_id);
-          if (!g || !(Date.parse(g.expiry) > t)) continue;
           const live = await liveAuthoritySql(op, binding, authority);
+          const g = await first(db, 'SELECT expiry FROM fabric_grants WHERE id = ?', binding.grant_id);
+          if (await authorityProblem(op, binding, authority) || !g || !(Date.parse(g.expiry) > t)) {
+            // Authority lost while queued: make the job terminal 'expired'
+            // (never leased, never executed) so reconcile settles it instead
+            // of aging it into an uncertain operation. Guarded on 'queued'
+            // and on authority still being absent, so a concurrent restore
+            // wins. Accounting is unchanged: the post-start reservation
+            // stays charged, as for every other post-start outcome.
+            const expiredOnly = g && Date.parse(g.expiry) > t ? ` AND NOT ${live.sql}` : '';
+            await db.batch([
+              db.prepare(`UPDATE dispatch_jobs SET status = 'expired', result_json = ?, updated_at = ?
+                WHERE job_id = ? AND status = 'queued'${expiredOnly}`).bind(
+                json({ reason: 'authority_lost' }), tIso, cand.job_id, ...(expiredOnly ? live.binds : [])),
+            ]);
+            continue;
+          }
           cond.push(live.sql);
           binds.push(...live.binds);
         }
@@ -1448,7 +1491,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
 
   return {
     // coordinator authority
-    resolveAdmission, readGrant, claimOperation, getOperation, acquireHold, admit, redeemStart,
+    resolveAdmission, readGrant, listLiveShares, claimOperation, getOperation, acquireHold, admit, redeemStart,
     fenceStart, releaseHolds, recordDispatch, markUncertain, recordCancelIntent, recheckRelease, settle,
     validateBinding,
     // issuer + bound-job transport primitives (L2)

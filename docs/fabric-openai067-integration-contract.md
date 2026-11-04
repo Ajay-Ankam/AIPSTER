@@ -148,8 +148,15 @@ directly affected test.
 - Tenant/owner binding (SQL `WHERE r.owner_id = ?` on the verified actor id),
   budgets, deadlines, cancel/retry, idempotency, start authority, resource
   freshness, no-cross-user-grant bypass: inherited from admission +
-  coordinator. Grant-shared models are honestly 409 until a follow-up wires
-  grant-shared evidence.
+  coordinator. Grant-shared models (CLAUDE135 G3): a recipient also sees
+  models of a resource named by a LIVE `fg_` fabric share with explicit
+  `route: 'internal'` consent, while BOTH `FEDERATION_ENABLED` and
+  `INFERENCE_ENABLED` are '1'. Shared rows are qualified against the grant's
+  recorded exporter (tenant check kept), restricted to the grant's models
+  (exact id match with worker evidence), listed by model id only, selected
+  only when no owned candidate serves, and admitted with the grant named.
+  Authority is re-derived at issuance, submit, lease and release. App grants
+  (`g_*`) are not bridged here.
 - Release is rechecked from current authority on every surfacing; revoked or
   refused releases withhold with reasons, never leak.
 - No new keys minted/rotated/stored; no key values logged/returned.
