@@ -447,10 +447,12 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       WHERE owner_id = ? AND (resource_id = ? OR resource_id IS NULL)`, r.owner_id, resource_id);
     const req = { consumer: principal_id, resourceId: resource_id, action: 'inference' };
     for (const d of denies) {
+      // Same verb seam as the grant actions below: fabric persists 'infer'.
+      const denyAction = d && d.action === 'infer' ? 'inference' : d && d.action;
       if (d && matchDeny(req, {
         principal: d.principal ?? undefined,
         resourceId: d.resourceId ?? undefined,
-        action: d.action ?? undefined,
+        action: denyAction ?? undefined,
       })) return null;
     }
     const rawActions = safeJson(g.actions, null);

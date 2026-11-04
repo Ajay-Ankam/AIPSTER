@@ -130,12 +130,14 @@ test('owner-scoped deny withholds the view for its principal only', async (t) =>
   const s = await setup();
   t.after(() => s.t.sqlite.close());
   const now = new Date().toISOString();
+  // Fabric persists the deny verbatim as 'infer' (store.mjs preview/discovery
+  // paths); the fixture must use the real vocabulary, not the dispatch one.
   await s.t.DB.prepare(`INSERT INTO fabric_denies (id, owner_id, principal, resource_id, action, created_at)
-    VALUES ('dn_demo_1', 'u_alice', 'u_bob', ?, 'inference', ?)`).bind(RES, now).run();
+    VALUES ('dn_demo_1', 'u_alice', 'u_bob', ?, 'infer', ?)`).bind(RES, now).run();
   assert.equal(await read(s, 'u_bob'), null, 'matching deny blocks the consumer');
   await s.t.DB.prepare('DELETE FROM fabric_denies WHERE id = ?').bind('dn_demo_1').run();
   assert.ok(await read(s, 'u_bob'), 'deny removed: view resolves again');
   await s.t.DB.prepare(`INSERT INTO fabric_denies (id, owner_id, principal, resource_id, action, created_at)
-    VALUES ('dn_demo_2', 'u_alice', 'u_stranger', ?, 'inference', ?)`).bind(RES, now).run();
+    VALUES ('dn_demo_2', 'u_alice', 'u_stranger', ?, 'infer', ?)`).bind(RES, now).run();
   assert.ok(await read(s, 'u_bob'), 'a deny scoped to someone else changes nothing');
 });
