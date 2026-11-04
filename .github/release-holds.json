@@ -3,10 +3,12 @@
   "holds": {
     "45c9eb70c8f495a12d378b4e3ca031e47b2e111d": {
       "sha": "45c9eb70c8f495a12d378b4e3ca031e47b2e111d",
-      "active": true,
+      "active": false,
       "reason": "PR84 all-merges-and-deployments hold pending Peter resolution (seeded with safeguards milestone; requires maintainer confirmation before it is relied on)",
       "setBy": "safeguards-seed",
-      "blockMerges": true
+      "blockMerges": true,
+      "clearedBy": "synchronic1",
+      "clearReason": "Owner release approval 2026-11-04 for 8de0585d: PR84 freshness edge merged and fails closed; release ships independently reviewed #62/#93/#94/#100 with green exact-head CI (installer backfilled on PR93 head) and green main CI. Merging this clearance is the separately approved owner operation; deploy additionally needs the gate-vs-history recovery ruling (range contains #94 registry introduction + no-PR merge cd4d1819)."
     }
   }
 }
