@@ -20,6 +20,34 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+# Variables git treats as selecting one particular repository, as printed by
+# `git rev-parse --local-env-vars` (git 2.43). Inherited from a caller (a hook, a linked
+# worktree, `git rebase --exec`) they would point the temporary repository at the
+# caller's: GIT_COMMON_DIR alone makes `git init` fail in the temporary directory.
+GIT_LOCAL_ENV_VARS = frozenset((
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
+))
+
+
+def isolated_git_env():
+    """The process environment without any repository-local git variable.
+
+    The fixed list is the floor; the installed git's own list is added so a newer git's
+    additions are dropped too. Asking git needs no repository.
+    """
+    env = {k: v for k, v in os.environ.items() if k.upper() not in GIT_LOCAL_ENV_VARS}
+    try:
+        names = subprocess.run(["git", "rev-parse", "--local-env-vars"], env=env, check=True,
+                               capture_output=True, text=True).stdout.split()
+    except (OSError, subprocess.CalledProcessError):
+        names = []
+    local = GIT_LOCAL_ENV_VARS | {name.upper() for name in names}
+    return {k: v for k, v in env.items() if k.upper() not in local}
+
+
 def apply_patches(files, patches, reverse=False):
     """Apply recorded patches to {path: bytes} in a temporary directory, returning new bytes.
 
@@ -28,13 +56,13 @@ def apply_patches(files, patches, reverse=False):
     tree is made its own repository root: the system temp directory may itself sit inside
     some other repository (e.g. a stray `git init` in the home directory), which would
     otherwise make `git apply` skip every path without an error. Ambient repository
-    selection variables are dropped for the same reason.
+    selection variables are dropped for the same reason (see isolated_git_env).
     """
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX")}
+    env = isolated_git_env()
     with tempfile.TemporaryDirectory(prefix="aipster-vendor-patch-") as temp:
-        subprocess.run(["git", "init", "-q", temp], check=True, env=env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        init = subprocess.run(["git", "init", "-q", temp], env=env, capture_output=True, text=True)
+        if init.returncode:
+            raise SystemExit("Could not create the temporary patch repository: " + init.stderr.strip())
         for path, data in files.items():
             (Path(temp) / path).parent.mkdir(parents=True, exist_ok=True)
             (Path(temp) / path).write_bytes(data)
