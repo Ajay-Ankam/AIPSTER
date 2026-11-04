@@ -1368,6 +1368,10 @@ async function runCatalogSearch() {
 async function showAssetDetail(repo) {
   const host = $('asset-detail');
   loading(host);
+  // A newly opened model starts with no carried evaluation: drop any
+  // previous selection so a stale file can never leak into another model.
+  lastCompatInput = null;
+  compatPickerFor = null;
   if (host.scrollIntoView) host.scrollIntoView();
   try {
     const a = await api('/api/catalog/assets/' + encodeURIComponent(repo));
@@ -1383,6 +1387,10 @@ async function showAssetDetail(repo) {
       ${demo ? '<p class="muted">Compatibility checks are disabled for the demo account.</p>' : `<form id="compat-form" class="card">
         <h3>Check compatibility</h3>
         <label>Node <select id="compat-node" required></select></label>
+        ${(a.variants || []).length > 1 ? `<label>GGUF file <select id="compat-file" required>
+          <option value="">Choose one GGUF file…</option>
+          ${a.variants.map((v) => `<option value="${esc(v.file)}">${esc(v.file)}${v.quant && v.quant !== 'unknown' ? ` (${esc(v.quant)})` : ''} · ${fmtBytes(v.bytes)}</option>`).join('')}
+        </select></label>` : ''}
         <label>Runtime <input id="compat-runtime" required maxlength="64" value="fixture-llama"></label>
         <label>Context length <input id="compat-context" type="number" min="1" max="1048576" value="4096" required></label>
         <label>Concurrency <input id="compat-concurrency" type="number" min="1" max="1024" value="1" required></label>
@@ -1390,6 +1398,11 @@ async function showAssetDetail(repo) {
         <p id="compat-error" class="error" role="alert" hidden></p>
         <button type="submit">Evaluate</button>
       </form><div id="compat-out" role="status"></div>`}</div>`;
+    // Bind the picker to this exact asset synchronously at render, before
+    // any awaited fetch: a fresh render never inherits another model's
+    // choice, whatever resolves first.
+    compatPickerFor = !demo && (a.variants || []).length > 1 ? (a.id || a.repo) : null;
+    if (compatPickerFor) $('compat-file').value = '';
     if (!demo) {
       await catalogNodes($('compat-node'), false);
       $('compat-form').addEventListener('submit', (e) => { e.preventDefault(); runCompat(a); });
@@ -1403,12 +1416,22 @@ async function runCompat(asset) {
   err.hidden = true;
   loading(out);
   try {
+    // The picker counts only while it belongs to this asset; otherwise its
+    // value is ignored even if a stale element lingers.
+    const pickerLive = compatPickerFor !== null && compatPickerFor === (asset.id || asset.repo);
+    const picked = pickerLive ? $('compat-file').value : '';
+    if (pickerLive && !picked) {
+      err.textContent = 'Choose one GGUF file to evaluate.';
+      err.hidden = false;
+      return;
+    }
     const body = {
       ...(asset.id.startsWith('priv:') ? { assetId: asset.id } : { repo: asset.repo }),
       nodeId: $('compat-node').value,
       runtime: $('compat-runtime').value.trim(),
       context: Number($('compat-context').value),
       concurrency: Number($('compat-concurrency').value),
+      ...(picked ? { file: picked } : {}),
     };
     const adapterEl = $('compat-adapter');
     if (adapterEl && adapterEl.value.trim()) {
@@ -1425,12 +1448,13 @@ async function runCompat(asset) {
       <p class="muted">method: ${esc(dec.estimate.method)} · ${esc(dec.estimate.uncertainty)}</p>` : '';
     out.innerHTML = `<div class="card"><h3 tabindex="-1" id="compat-head">Decision: ${compatPill(dec.state)}</h3>
       <p class="muted">node ${esc(dec.nodeId)} · estimator ${esc(dec.estimator)} · capability-report age ${dec.telemetryAgeMs === null ? 'unknown' : Math.round(dec.telemetryAgeMs / 1000) + 's'} · expires ${esc(dec.expiresAt)}${dec.cached ? ' · cached' : ''}${dec.fixture ? ' · DEMO' : ''} · snapshot only, not a connected node</p>
+      ${dec.variant && dec.variant.file ? `<p class="muted">evaluated file <code>${esc(dec.variant.file)}</code></p>` : ''}
       ${dec.blocking && dec.blocking.length ? `<h4>Blocking</h4><ul>${rows(dec.blocking)}</ul>` : ''}
       ${dec.unknown && dec.unknown.length ? `<h4>Unknown (missing evidence)</h4><ul>${rows(dec.unknown)}</ul>` : ''}
       ${dec.warnings && dec.warnings.length ? `<h4>Warnings</h4><ul>${rows(dec.warnings)}</ul>` : ''}
       ${est}
       ${dec.state === 'estimated-compatible' ? '<p><button type="button" class="btn" data-plan="1">Plan deployment</button></p>' : '<p><button type="button" class="btn" disabled title="Deployment needs an estimated-compatible decision">Deploy (unavailable)</button></p>'}<div id="deploy-out" role="status"></div></div>`;
-    lastCompatInput = { ref: body.repo || body.assetId, nodeId: body.nodeId, runtime: body.runtime, context: body.context, concurrency: body.concurrency };
+    lastCompatInput = { ref: body.repo || body.assetId, nodeId: body.nodeId, runtime: body.runtime, context: body.context, concurrency: body.concurrency, file: body.file || '' };
     out.onclick = (e) => {
       const ds = e && e.target && e.target.dataset ? e.target.dataset : {};
       if (ds.plan) runPlan();
@@ -1452,6 +1476,10 @@ async function runCompat(asset) {
 // walkthrough drives the fake worker through its scripted receipts and is
 // labeled DEMO throughout; live environments refuse scripted plans.
 let lastCompatInput = null;
+// Asset key (id or repo) the visible GGUF picker was rendered for, or null
+// when no picker is shown. runCompat only honors the picker while the keys
+// match, so a lingering element can never attach a stale file.
+let compatPickerFor = null;
 let pendingPlan = null;
 const depCache = new Map();
 const DEPLOY_FINAL = ['ready', 'failed', 'cancelled'];
@@ -1487,7 +1515,7 @@ async function runPlan() {
   pendingPlan = null;
   try {
     const b = lastCompatInput;
-    const res = await api('/api/catalog/plans', { method: 'POST', body: JSON.stringify({ assetRef: b.ref, nodeId: b.nodeId, runtime: b.runtime, context: b.context, concurrency: b.concurrency }) });
+    const res = await api('/api/catalog/plans', { method: 'POST', body: JSON.stringify({ assetRef: b.ref, nodeId: b.nodeId, runtime: b.runtime, context: b.context, concurrency: b.concurrency, ...(b.file ? { file: b.file } : {}) }) });
     pendingPlan = { planToken: res.planToken, plan: res.plan, expiresAt: res.expiresAt, keys: {} };
     host.innerHTML = `<div class="card"><h3>Deployment plan</h3>
       <p class="muted">${esc(res.plan.asset.id)}@${esc(String(res.plan.asset.revision).slice(0, 12))} → node ${esc(res.plan.nodeId)} · ${esc(res.plan.runtime)} · context ${esc(res.plan.context)} · concurrency ${esc(res.plan.concurrency)}</p>
@@ -1510,7 +1538,7 @@ async function runExecute(walkthrough) {
     let planToken = pendingPlan.planToken;
     if (walkthrough) {
       const b = lastCompatInput;
-      const res = await api('/api/catalog/plans', { method: 'POST', body: JSON.stringify({ assetRef: b.ref, nodeId: b.nodeId, runtime: b.runtime, context: b.context, concurrency: b.concurrency, fixtureScript: WALKTHROUGH }) });
+      const res = await api('/api/catalog/plans', { method: 'POST', body: JSON.stringify({ assetRef: b.ref, nodeId: b.nodeId, runtime: b.runtime, context: b.context, concurrency: b.concurrency, ...(b.file ? { file: b.file } : {}), fixtureScript: WALKTHROUGH }) });
       planToken = res.planToken;
     }
     if (!pendingPlan.keys[slot]) pendingPlan.keys[slot] = mintIdemKey();

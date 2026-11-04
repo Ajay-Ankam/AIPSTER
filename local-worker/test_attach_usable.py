@@ -325,10 +325,10 @@ class AttachUsableTests(unittest.TestCase):
         node = self.node(body=node_report())
         config = write_config(self.data, node.port)
         self.assertEqual(pairing._reportable_runtimes(str(config), self.data),
-                         [{"name": "llama-server", "formats": ["gguf"]}])
+                         [{"name": "llama-server", "formats": ["gguf"], "models": [MODEL]}])
         report = pairing.build_capability_report(str(config), self.data)
         if report is not None:  # None only when psutil/disk cannot be measured
-            self.assertEqual(report["runtimes"], [{"name": "llama-server", "formats": ["gguf"]}])
+            self.assertEqual(report["runtimes"], [{"name": "llama-server", "formats": ["gguf"], "models": [MODEL]}])
 
     def test_capability_report_drops_unready_or_unprobed_attach(self):
         node = self.node(body=node_report(runtime={"state": "unavailable"}))

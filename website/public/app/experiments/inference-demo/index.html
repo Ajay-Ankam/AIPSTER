@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIPSTER · Inference demo (experiment)</title>
+  <meta name="description" content="Single-user explicit-resource inference demo. Session auth only, one named resource, CPU-only placement, visible result." />
+  <meta name="robots" content="noindex, nofollow" />
+  <link rel="stylesheet" href="/app/experiments/inference-demo/styles.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <div class="wrap topbar">
+    <a class="backlink" href="/app/">Back to the AIPSTER control panel</a>
+  </div>
+
+  <main id="main" class="wrap">
+    <p class="experimental-label" role="note">
+      Experimental single-user demo: session auth only (no API keys in this page),
+      one explicitly named resource, CPU-only placement. Results shown are
+      worker-reported and binding-checked by the server, not independently attested.
+    </p>
+
+    <h1>Inference demo</h1>
+
+    <section aria-labelledby="session-h">
+      <h2 id="session-h">Session</h2>
+      <p id="session-state" role="status">Checking session…</p>
+    </section>
+
+    <section aria-labelledby="target-h">
+      <h2 id="target-h">Target</h2>
+      <label for="inventory-select">Resource (live inventory, read scope)</label>
+      <select id="inventory-select"></select>
+      <p id="inventory-note" class="note">Loading inventory…</p>
+      <p>
+        <input type="checkbox" id="manual-toggle" />
+        <label for="manual-toggle">Enter resource id manually (the server validates ownership and liveness)</label>
+      </p>
+      <div id="manual-wrap" hidden="hidden">
+        <label for="resource-manual">Manual resource id</label>
+        <input type="text" id="resource-manual" maxlength="64" autocomplete="off" spellcheck="false" />
+      </div>
+      <label for="model-input">Model id (manual — no resident-model listing API exists; the server pins this string and the worker must serve it)</label>
+      <input type="text" id="model-input" maxlength="256" autocomplete="off" spellcheck="false" />
+      <label for="runtime-select">Runtime (server allowlist mirror; placement stays CPU-only)</label>
+      <select id="runtime-select">
+        <option value="ganglion">ganglion (default)</option>
+        <option value="llama-server">llama-server</option>
+      </select>
+    </section>
+
+    <section aria-labelledby="request-h">
+      <h2 id="request-h">Request</h2>
+      <label for="prompt-input">Prompt (required)</label>
+      <textarea id="prompt-input" rows="4" maxlength="65536"></textarea>
+      <label for="tokens-input">Max tokens, 1 to 4096 (same value is used for the admission and the job)</label>
+      <input type="number" id="tokens-input" min="1" max="4096" value="256" />
+      <label for="deadline-select">Deadline (server maximum is 180 seconds)</label>
+      <select id="deadline-select">
+        <option value="30">30 seconds</option>
+        <option value="60" selected="selected">60 seconds</option>
+        <option value="120">120 seconds</option>
+        <option value="180">180 seconds</option>
+      </select>
+      <p>
+        <button type="button" id="submit-btn" disabled="disabled">Submit one job</button>
+        <button type="button" id="cancel-btn" disabled="disabled">Cancel job</button>
+        <button type="button" id="reset-btn" disabled="disabled">Reset</button>
+      </p>
+      <p id="key-line" class="mono" aria-live="polite"></p>
+    </section>
+
+    <section aria-labelledby="result-h">
+      <h2 id="result-h">Status and result</h2>
+      <p id="status-line" role="status" aria-live="polite" data-kind="info">Idle.</p>
+      <p id="poll-line" class="note" aria-live="polite"></p>
+      <pre id="result-pre" aria-label="Released result content"></pre>
+      <p id="provenance-line" class="note"></p>
+    </section>
+  </main>
+
+  <script src="/app/experiments/inference-demo/app.js" type="module"></script>
+</body>
+</html>
