@@ -60,10 +60,18 @@ export function parseAllowancesFile(json) {
   const out = {};
   for (const [id, e] of Object.entries(json.allowances || {})) {
     assert(ID_RE.test(id), `Allowance id ${id} is malformed`);
-    exactKeys(e, ['liveSha', 'registryTouches', 'supersededHeads', 'decision', 'approvedBy'],
-      `Allowance ${id}`);
+    exactKeys(e, ['liveSha', 'mainBase', 'notAfter', 'registryTouches', 'supersededHeads',
+      'decision', 'markerAuthor'], `Allowance ${id}`);
     assert(SHA_RE.test(e.liveSha || ''), `Allowance ${id} liveSha must be a full SHA`);
-    assert.equal(e.approvedBy, PINNED_OWNER, `Allowance ${id} must name the pinned owner`);
+    // mainBase pins the exact main tip the allowance PR merges onto, so the
+    // released range can never float to a later tip.
+    assert(SHA_RE.test(e.mainBase || ''), `Allowance ${id} mainBase must be a full SHA`);
+    // notAfter bounds re-use (e.g. re-dispatch after a production rollback).
+    assert(typeof e.notAfter === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(e.notAfter)
+      && Number.isFinite(Date.parse(e.notAfter)), `Allowance ${id} notAfter must be an ISO-8601 UTC timestamp`);
+    // markerAuthor names who must post the activation marker. It is NOT an
+    // approval record: only the marker review itself activates anything.
+    assert.equal(e.markerAuthor, PINNED_OWNER, `Allowance ${id} markerAuthor must be the pinned owner`);
     assert(typeof e.decision === 'string' && e.decision.trim().length >= 20,
       `Allowance ${id} needs a written decision`);
     assert(Array.isArray(e.registryTouches), `Allowance ${id} registryTouches must be a list`);
@@ -94,7 +102,7 @@ export function parseAllowancesFile(json) {
 // null with a recorded reason. Never throws for "not active": callers keep
 // their original fail-closed refusal and add the reason to it.
 export function activeAllowance({allowances, allowanceDigest, mode, dispatchActor,
-  liveSha, targetSha, git, allowanceTouchers, permissions}) {
+  liveSha, targetSha, git, allowanceTouchers, permissions, now}) {
   const why = (reason) => { activeAllowance.lastReason = reason; return null; };
   const entries = Object.entries(allowances || {}).filter(([, e]) => e.liveSha === liveSha);
   if (entries.length === 0) return why('no allowance pinned to this live SHA');
@@ -107,24 +115,43 @@ export function activeAllowance({allowances, allowanceDigest, mode, dispatchActo
     return why(`exactly one PR in range must introduce ${ALLOWANCE_PATH} (found ${allowanceTouchers.length})`);
   }
   const [t] = allowanceTouchers;
+  if (!(Number.isFinite(now) && now <= Date.parse(entry.notAfter))) {
+    return why(`allowance ${id} expired at ${entry.notAfter} (or clock unavailable)`);
+  }
+  // Exact target binding: the release target must be the merge commit of
+  // the single introducing PR, onto the pinned main tip, integrating that
+  // PR's head. A later tip, another base, or any other commit never
+  // activates the allowance.
+  if (targetSha !== t.merge) {
+    return why(`target ${targetSha} is not PR ${t.number} merge ${t.merge}`);
+  }
+  if (git.firstParent(targetSha) !== entry.mainBase) {
+    return why(`target first parent is not the pinned mainBase ${entry.mainBase}`);
+  }
+  if (git.secondParent(targetSha) !== t.head) {
+    return why(`target second parent is not PR ${t.number} head ${t.head}`);
+  }
   const headBlob = git.blobAt(t.head, ALLOWANCE_PATH);
   const targetBlob = git.blobAt(targetSha, ALLOWANCE_PATH);
   if (!headBlob || headBlob !== targetBlob) {
     return why(`PR ${t.number} head blob of ${ALLOWANCE_PATH} differs from the target`);
   }
   const marker = `${ALLOWANCE_MARKER} ${id} ${allowanceDigest}`;
+  // Only the named marker author (the pinned owner) can activate; another
+  // maintainer's marker never counts.
   const ok = (t.reviews || []).some((r) => (r.state === 'APPROVED' || r.state === 'COMMENTED')
     && r.commitId === t.head && typeof r.body === 'string' && r.body.includes(marker)
+    && r.user === entry.markerAuthor
     && resolveMaintainer({login: r.user, association: r.association,
       permission: permissions?.[r.user]}).maintainer);
-  if (!ok) return why(`PR ${t.number} lacks a maintainer review at ${t.head} naming "${marker}"`);
+  if (!ok) return why(`PR ${t.number} lacks a maintainer review by ${entry.markerAuthor} at ${t.head} naming "${marker}"`);
   return {id, entry};
 }
 
 export async function evaluateDeployGate({git, request, fetchChecks,
   fetchHeadChecks, liveSha, targetSha, mode, dispatchActor,
   dispatchActorAssociation, holds, permissions,
-  allowances = {}, allowanceDigest = null}) {
+  allowances = {}, allowanceDigest = null, now = Date.now()}) {
   assert(SHA_RE.test(liveSha || ''), 'An exact live SHA is required');
   assert(SHA_RE.test(targetSha || ''), 'An exact target SHA is required');
   assert(mode === 'auto' || mode === 'manual', 'Mode must be auto or manual');
@@ -236,7 +263,7 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       await verifyCheckProducers({request, checks: headChecks,
         specs: headSpecs});
       if (files.includes(ALLOWANCE_PATH)) {
-        allowanceTouchers.push({number: pr.number, head: pr.headSha, reviews});
+        allowanceTouchers.push({number: pr.number, head: pr.headSha, merge: sha, reviews});
       }
       evaluated.push({merge: sha, number: pr.number, head: pr.headSha,
         evidence: evidence.length, acceptedBy: acceptance.by, via: acceptance.via});
@@ -259,7 +286,7 @@ export async function evaluateDeployGate({git, request, fetchChecks,
   if (needsAllowance) {
     activeAllowance.lastReason = '';
     active = activeAllowance({allowances, allowanceDigest, mode, dispatchActor,
-      liveSha, targetSha, git, allowanceTouchers, permissions});
+      liveSha, targetSha, git, allowanceTouchers, permissions, now});
     inactiveReason = active ? '' : ` [allowance inactive: ${activeAllowance.lastReason}]`;
   }
   if (changed.includes(HOLD_REGISTRY_PATH)) {
@@ -335,6 +362,13 @@ export function realGit(cwd) {
     commitsInRange: (live, target) =>
       run(['log', '--format=%H', '--first-parent', `${live}..${target}`])
         .split('\n').map(s => s.trim()).filter(Boolean),
+    firstParent: (sha) => {
+      try {
+        return run(['rev-parse', `${sha}^1`]);
+      } catch {
+        return null;
+      }
+    },
     secondParent: (merge) => {
       try {
         return run(['rev-parse', `${merge}^2`]);
@@ -357,7 +391,7 @@ export function realGit(cwd) {
     // Every commit (all parents, not first-parent) in live..target that
     // touched `path`: the exact set an allowance must pin.
     registryTouches: (live, target, path) =>
-      run(['log', '--format=%H', `${live}..${target}`, '--', path]).split('\n')
+      run(['log', '--format=%H', '--full-history', '--no-merges', `${live}..${target}`, '--', path]).split('\n')
         .map(s => s.trim()).filter(Boolean),
     // Blob id of `path` at `sha`, or null when absent.
     blobAt: (sha, path) => {

@@ -8,7 +8,6 @@ import {evaluateDeployGate, parseAllowancesFile, ALLOWANCE_PATH,
 
 const h = (c) => c.repeat(40);
 const LIVE = h('e');
-const TARGET = h('f');
 const OLD83 = h('1');
 const R97 = h('2');
 const R99 = h('3');
@@ -22,6 +21,10 @@ const M97 = h('b');
 const M99 = h('c');
 const M104 = h('d');
 const MALLOW = h('9');
+// The release target is exactly the allowance PR's merge onto BASE.
+const TARGET = MALLOW;
+const BASE = h('f');
+const NOW = Date.parse('2026-11-05T00:00:00Z');
 const MUNREL = h('8');
 const M88 = 'b8'.repeat(20);
 const M98 = 'c8'.repeat(20);
@@ -33,7 +36,8 @@ const WORKER_SUITE = 901;
 const INSTALLER_SUITE = 902;
 const REGISTRY = '.github/release-holds.json';
 
-const entry = (over = {}) => ({liveSha: LIVE, registryTouches: [...TOUCHES],
+const entry = (over = {}) => ({liveSha: LIVE, mainBase: BASE,
+  notAfter: '2026-11-11T23:59:59Z', registryTouches: [...TOUCHES],
   supersededHeads: [{pr: 83, head: OLD83, merge: M83,
     repairedBy: [{pr: 97, head: R97}, {pr: 99, head: R99}, {pr: 104, head: R104}],
     reason: 'Old head had two fail-open defects and no picker; repaired in-range.'},
@@ -41,7 +45,7 @@ const entry = (over = {}) => ({liveSha: LIVE, registryTouches: [...TOUCHES],
     repairedBy: [{pr: 98, head: R98}],
     reason: 'Old head had dark-CSS self-cycles and overflows; repaired in-range by PR 98.'}],
   decision: 'Peter: historical release of the 8bcd4c7..target range only.',
-  approvedBy: 'synchronic1', ...over});
+  markerAuthor: 'synchronic1', ...over});
 const allowances = (over) => parseAllowancesFile({version: 1, allowances: {[ID]: entry(over)}});
 
 const evidenceBody = (head) => ['RELEASE-EVIDENCE', 'reviewer: 948a', 'author: fixture-author',
@@ -80,7 +84,8 @@ function prTable(over = {}) {
 
 function harness({table = prTable(), order = [MALLOW, M104, M99, M98, M97, M88, M83],
   touches = TOUCHES, changed = ['website/public/x.html', REGISTRY], headBlob = 'blob1',
-  targetBlob = 'blob1', headChecks = null, suitesFor = null} = {}) {
+  targetBlob = 'blob1', headChecks = null, suitesFor = null,
+  firstParent = (sha) => (sha === MALLOW ? BASE : null)} = {}) {
   const byMerge = Object.fromEntries(Object.entries(table).map(([n, p]) => [p.merge, {n: Number(n), ...p}]));
   const byNum = Object.fromEntries(Object.entries(table).map(([n, p]) => [Number(n), p]));
   const request = async (path) => {
@@ -112,16 +117,17 @@ function harness({table = prTable(), order = [MALLOW, M104, M99, M98, M97, M88, 
   };
   const git = {
     commitsInRange: () => order,
+    firstParent,
     secondParent: (merge) => (byMerge[merge] ? byMerge[merge].head : null),
     isAncestor: () => false,
     changedFiles: () => changed,
     registryTouches: () => touches,
-    blobAt: (sha) => (sha === TARGET ? targetBlob : sha === ALLOW ? headBlob : null),
+    blobAt: (sha) => (sha === ALLOW ? headBlob : targetBlob),
   };
   return {git, request, fetchChecks: async () => [site(TARGET)],
     fetchHeadChecks: async (sha) => (headChecks ? headChecks(sha) : [site(sha)]),
     liveSha: LIVE, targetSha: TARGET, mode: 'manual', dispatchActor: 'synchronic1',
-    dispatchActorAssociation: null, holds: {}, permissions: {}};
+    dispatchActorAssociation: null, holds: {}, permissions: {}, now: NOW};
 }
 
 const run = (input, over = {}) => evaluateDeployGate({...input, ...over});
@@ -280,6 +286,8 @@ test('realGit registryTouches lists every touching commit on any parent; blobAt 
     assert.deepEqual(rg.registryTouches(live, target, REGISTRY).sort(), [sideTouch, mainTouch].sort());
     assert.equal(rg.blobAt(target, REGISTRY), g('rev-parse', `${target}:${REGISTRY}`));
     assert.equal(rg.blobAt(live, REGISTRY), null);
+    assert.equal(rg.firstParent(mainTouch), g('rev-parse', `${mainTouch}^1`));
+    assert.equal(rg.firstParent(live), null);
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
@@ -290,7 +298,11 @@ test('parser rejects wildcards, short SHAs, unknown keys and empty entries', () 
     {version: 1, allowances: {[ID]: entry({liveSha: '*'})}},
     {version: 1, allowances: {[ID]: entry({registryTouches: ['00c7d84']})}},
     {version: 1, allowances: {[ID]: {...entry(), extra: true}}},
-    {version: 1, allowances: {[ID]: entry({approvedBy: 'someone'})}},
+    {version: 1, allowances: {[ID]: entry({markerAuthor: 'someone'})}},
+    {version: 1, allowances: {[ID]: entry({mainBase: '0e6b608'})}},
+    {version: 1, allowances: {[ID]: entry({notAfter: 'next week'})}},
+    {version: 1, allowances: {[ID]: (() => { const e = entry(); delete e.mainBase; return e; })()}},
+    {version: 1, allowances: {[ID]: (() => { const e = {...entry(), approvedBy: 'synchronic1'}; delete e.markerAuthor; return e; })()}},
     {version: 1, allowances: {[ID]: entry({registryTouches: [], supersededHeads: []})}},
     {version: 1, allowances: {[ID]: entry({supersededHeads: [{...entry().supersededHeads[0], repairedBy: []}]})}},
     {version: 2, allowances: {}},
@@ -298,4 +310,69 @@ test('parser rejects wildcards, short SHAs, unknown keys and empty entries', () 
   for (const b of bad) assert.throws(() => parseAllowancesFile(b));
   assert.deepEqual(parseAllowancesFile(null), {});
   assert.deepEqual(parseAllowancesFile({version: 1, allowances: {}}), {});
+});
+
+// ---- Final-head regressions for review 5776791336 (exact target binding,
+// rollback re-arm bound, owner-only marker, activation edge cases).
+const A = () => ({allowances: allowances(), allowanceDigest: DIGEST});
+
+test('F1: a later tip with its own evidence never activates the allowance', async () => {
+  const t = prTable({160: {head: UNREL, merge: MUNREL, reviews: [review(UNREL, evidenceBody(UNREL))],
+    files: ['website/public/z.js']}});
+  await assert.rejects(run(harness({table: t, order: [MUNREL, MALLOW, M104, M99, M98, M97, M88, M83]}),
+    {...A(), targetSha: MUNREL}), /allowance inactive: target .* is not PR 150 merge/);
+});
+
+test('F1: the target must sit on the pinned mainBase and integrate the PR head', async () => {
+  await assert.rejects(run(harness({firstParent: () => h('3')}), A()),
+    /allowance inactive: target first parent is not the pinned mainBase/);
+  await assert.rejects(run(harness({firstParent: () => null}), A()),
+    /target first parent is not the pinned mainBase/);
+  // mainBase pinned to another tip (main moved before merge): refuses.
+  await assert.rejects(run(harness(), {allowances: allowances({mainBase: h('2')}), allowanceDigest: DIGEST}),
+    /not the pinned mainBase/);
+});
+
+test('rollback re-arm: after notAfter the allowance is inert even for the exact target', async () => {
+  await assert.rejects(run(harness(), {...A(), now: Date.parse('2026-11-12T00:00:00Z')}),
+    /allowance inactive: allowance .* expired/);
+  await assert.rejects(run(harness(), {...A(), now: NaN}), /expired .*clock unavailable/);
+  // Exactly at notAfter is still inside the window.
+  const edge = await run(harness(), {...A(), now: Date.parse('2026-11-11T23:59:59Z')});
+  assert.equal(edge.ok, true);
+});
+
+test('marker: a different maintainer (even admin) never activates; owner only', async () => {
+  const t = prTable({150: {...prTable()[150], reviews: [review(ALLOW, evidenceBody(ALLOW)),
+    markerReview(ALLOW, ID, DIGEST, {user: {login: 'helper'}, author_association: 'MEMBER'})]}});
+  await assert.rejects(run(harness({table: t}), {...A(), permissions: {helper: 'admin'}}),
+    /allowance inactive: PR 150 lacks a maintainer review by synchronic1/);
+});
+
+test('marker: a DISMISSED owner marker never activates', async () => {
+  const t = prTable({150: {...prTable()[150], reviews: [review(ALLOW, evidenceBody(ALLOW)),
+    markerReview(ALLOW, ID, DIGEST, {state: 'DISMISSED'})]}});
+  await assert.rejects(run(harness({table: t}), A()), /allowance inactive: PR 150 lacks a maintainer review/);
+});
+
+test('two PRs touching the allowance file refuse', async () => {
+  const t = prTable({160: {head: UNREL, merge: MUNREL, reviews: [review(UNREL, evidenceBody(UNREL))],
+    files: [ALLOWANCE_PATH]}});
+  await assert.rejects(run(harness({table: t, order: [MALLOW, MUNREL, M104, M99, M98, M97, M88, M83]}), A()),
+    /exactly one PR in range must introduce .*found 2/);
+});
+
+test('two allowance entries on one live SHA fail closed', async () => {
+  const two = parseAllowancesFile({version: 1, allowances: {[ID]: entry(), 'OTHER-1': entry()}});
+  await assert.rejects(run(harness(), {allowances: two, allowanceDigest: DIGEST}),
+    /More than one allowance pinned to this live SHA/);
+});
+
+test('superseded entry with a different head or merge does not cover the real head', async () => {
+  for (const over of [{head: h('2').replace(/2$/, '4')}, {merge: h('b').replace(/b$/, 'c')}]) {
+    const a = allowances({supersededHeads: [{...entry().supersededHeads[0], ...over},
+      entry().supersededHeads[1]]});
+    await assert.rejects(run(harness(), {allowances: a, allowanceDigest: DIGEST}),
+      /PR 83 head .*No independent review evidence/);
+  }
 });
