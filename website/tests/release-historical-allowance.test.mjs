@@ -124,7 +124,7 @@ function harness({table = prTable(), order = [MALLOW, M104, M99, M98, M97, M88, 
     registryTouches: () => touches,
     blobAt: (sha) => (sha === ALLOW ? headBlob : targetBlob),
   };
-  return {git, request, fetchChecks: async () => [site(TARGET)],
+  return {git, request, fetchChecks: async (sha) => [site(sha)],
     fetchHeadChecks: async (sha) => (headChecks ? headChecks(sha) : [site(sha)]),
     liveSha: LIVE, targetSha: TARGET, mode: 'manual', dispatchActor: 'synchronic1',
     dispatchActorAssociation: null, holds: {}, permissions: {}, now: NOW};
