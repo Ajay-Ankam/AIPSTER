@@ -162,6 +162,27 @@ test('a tab deep link opens that tab after sign-in; unknown fragments fall back 
   assert.deepEqual(skip.selected(), ['overview']);
 });
 
+test('a non-tab fragment (#main skip link) never switches tabs or clears tab state', async () => {
+  const ui = await makeUi({ session: () => json({ user: USER }) });
+  await ui.flush();
+  await ui.clickTab('compute');
+  assert.deepEqual(ui.selected(), ['compute']);
+  const loadsBefore = ui.calls.length;
+  // Skip to content: the browser navigates to #main and fires hashchange
+  // (and popstate) without any tab click.
+  ui.entries.push({ hash: '#main' });
+  await ui.go(+1);
+  assert.equal(ui.loc.hash, '#main');
+  assert.deepEqual(ui.selected(), ['compute'], 'Compute stays selected');
+  assert.deepEqual(ui.visiblePanels(), ['compute']);
+  assert.equal(ui.calls.length, loadsBefore, 'no tab reload, so in-progress tab state is kept');
+  // Back from #main to #compute is still a no-op; back again reaches Overview.
+  await ui.go(-1);
+  assert.deepEqual(ui.selected(), ['compute']);
+  await ui.go(-1);
+  assert.deepEqual(ui.selected(), ['overview']);
+});
+
 test('signed-out documents ignore history navigation; logout leaves no stale UI or loop', async () => {
   const ui = await makeUi({ session: () => json(null), hash: '#compute' });
   await ui.flush();

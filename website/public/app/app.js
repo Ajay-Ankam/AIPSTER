@@ -1960,9 +1960,13 @@ function resetState() {
 // walk the tabs. Only known tab names are honoured: other fragments (e.g. the
 // #main skip link) never switch tabs, and the query string is kept as is.
 const tabButton = (name) => Array.from(document.querySelectorAll('[data-tab]')).find((b) => b.dataset.tab === name) || null;
+// The tab a URL names: 'overview' for no fragment, the tab for a known tab
+// fragment, and null for any other fragment (e.g. the #main skip link), which
+// must never switch tabs or clear in-progress tab state.
 function tabFromUrl() {
   const name = String((location.hash || '').replace(/^#/, ''));
-  return name && Object.prototype.hasOwnProperty.call(loaders, name) && tabButton(name) ? name : 'overview';
+  if (!name) return 'overview';
+  return Object.prototype.hasOwnProperty.call(loaders, name) && tabButton(name) ? name : null;
 }
 const tabUrl = (name) => (location.pathname || '/app/') + (location.search || '') + (name === 'overview' ? '' : '#' + name);
 let activeTab = 'overview';
@@ -1989,7 +1993,7 @@ function onHistoryNav() {
   // Signed-out (or still-checking) documents never render protected panels.
   if (!me) return;
   const name = tabFromUrl();
-  if (name !== activeTab) activateTab(name);
+  if (name !== null && name !== activeTab) activateTab(name);
 }
 if (typeof addEventListener === 'function') {
   addEventListener('popstate', onHistoryNav);
@@ -2220,7 +2224,7 @@ function showApp() {
   $('demo-fab-note').hidden = !demo;
   // resetState() selected Overview; honour a tab deep link (/app/#models).
   const tab = tabFromUrl();
-  if (tab === 'overview') loadOverview(); else activateTab(tab);
+  if (tab === null || tab === 'overview') loadOverview(); else activateTab(tab);
 }
 
 function showLogin() {
