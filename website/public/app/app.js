@@ -479,17 +479,19 @@ async function loadOverview() {
 // pairing / reachable); it never claims an unverified state.
 // Immutable pins for setup. Worker source is the current main merge
 // (reviewed via PR process, hosted CI green): it supersedes the mock-era
-// 3fa309c pin (no real-runner contract) and the 6af33d4 pin (presence-only
-// usable, attach never eligible) because it contains the real-runner
-// contract plus merged authenticated /v1/node readiness for managed and
-// attach models (PR107). Docs is the staged docs commit on top of it whose
-// README/CHANGELOG describe this same real-first flow; worker and docs pins
-// are compatible but not required to be equal. Both pins are immutable;
-// advertised links are verified after publication before merge/release.
-// Native execution remains unqualified on every OS; run verify_vendor.py
-// after checkout and move either pin only with a re-verified re-pin.
-const WORKER_COMMIT = '6483c2f379795beec188d3cda2641b3c891e2098';
-const DOCS_COMMIT = '1a2d12f93bf6c39c8249e9daf45c52a2df9985f1';
+// 3fa309c pin (no real-runner contract), the 6af33d4 pin (presence-only
+// usable), and the 6483c2f pin (readiness without the fabric proxy) because
+// it contains the real-runner contract, merged /v1/node readiness (PR107),
+// and the reviewed fabric proxy (PR104) — none of the PR104 local-worker
+// changes alter the pinned install, readiness, or consumer contracts. Docs
+// is the staged docs commit on top of it whose README/CHANGELOG describe
+// this same real-first flow; worker and docs pins are compatible but not
+// required to be equal. Both pins are immutable; advertised links are
+// verified after publication before merge/release. Native execution remains
+// unqualified on every OS; run verify_vendor.py after checkout and move
+// either pin only with a re-verified re-pin.
+const WORKER_COMMIT = '0e6b60890c736207664d122c62e39d8c4affd2fa';
+const DOCS_COMMIT = '326217a2c654fa6d4f7ba4f93efa9143807d1b63';
 const DOCS_TREE = 'https://github.com/synchronic1/AIPSTER/blob/' + DOCS_COMMIT + '/local-worker/';
 const WORKER_LINKS = {
   quickstart: DOCS_TREE + 'README.md',
@@ -673,8 +675,9 @@ function agentSetupPacket(os, setup) {
     '  --config the running sender uses (its own terminal command line).',
     '- A sender started on configs/mock.toml stays on the mock config (usable=false',
     '  forever): with your approval, stop that one sender in its own terminal',
-    '  with Ctrl+C (never kill it, never run a duplicate) and restart it with',
-    '  --config config.toml from Step 5.',
+    '  with Ctrl+C (never kill it, never run a duplicate); restart it with --config config.toml from Step 5 in a terminal',
+    '  holding the same DENDRITE_API_TOKEN as the running daemon (session only;',
+    '  never write it to a file, URL, or log, and never start a second sender).',
     '- If the checkout predates the pinned revision above, or its .venv predates',
     '  the vendor change, use a fresh clone or remove local-worker/.venv and',
     '  rerun install.py (install.py refuses an existing .venv; the installed',
@@ -786,6 +789,13 @@ function agentSetupPacket(os, setup) {
     '  does not start a sender.',
     '- Then explicitly start reachability heartbeats with:',
     '  ' + pairing[1],
+    '- Start the sender in a terminal that holds the SAME worker-LOCAL token as',
+    '  the running daemon: set DENDRITE_API_TOKEN in that session only before',
+    '  running the command — a different terminal does not inherit the daemon',
+    '  env, and never write the token to a file, URL, or log. The sender needs',
+    '  the matching token for the authenticated /v1/node readiness probe;',
+    '  without it the worker reports usable=false even when everything else',
+    '  is ready.',
     '- Heartbeat usability at this pin is verified readiness, not file presence:',
     '  usable is true only when the running worker proves it over its own',
     '  authenticated loopback /v1/node — managed: model file with GGUF magic on',
@@ -1008,7 +1018,7 @@ function paintConnectCard() {
 <p class="muted">The worker is published as source, pinned to the reviewed revision, which includes the <a href="${esc(L.securityFix)}">local-token and Host/Origin guards (#17)</a>. See the <a href="${esc(L.changelog)}">install changelog</a> for dated pin history.</p>
 <h3>Connect</h3>
 <p>Mint a one-time pairing code in Manual repair below (10-minute expiry, single use). In a second terminal in the same <code>local-worker</code> directory, run <code>${esc(pairingCommands[0])}</code> and type the code locally. Pairing contacts AIPSTER, registers this computer automatically and stores a private heartbeat key. Do not paste the code or key into an agent chat.</p>
-<p>Pairing does not start the sender. In that terminal, run <code>${esc(pairingCommands[1])}</code> to post reachability heartbeats. The heartbeat <code>usable</code> bit at this pin is verified readiness from the running worker (see Step 7); the mock stays <code>usable=false</code>. No inference is enabled. Keep this sender terminal open. See the <a href="${esc(L.pairing)}">pairing and sender details</a>.</p>
+<p>Pairing does not start the sender. In a terminal holding the same <code>DENDRITE_API_TOKEN</code> as the running daemon (set it in that session only; a different terminal does not inherit it, and never write it to a file, URL, or log), run <code>${esc(pairingCommands[1])}</code> to post reachability heartbeats. The heartbeat <code>usable</code> bit at this pin is verified readiness from the running worker (see Step 7); the mock stays <code>usable=false</code>. No inference is enabled. Keep this sender terminal open. See the <a href="${esc(L.pairing)}">pairing and sender details</a>.</p>
 <p>Status: <strong>not linked until paired</strong>. Choose Done or reopen My Compute after pairing to load the resource below. Heartbeats prove reachability only, never readiness. Manual entry stays under <strong>Advanced: manual resource registration</strong>. See the <a href="${esc(L.heartbeat)}">heartbeat intake</a> and the <a href="${esc(L.gaps)}">execution gaps</a>.</p>
     ${packagedPairPara}
 <p class="muted">If the key is revoked or expires, the sender exits asking for a re-pair with a fresh code.</p>

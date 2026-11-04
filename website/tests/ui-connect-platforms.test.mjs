@@ -143,7 +143,7 @@ test('packet carries the synthetic code in a delimited field with the selected s
     assert.match(packet, new RegExp(`PAIRING CODE: ${FAKE_CODE}`), `${os}: delimited code field`);
     assert.ok(!new RegExp(`--code\\s+${FAKE_CODE}`).test(packet), `${os}: code never interpolated into a command`);
     assert.match(packet, new RegExp(FAKE_EXPIRY), `${os}: expiry in packet`);
-    assert.match(packet, /6483c2f379795beec188d3cda2641b3c891e2098/, `${os}: worker pin`);
+    assert.match(packet, /0e6b60890c736207664d122c62e39d8c4affd2fa/, `${os}: worker pin`);
     assert.match(packet, new RegExp(shell.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${os}: shell label`);
     if (posix) {
       assert.match(packet, /\.venv\/bin\/python/, `${os}: posix interpreter`);
@@ -164,6 +164,8 @@ test('packet carries the synthetic code in a delimited field with the selected s
     assert.match(packet, /POST \/v1\/models\/load/, `${os}: explicit user-approved load only`);
     assert.match(packet, /Step 0/, `${os}: existing-install migration path present`);
     assert.match(packet, /restart it with/, `${os}: mock-sender restart on the real config named`);
+    assert.match(packet, /SAME worker-LOCAL token as/, `${os}: sender needs the daemon token (Step 7)`);
+    assert.match(packet, /holding the same DENDRITE_API_TOKEN as the running daemon/, `${os}: restarted sender needs the daemon token (Step 0)`);
     assert.match(packet, /verified readiness, not file presence/, `${os}: merged usable semantics`);
     assert.match(packet, /attach: the worker reports/, `${os}: attach can become eligible`);
     assert.doesNotMatch(packet, /reflects your configured runtime and model/, `${os}: no false usable claim`);

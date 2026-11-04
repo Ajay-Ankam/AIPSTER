@@ -134,7 +134,7 @@ test('UI repair: pairing checkout uses the published reviewed source pin and qua
   const t = await ui();
   const commands = t.context.workerCommands('windows').join('\n');
   const pin = /git checkout --detach ([a-f0-9]{40})/.exec(commands)[1];
-  assert.equal(pin,'6483c2f379795beec188d3cda2641b3c891e2098');
+  assert.equal(pin,'0e6b60890c736207664d122c62e39d8c4affd2fa');
   assert.match(commands,/sparse-checkout set --no-cone \/local-worker\/ \/LICENSE/);
   assert.ok(!commands.includes('git clone https://'), 'no full checkout replaces the qualified sparse flow');
   assert.match(t.context.agentSetupPacket('windows', { id: 'p_direct01', code: 'SYNTHETIC-DIRECT-CODE', expiresAt: '2100-01-01T00:00:00Z', account: 'Direct Owner' }), /Use the pinned commands below for pairing/);
@@ -153,13 +153,14 @@ test('UI repair: Linux packet states real path, deliberate pins, and opt-in-only
     'GET /v1/node', 'pairing.py serve-jobs --once', 'command -v llama-server',
     'Step 0 - already installed', 'restart it with',
     'verified readiness, not file presence', 'attach: the worker reports',
+    'SAME worker-LOCAL token as', 'holding the same DENDRITE_API_TOKEN as the running daemon',
     'consumer (Step 8, dark unless',
     '.venv/bin/python', '.venv/bin/dendrite', 'preflight (Step 1)']) {
     assert.ok(flat.includes(phrase), 'Linux packet states: ' + phrase);
   }
   assert.ok(!flat.includes('reflects your configured runtime and model'), 'Linux packet makes no false usable claim');
   assert.ok(!packet.includes('.exe') && !packet.includes('%LOCALAPPDATA%') && !packet.includes('$env:'), 'Linux packet carries no Windows paths');
-  assert.ok(packet.includes('6483c2f379795beec188d3cda2641b3c891e2098'), 'Linux packet keeps the pinned worker');
+  assert.ok(packet.includes('0e6b60890c736207664d122c62e39d8c4affd2fa'), 'Linux packet keeps the pinned worker');
 });
 
 test('UI repair: dismiss and navigation erase shown codes and invalidate pending mint work', async () => {

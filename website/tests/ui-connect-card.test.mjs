@@ -19,10 +19,10 @@ import { checkPublic } from '../scripts/check.mjs';
 
 const PUBLIC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 // Reviewed pairing client retaining the #17 local-token and Host/Origin guards.
-const WORKER_COMMIT = '6483c2f379795beec188d3cda2641b3c891e2098';
+const WORKER_COMMIT = '0e6b60890c736207664d122c62e39d8c4affd2fa';
 // Staged docs commit (local, unpublished): README/CHANGELOG describe the same
 // real-first flow and install WORKER_COMMIT (see pin-consistency.test.mjs).
-const DOCS_COMMIT = '1a2d12f93bf6c39c8249e9daf45c52a2df9985f1';
+const DOCS_COMMIT = '326217a2c654fa6d4f7ba4f93efa9143807d1b63';
 const TREE = `https://github.com/synchronic1/AIPSTER/blob/${DOCS_COMMIT}/local-worker/`;
 const EXPECTED_LINKS = [
   `${TREE}README.md`,
@@ -618,7 +618,7 @@ test('Advanced keeps the pinned manual commands, warnings and platform labels', 
     'untested', 'separate prerequisites', 'Manual repair', 'mint a code to type yourself',
     'Mint a one-time pairing code in Manual repair below',
     'not linked until paired', 'Advanced: manual resource registration',
-    'pairing.py heartbeat-loop',
+    'pairing.py heartbeat-loop', 'same DENDRITE_API_TOKEN as the running daemon',
     'Disconnect and uninstall', 'Troubleshooting', 'worker and its root LICENSE only']) {
     assert.ok(text.includes(phrase), `missing: ${phrase}`);
   }
