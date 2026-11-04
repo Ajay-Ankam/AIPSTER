@@ -110,7 +110,9 @@ export async function listSharedSnapshots({ db, store, principalId, nowMs } = {}
     if (sh.exporter_id === principalId) continue; // own resources use the owner path only
     const entry = byResource.get(sh.resource_id) || { exporterId: sh.exporter_id, grants: [] };
     if (entry.exporterId !== sh.exporter_id) continue; // one exporter per live resource row
-    entry.grants.push({ grantId: sh.grant_id, models: sh.models, maxTokens: sh.maxTokens });
+    entry.grants.push({ grantId: sh.grant_id, models: sh.models, maxTokens: sh.maxTokens,
+      ...(Number.isSafeInteger(sh.remainingTokens) ? { remainingTokens: sh.remainingTokens } : {}),
+      ...(Number.isSafeInteger(sh.remainingJobs) ? { remainingJobs: sh.remainingJobs } : {}) });
     byResource.set(sh.resource_id, entry);
   }
   const out = [];
@@ -134,12 +136,40 @@ export async function listSharedSnapshots({ db, store, principalId, nowMs } = {}
   return out;
 }
 
-// The first (by grant id) live share on the selected resource that consents
-// to the selected model at this request size.
+// Whether ONE grant, on its own, could admit this model at this request size
+// (F2/F3). Mirrors the issuance-time terms the store can pre-compute: the
+// per-request ceiling, remaining cumulative tokens and remaining jobs.
+// Grants are never combined. Absent headroom fields (an older store shape)
+// are not treated as capacity proof either way: issuance and the atomic hold
+// stay authoritative and re-check every term.
+function grantCanAdmit(g, modelId, maxTokens) {
+  if (!isObj(g) || !Array.isArray(g.models) || !g.models.includes(modelId)) return false;
+  const need = Number.isSafeInteger(maxTokens) && maxTokens > 0 ? maxTokens : 1;
+  if (!(Number(g.maxTokens) >= need)) return false;
+  if (g.remainingTokens !== undefined && !(g.remainingTokens >= need)) return false;
+  if (g.remainingJobs !== undefined && !(g.remainingJobs >= 1)) return false;
+  return true;
+}
+
+// Shared snapshots restricted to tuples that at least one single grant on
+// that resource could admit at this request size. Bounded by the input
+// (itself bounded by SHARE_SCAN_LIMIT); order and tie-breaks are unchanged.
+export function admissibleShares(snapshots, maxTokens) {
+  const out = [];
+  for (const q of Array.isArray(snapshots) ? snapshots : []) {
+    if (!isObj(q) || q.shared !== true || !Array.isArray(q.grants) || !Array.isArray(q.tuples)) continue;
+    const tuples = q.tuples.filter((tp) => q.grants.some((g) => grantCanAdmit(g, tp.model_id, maxTokens)));
+    if (tuples.length > 0) out.push({ ...q, tuples });
+  }
+  return out;
+}
+
+// The first (by grant id) live share on the selected resource that could
+// admit the selected model at this request size on its own.
 function shareGrantFor(snapshots, resourceId, modelId, maxTokens) {
   const row = (snapshots || []).find((q) => q && q.resourceId === resourceId && q.shared === true);
   if (!row) return null;
-  const fit = row.grants.filter((g) => g.models.includes(modelId) && Number(g.maxTokens) >= maxTokens)
+  const fit = row.grants.filter((g) => grantCanAdmit(g, modelId, maxTokens))
     .sort((a, b) => (a.grantId < b.grantId ? -1 : a.grantId > b.grantId ? 1 : 0));
   return fit.length ? fit[0].grantId : null;
 }
@@ -333,8 +363,13 @@ export function createFabricOpenAIRoute({
       let store = null;
       try { store = await getStore(env, db); } catch { store = null; }
       // Shared models are listed by id only: no exporter, resource or grant
-      // identity reaches the response.
-      if (store) snapshots = [...snapshots, ...await sharedProvider({ db, store, principalId: auth.principal.principal_id, nowMs })];
+      // identity reaches the response. A shared model is listed only while
+      // some single grant still has headroom for a minimal request (F3);
+      // this promises no capacity — issuance and the hold decide.
+      if (store) {
+        const shared = await sharedProvider({ db, store, principalId: auth.principal.principal_id, nowMs });
+        snapshots = [...snapshots, ...admissibleShares(shared, 1)];
+      }
     } catch {
       return unavailable();
     }
@@ -477,18 +512,30 @@ export function createFabricOpenAIRoute({
         return unavailable();
       }
       if (shared.length > 0) {
-        let picked = null;
-        try {
-          picked = selectModelCandidate(shared, request);
-        } catch {
-          picked = null;
+        const pick = (rows) => {
+          try {
+            const p = selectModelCandidate(rows, request);
+            return p && p.selected ? p : null;
+          } catch {
+            return null;
+          }
+        };
+        // F2: select only among tuples a single grant could admit, so a
+        // fresher share that is too small or spent cannot hide another
+        // complete eligible share. Same model rule, same tie-breaks.
+        const fitting = admissibleShares(shared, checked.value.max_tokens);
+        const picked = pick(fitting);
+        if (picked) {
+          shareGrant = shareGrantFor(fitting, picked.selected.resourceId, picked.selected.modelId, checked.value.max_tokens);
         }
-        if (picked && picked.selected) {
-          shareGrant = shareGrantFor(shared, picked.selected.resourceId, picked.selected.modelId, checked.value.max_tokens);
-          if (!shareGrant) {
+        if (!picked || !shareGrant) {
+          // A consented share exists for this request but no single grant
+          // can admit it: keep the existing closed answer.
+          if (pick(shared)) {
             return { http: 429, body: openAIError(429, 'grant_quota_exhausted',
               'Grant capacity is exhausted for this request.', 'server_error').body };
           }
+        } else {
           selection = picked;
         }
       }

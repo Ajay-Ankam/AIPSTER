@@ -638,15 +638,35 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       ORDER BY g.id, resource_id LIMIT ${SHARE_SCAN_LIMIT}`, principal_id);
     const t = clock();
     const out = [];
+    // Demo parity is an issuance term (exporter and consumer must match);
+    // a mismatched share can never admit, so it is not discovered (F3).
+    const demoCache = new Map();
+    const demoOf = async (id) => {
+      if (!demoCache.has(id)) {
+        const u = await first(db, 'SELECT demo FROM "user" WHERE id = ?', id);
+        demoCache.set(id, u ? Number(u.demo || 0) : null);
+      }
+      return demoCache.get(id);
+    };
     for (const row of rows) {
       if (!isStr(row.grant_id) || !isStr(row.resource_id)) continue;
       const live = await fabricGrantLive({ grant_id: row.grant_id, principal_id, resource_id: row.resource_id });
       if (!live || !(Date.parse(live.grant.expiry) > t)) continue;
       const maxTokens = Number(live.ceilings.maxTokens);
+      const maxRequests = Number(live.ceilings.maxRequests);
       if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) continue;
+      if (!Number.isSafeInteger(maxRequests) || maxRequests < 1) continue;
       if (!live.actions.includes('inference')) continue;
+      const consumerDemo = await demoOf(principal_id);
+      const exporterDemo = await demoOf(live.grant.exporter_id);
+      if (consumerDemo === null || exporterDemo === null || consumerDemo !== exporterDemo) continue;
+      // Headroom is a read-time hint for discovery and selection only
+      // (F2/F3). Spend is cumulative on the stable grant id; issuance and
+      // the atomic hold re-check it and remain authoritative.
       out.push({ grant_id: live.grant.id, resource_id: live.resource.id, exporter_id: live.grant.exporter_id,
-        models: live.models.filter((m) => isStr(m)), maxTokens });
+        models: live.models.filter((m) => isStr(m)), maxTokens,
+        remainingTokens: Math.max(0, maxTokens - live.grant.used_tokens),
+        remainingJobs: Math.max(0, maxRequests - live.grant.used_jobs) });
     }
     return out;
   }

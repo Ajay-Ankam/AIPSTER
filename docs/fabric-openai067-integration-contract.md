@@ -170,10 +170,25 @@ directly affected test.
   explicit-route fix carries `route = 'fixture'` and cannot admit or
   execute. Such shares need a new grant with explicit `route: 'internal'`
   consent; there is no migration that flips old rows to live execution.
-- Tracked, not in this lane (F2/F3): per-request ceiling misses stop at the
-  first shared tuple without trying the next share, and discovery may list
-  a share that issuance then refuses on demo parity or spend headroom.
-  Both fail closed; no extra share is admitted.
+- Share selection (F2): when no owner resource serves the request, shared
+  candidates are restricted to tuples that ONE grant on that resource could
+  admit at this request size (per-request ceiling, remaining cumulative
+  tokens, remaining jobs), then the unchanged model rule and freshness
+  tie-break choose. A fresher share that is too small or spent no longer
+  hides another eligible share. Grants are never combined; an explicit
+  model is never swapped for another; owner-first is unchanged (no share
+  fallback when an owner resource exists). If a consented share exists but
+  no single grant fits, the answer stays 429 `grant_quota_exhausted` with no
+  admission. One issuance attempt only: a refusal there is final.
+- Discovery (F3): `listLiveShares` drops shares that fail demo parity and
+  reports `remainingTokens` / `remainingJobs`; `/v1/models` lists a shared
+  model only while some single grant has headroom for a minimal request.
+  These are read-time hints: issuance and the atomic hold re-check every
+  term and remain authoritative, so a concurrent spend or revoke after
+  discovery still refuses. Listing a model promises no capacity.
+- Remaining limits: `SHARE_SCAN_LIMIT` (64 grant×resource rows, ordered by
+  grant id then resource) still truncates deterministically before the
+  F2/F3 filters; owner pool exhaustion does not fall back to a share.
 - No new keys minted/rotated/stored; no key values logged/returned.
 - No new DDL: reuse migrations 0022/0024/0025/0029 (node_capabilities +
   dispatch store). The owner verifies they are applied (read-only check).
