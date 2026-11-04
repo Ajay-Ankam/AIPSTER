@@ -14,7 +14,7 @@ import { createTestEnv, readJson } from './d1-shim.mjs';
 
 const PUBLIC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
-async function makeUi({ asDemo = false } = {}) {
+async function makeUi({ asDemo = false, uploadDelayMs = 0 } = {}) {
   const source = await readFile(path.join(PUBLIC, 'app', 'app.js'), 'utf8');
   const t = await createTestEnv({ CATALOG_FIXTURES: '1' });
   const elements = new Map();
@@ -22,11 +22,27 @@ async function makeUi({ asDemo = false } = {}) {
   function el(id) {
     if (!elements.has(id)) {
       const element = {
-        id, hidden: false, textContent: '', value: '', attrs: {}, listeners: {}, dataset: {},
+        id, value: '', attrs: {}, listeners: {}, dataset: {},
         addEventListener(type, fn) { this.listeners[type] = fn; },
         setAttribute(name, value) { this.attrs[name] = value; },
         querySelectorAll() { return []; },
       };
+      // Property writes (hidden/textContent) are the client's rejection
+      // signal; the real DOM would let a MutationObserver see them, so the
+      // fixture notifies observers here too. innerHTML keeps its notifier
+      // below. Spurious wakeups are harmless: waiters re-check their read().
+      const notifyAll = () => { for (const notify of [...domObservers]) notify(); };
+      let hidden = false, text = '';
+      Object.defineProperty(element, 'hidden', {
+        configurable: true, enumerable: true,
+        get() { return hidden; },
+        set(v) { hidden = v; notifyAll(); },
+      });
+      Object.defineProperty(element, 'textContent', {
+        configurable: true, enumerable: true,
+        get() { return text; },
+        set(v) { text = v; notifyAll(); },
+      });
       let html = '';
       Object.defineProperty(element, 'innerHTML', {
         configurable: true, enumerable: true,
@@ -55,6 +71,11 @@ async function makeUi({ asDemo = false } = {}) {
     cookie = res.headers.getSetCookie().find((c) => c.startsWith('better-auth.session_token=')).split(';')[0];
   }
   const fetchImpl = async (fetchPath, opts = {}) => {
+    if (uploadDelayMs > 0 && String(fetchPath).startsWith('/api/catalog/uploads')) {
+      // Bounded synthetic latency on the upload leg only: proves the wait
+      // below is time-bounded, not tick-bounded. Real timers, short bound.
+      await new Promise((r) => setTimeout(r, uploadDelayMs));
+    }
     const isBytes = opts.body instanceof ArrayBuffer || ArrayBuffer.isView(opts.body);
     return t.call(fetchPath, {
       method: opts.method ?? 'GET',
@@ -75,7 +96,7 @@ async function makeUi({ asDemo = false } = {}) {
   const flush = async () => { for (let i = 0; i < 6; i++) await new Promise(setImmediate); };
   await flush();
   const clickTab = async (name) => { tabs.find((e) => e.dataset.tab === name).listeners.click(); await flush(); };
-  const waitForDOM = (read, message) => new Promise((resolve, reject) => {
+  const waitForDOM = (read, message, timeoutMs = 10000) => new Promise((resolve, reject) => {
     let timer;
     const cleanup = () => { domObservers.delete(check); cancelDeadline(timer); };
     const check = () => {
@@ -85,7 +106,7 @@ async function makeUi({ asDemo = false } = {}) {
       } catch (error) { cleanup(); reject(error); }
     };
     domObservers.add(check);
-    timer = deadline(() => { cleanup(); reject(new assert.AssertionError({ message })); }, 10000);
+    timer = deadline(() => { cleanup(); reject(new assert.AssertionError({ message })); }, timeoutMs);
     check();
   });
   // textContent/property changes emit no mutation: poll them directly.
@@ -135,9 +156,34 @@ test('rejected bytes render a safe error and list nothing', async () => {
   const elf = new Uint8Array(32);
   elf.set([0x7f, 0x45, 0x4c, 0x46], 0);
   await uploadViaUi(ui, { name: 'evil', files: [fakeFile('model.gguf', elf)] });
-  await ui.pollProp(() => ui.el('upload-error').hidden === false && ui.el('upload-error').textContent, 'rejection never surfaced');
+  // Rejection arrives via hidden/textContent property writes (no innerHTML
+  // mutation), which the fixture now surfaces to waitForDOM: a real
+  // elapsed-time bound, not a setImmediate tick count that drains in
+  // milliseconds on a loaded runner before the multi-hop upload chain
+  // completes. Same assertions, genuine completion wait.
+  await ui.waitForDOM(() => ui.el('upload-error').hidden === false && ui.el('upload-error').textContent, 'rejection never surfaced');
   assert.ok(ui.el('upload-error').textContent.includes('ASSET_REJECTED'), 'safe rejection code shown');
   assert.ok(!ui.el('my-assets').innerHTML.includes('evil'), 'rejected bytes never list');
+});
+
+test('delayed rejection still surfaces within the deadline and lists nothing', async () => {
+  const ui = await makeUi({ uploadDelayMs: 300 });
+  await ui.clickTab('models');
+  await ui.waitForDOM(() => ui.el('my-assets').innerHTML.includes('No private assets yet'), 'empty state never rendered');
+  const elf = new Uint8Array(32);
+  elf.set([0x7f, 0x45, 0x4c, 0x46], 0);
+  await uploadViaUi(ui, { name: 'evil-slow', files: [fakeFile('model.gguf', elf)] });
+  await ui.waitForDOM(() => ui.el('upload-error').hidden === false && ui.el('upload-error').textContent, 'delayed rejection never surfaced');
+  assert.ok(ui.el('upload-error').textContent.includes('ASSET_REJECTED'), 'safe rejection code shown after delay');
+  assert.ok(!ui.el('my-assets').innerHTML.includes('evil-slow'), 'delayed rejected bytes never list');
+});
+
+test('a missing transition fails loudly within the bounded deadline', async () => {
+  const ui = await makeUi();
+  await assert.rejects(
+    ui.waitForDOM(() => ui.el('my-assets').innerHTML.includes('never-going-to-appear'), 'MISSING-XYZ-TRANSITION', 300),
+    /MISSING-XYZ-TRANSITION/,
+    'no-transition must reject with the loud bounded message');
 });
 
 test('private detail opens from My assets and evaluates with the asset ref', async () => {
