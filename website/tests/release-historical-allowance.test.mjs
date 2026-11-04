@@ -85,7 +85,7 @@ function prTable(over = {}) {
 function harness({table = prTable(), order = [MALLOW, M104, M99, M98, M97, M88, M83],
   touches = TOUCHES, changed = ['website/public/x.html', REGISTRY], headBlob = 'blob1',
   targetBlob = 'blob1', headChecks = null, suitesFor = null,
-  firstParent = (sha) => (sha === MALLOW ? BASE : null)} = {}) {
+  firstParent = (sha) => (sha === MALLOW ? BASE : null), registryBlobs = {}} = {}) {
   const byMerge = Object.fromEntries(Object.entries(table).map(([n, p]) => [p.merge, {n: Number(n), ...p}]));
   const byNum = Object.fromEntries(Object.entries(table).map(([n, p]) => [Number(n), p]));
   const request = async (path) => {
@@ -122,7 +122,8 @@ function harness({table = prTable(), order = [MALLOW, M104, M99, M98, M97, M88, 
     isAncestor: () => false,
     changedFiles: () => changed,
     registryTouches: () => touches,
-    blobAt: (sha) => (sha === ALLOW ? headBlob : targetBlob),
+    blobAt: (sha, path) => (path === REGISTRY ? (sha in registryBlobs ? registryBlobs[sha] : 'reg1')
+      : sha === ALLOW ? headBlob : targetBlob),
   };
   return {git, request, fetchChecks: async (sha) => [site(sha)],
     fetchHeadChecks: async (sha) => (headChecks ? headChecks(sha) : [site(sha)]),
@@ -375,4 +376,11 @@ test('superseded entry with a different head or merge does not cover the real he
     await assert.rejects(run(harness(), {allowances: a, allowanceDigest: DIGEST}),
       /PR 83 head .*No independent review evidence/);
   }
+});
+
+test('the allowance PR merge itself must not change the hold registry', async () => {
+  await assert.rejects(run(harness({registryBlobs: {[MALLOW]: 'reg2'}}), A()),
+    /allowance inactive: target .*release-holds.json differs from mainBase/);
+  await assert.rejects(run(harness({registryBlobs: {[BASE]: null}}), A()),
+    /differs from mainBase/);
 });

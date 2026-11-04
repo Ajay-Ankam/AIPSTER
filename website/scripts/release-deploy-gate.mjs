@@ -131,6 +131,13 @@ export function activeAllowance({allowances, allowanceDigest, mode, dispatchActo
   if (git.secondParent(targetSha) !== t.head) {
     return why(`target second parent is not PR ${t.number} head ${t.head}`);
   }
+  // The merge itself must not change the hold registry: registry content at
+  // the target equals the pinned mainBase (closes a change made inside the
+  // merge commit, which a --no-merges touch listing cannot see).
+  const baseRegistry = git.blobAt(entry.mainBase, HOLD_REGISTRY_PATH);
+  if (!baseRegistry || git.blobAt(targetSha, HOLD_REGISTRY_PATH) !== baseRegistry) {
+    return why(`target ${HOLD_REGISTRY_PATH} differs from mainBase (merge must not change the registry)`);
+  }
   const headBlob = git.blobAt(t.head, ALLOWANCE_PATH);
   const targetBlob = git.blobAt(targetSha, ALLOWANCE_PATH);
   if (!headBlob || headBlob !== targetBlob) {
