@@ -16,7 +16,7 @@ const $ = (id) => document.getElementById(id);
 const banner = (msg) => { const b = $('banner'); b.textContent = msg; b.hidden = false; setTimeout(() => { b.hidden = true; }, 3500); };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const state = (el, kind, msg) => { el.innerHTML = `<div class="card ${kind}">${esc(msg)}</div>`; };
-const loading = (el) => state(el, 'muted', 'Loading…');
+const loading = (el) => state(el, 'loading', 'Loading…');
 
 async function api(path, opts = {}) {
   const gen = generation;
@@ -105,7 +105,8 @@ function renderStatus(el, data) {
       : r.usable === false
         ? ' · ATTENTION: reachable but NOT usable for inference'
         : ' · heartbeat seen (reachability only — not ready to run)';
-    return `<p class="muted">${esc(r.name)} · ${esc(r.kind)} · ${esc(r.liveness)} · last seen ${esc(age)}${hb}${r.demoFixture ? ' · DEMO' : ''}</p>`;
+    const shape = FABRIC_LIVENESS.includes(r.liveness) ? r.liveness : 'unknown';
+    return `<li class="srow"><span class="st st-${shape}">${esc(r.liveness)}</span><strong class="srow-name">${esc(r.name)}</strong><span class="srow-meta"><code>${esc(r.id)}</code> · ${esc(r.kind)} · last seen ${esc(age)}${hb}${r.demoFixture ? ' · DEMO' : ''}</span></li>`;
   }).join('');
   const anySeen = list.some((r) => r.lastSeenAt !== null && r.lastSeenAt !== undefined);
   const note = data.demo
@@ -118,10 +119,10 @@ function renderStatus(el, data) {
     ? `<p class="muted">showing ${list.length} of ${s.total} — older resources omitted from the list; counts cover all resources.</p>`
     : '';
   el.innerHTML = `<h2>Resource status</h2>
-    <p class="muted">${s.total} resource(s) · ${s.online} online · ${s.stale} stale · ${s.offline} offline · ${s.unknown} unknown · ${data.sharedWithMe} shared with me</p>
+    <p class="counts"><span>${s.total} resource(s)</span><span class="st st-online">${s.online} online</span><span class="st st-stale">${s.stale} stale</span><span class="st st-offline">${s.offline} offline</span><span class="st st-unknown">${s.unknown} unknown</span><span>${data.sharedWithMe} shared with me</span></p>
     ${truncated}
-    ${items || '<p class="muted">No resources yet.</p>'}
-    <p class="muted">${esc(note)}</p>`;
+    ${items ? `<ul class="srows">${items}</ul>` : '<p class="muted empty-line">No resources yet.</p>'}
+    <p class="muted note">${esc(note)}</p>`;
 }
 
 // ---- fabric flow + throughput panels (read-only Overview slice) ----
@@ -176,7 +177,7 @@ function fabricFlowNode(r, inv) {
       ? 'ATTENTION: reachable but NOT usable for inference'
       : 'heartbeat seen (reachability only · not ready to run)';
   const ev = fabricEvidence(inv);
-  const evRow = (label, value) => `<div><dt>${esc(label)}</dt><dd>${value === null ? 'not reported' : esc(value)}</dd></div>`;
+  const evRow = (label, value) => `<div><dt>${esc(label)}</dt><dd>${value === null ? '<span class="hatch-inline">not reported</span>' : esc(value)}</dd></div>`;
   const caps = ev.caps === null
     ? '<span class="muted">none recorded</span>'
     : String(ev.caps).split(',').map((c) => c.trim()).filter(Boolean).slice(0, 8).map((c) => `<span class="topo-chip">${esc(c)}</span>`).join('');
@@ -186,9 +187,9 @@ function fabricFlowNode(r, inv) {
     + evRow('CPU', ev.cpu) + evRow('GPU', ev.gpu)
     + `<div><dt>Last seen</dt><dd>${esc(age)}</dd></div>`
     + `</dl>`
-    + `<p class="muted">${esc(hb)}</p>`
+    + `<p class="muted topo-hb">${esc(hb)}</p>`
     + `<div class="topo-caps"><span class="muted">Capabilities (declared):</span> ${caps}</div>`
-    + `<p class="muted">Memory · Runtime · Resident model: not reported. Models: not reported.</p></li>`;
+    + `<p class="muted topo-unrep">Memory · Runtime · Resident model: not reported. Models: not reported.</p></li>`;
 }
 
 // Heartbeat-lane state derives from the row liveness SET, mirroring the
@@ -287,18 +288,18 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   flowEl.innerHTML = `<div class="topo" role="group" aria-label="Fabric flow: the browser session reads the AIPSTER API, which reports worker resources from heartbeats. Request and result lanes are architectural, not live connections.">`
     + `<div class="topo-head"><div><p class="eyebrow">snapshot · read-only</p><p class="muted">${total} resource(s) · ${counts.online} online · ${counts.stale} stale · ${counts.offline} offline · ${counts.unknown} unknown · ${shared} shared with me${countsNote}</p></div><p class="topo-note">Heartbeat freshness, not inference readiness.</p></div>`
     + `<div class="topo-map">`
-    + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true">→</span><div><b>Browser session</b><small>signed-in owner · read-only view</small></div></div>`
+    + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" focusable="false"><rect x="1.5" y="2.5" width="13" height="10" rx="1.5"/><path d="M1.5 5.5h13"/></svg></span><div><b>Browser session</b><small>signed-in owner · read-only view</small></div></div>`
     + `<div class="topo-link" aria-hidden="true"><i></i><span>Request</span></div>`
-    + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true">≡</span><div><b>AIPSTER API</b><small>status · inventory · usage reads</small></div></div>`
+    + `<div class="topo-stage"><span class="topo-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M2 4h12M2 8h12M2 12h12"/></svg></span><div><b>AIPSTER API</b><small>status · inventory · usage reads</small></div></div>`
     + `<div class="topo-link" aria-hidden="true"><i></i><span>Request to node</span></div>`
-    + (nodes.length ? `<ul class="topo-nodes">${nodes.join('')}</ul>` : '<p class="muted">No resources yet — register or pair one to see it here.</p>')
+    + (nodes.length ? `<ul class="topo-nodes">${nodes.join('')}</ul>` : '<p class="muted topo-empty">No resources yet — register or pair one to see it here.</p>')
     + `</div>`
     + truncated
     + `<div class="topo-return"><span>Heartbeat returns: reachability only (${laneWord})</span><span>Result returns: usage totals only</span><span>Request lanes: architectural · dispatch availability unverified here</span></div>`
-    + `<p class="muted">Heartbeat freshness: online means a fresh heartbeat, stale an older one, unknown a flag without heartbeat, offline not flagged.</p>`
+    + `<p class="muted topo-key">Heartbeat freshness: online means a fresh heartbeat, stale an older one, unknown a flag without heartbeat, offline not flagged.</p>`
     + `<footer class="topo-legend"><span><i class="sw-request"></i>Request (architectural)</span><span><i class="sw-heartbeat"></i>Heartbeat</span><span><i class="sw-result"></i>Result (architectural: usage totals only)</span><span><i class="sw-unsupported"></i>Resident / Cached / Unprovisioned (unsupported)</span></footer>`
-    + `<p class="muted">${esc(note)}</p>`
-    + `<p class="muted">${esc(snapLine)}.</p></div>`;
+    + `<p class="muted topo-foot">${esc(note)}</p>`
+    + `<p class="muted topo-foot topo-snap">${esc(snapLine)}.</p></div>`;
   // Throughput is always unavailable: usage reports cumulative counts only.
   const rawT = usageData && usageData.totals && typeof usageData.totals === 'object' ? usageData.totals : null;
   // An all-absent totals object measures nothing: treat it as unavailable.
@@ -315,6 +316,7 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
   const lanes = [];
   for (const raw of laneRows) { const l = fabricBenchLane(raw, lookup ? lookup.get(raw.id) : null); if (l) lanes.push(l); }
   const benchRow = (label, value) => `<div><dt>${esc(label)}</dt><dd>${value}</dd></div>`;
+  const benchVal = (v) => /^unknown/.test(v) ? `<span class="hatch-inline">${esc(v)}</span>` : esc(v);
   tpEl.innerHTML = `<div class="bench" role="group" aria-label="Throughput bench: measured rates are unavailable; cumulative usage totals below.">`
     + `<p><span class="pill bad">measured rate: unavailable</span></p>`
     + `<div class="bench-plot"><div class="bench-axis" aria-hidden="true"><span>0</span><span>tok/s scale unavailable</span></div>`
@@ -322,14 +324,14 @@ function renderFabricFlow(flowEl, tpEl, statusData, usageData, invMap) {
     + (lanes.length ? `<div class="bench-lanes">${lanes.join('')}</div>` : '<p class="muted">No node lanes: no resources.</p>')
     + (t
       ? `<dl class="ev">`
-        + benchRow('Requests (cumulative)', esc(num(t.requests)))
-        + benchRow('Tokens in / out (cumulative, not a rate)', `${esc(num(t.tokensIn))} / ${esc(num(t.tokensOut))}`)
-        + benchRow('Model cost', esc(usd(t.modelCostUsd)))
-        + benchRow('Execution cost', esc(usd(t.executionCostUsd)))
+        + benchRow('Requests (cumulative)', benchVal(num(t.requests)))
+        + benchRow('Tokens in / out (cumulative, not a rate)', `${benchVal(num(t.tokensIn))} / ${benchVal(num(t.tokensOut))}`)
+        + benchRow('Model cost', benchVal(usd(t.modelCostUsd)))
+        + benchRow('Execution cost', benchVal(usd(t.executionCostUsd)))
         + (cov ? benchRow('Coverage', esc(cov)) : '')
         + `</dl>`
       : '<p class="muted">Usage totals unavailable.</p>')
-    + '<p class="muted">Throughput unavailable: no measured tokens/sec exist in this build. Unmeasured values stay unknown, never zero.</p></div>';
+    + '<p class="muted bench-foot">Throughput unavailable: no measured tokens/sec exist in this build. Unmeasured values stay unknown, never zero.</p></div>';
 }
 
 async function loadFabricFlow() {
@@ -407,8 +409,21 @@ function resourceCard(r) {
     <p class="muted">link: ${esc(link)}</p></div>`;
 }
 
+// Overview summary strip: the same reads loadOverview already makes, laid out
+// as one instrument. Absent numbers stay unknown and the measured rate is
+// always drawn as not measured, never as zero.
+const KPI_LABELS = ['Resources', 'Reachable', 'Shared with me', 'Requests', 'Tokens', 'Measured rate'];
+function kpiStrip(cells, label = 'Overview summary') {
+  return `<dl class="kpis" aria-label="${esc(label)}">${cells.map((c) => `<div class="kpi"><dt>${esc(c.label)}</dt>`
+    + (c.hatch ? `<dd class="hatch"><span>${esc(c.hatch)}</span></dd>` : `<dd>${esc(/^\d+$/.test(c.value) ? Number(c.value).toLocaleString('en-US') : c.value)}</dd>`)
+    + (c.note ? `<dd class="kpi-note">${esc(c.note)}</dd>` : '') + '</div>').join('')}</dl>`;
+}
+const kpiLoading = () => `<dl class="kpis is-loading" aria-label="Overview summary" aria-busy="true">${KPI_LABELS.map((l) => `<div class="kpi"><dt>${esc(l)}</dt><dd><span class="skel">Loading…</span></dd></div>`).join('')}</dl>`;
+
 async function loadOverview() {
   const el = $('ov-cards'); loading(el);
+  const kpis = $('ov-kpis');
+  kpis.innerHTML = kpiLoading();
   const token = ++statusPollToken;
   const gen = generation;
   $('status-strip').innerHTML = '<h2>Resource status</h2><p class="muted">Checking resource status…</p>';
@@ -420,14 +435,28 @@ async function loadOverview() {
     // round 12): a mock worker beating usable:false is online but
     // unusable, and the status strip counts it — so must this count.
     const reachable = inv.items.filter((r) => r.state.online).length;
-    el.innerHTML = `<div class="card"><h2>My resources</h2><p>${inv.total} total · ${reachable} reachable</p></div>
-      <div class="card"><h2>Shared with me</h2><p>${shared.total} active grant(s)</p></div>
-      <div class="card"><h2>Usage</h2><p>${usage.totals.requests} requests · ${usage.totals.tokensIn + usage.totals.tokensOut} tokens</p></div>
-      <div class="card"><h2>Models & adapters</h2><p>${catalog.privateAssets} private · ${catalog.activeDeployments} active deployment(s)</p><div class="actions"><button type="button" class="btn secondary" data-goto="models">Browse catalog</button></div></div>`;
+    const count = (v) => Number.isSafeInteger(v) && v >= 0 ? String(v) : null;
+    const usageRows = Array.isArray(usage.items) ? usage.items.length : 0;
+    const coverage = Number.isSafeInteger(usage.total) && usage.total > usageRows
+      ? `latest ${usageRows} of ${usage.total} usage rows` : 'all recorded usage rows';
+    const tokens = count(usage.totals.tokensIn) !== null && count(usage.totals.tokensOut) !== null ? usage.totals.tokensIn + usage.totals.tokensOut : null;
+    const cell = (label, value, note) => value === null ? { label, hatch: 'unknown', note } : { label, value, note };
+    kpis.innerHTML = kpiStrip([
+      cell('Resources', count(inv.total), 'owned, declared or paired'),
+      cell('Reachable', String(reachable), 'fresh heartbeat, not readiness'),
+      cell('Shared with me', count(shared.total), 'active grants'),
+      cell('Requests', count(usage.totals.requests), coverage),
+      cell('Tokens', tokens === null ? null : String(tokens), tokens === null ? coverage : `${usage.totals.tokensIn} in · ${usage.totals.tokensOut} out`),
+      { label: 'Measured rate', hatch: 'Not measured', note: 'no tok/s exist in this build' }
+    ]);
+    el.innerHTML = `<div class="card"><h2>My resources</h2><p class="tile-v">${inv.total} total · ${reachable} reachable</p></div>
+      <div class="card"><h2>Shared with me</h2><p class="tile-v">${shared.total} active grant(s)</p></div>
+      <div class="card"><h2>Usage</h2><p class="tile-v">${usage.totals.requests} requests · ${usage.totals.tokensIn + usage.totals.tokensOut} tokens</p></div>
+      <div class="card"><h2>Models & adapters</h2><p class="tile-v">${catalog.privateAssets} private · ${catalog.activeDeployments} active deployment(s)</p><div class="actions"><button type="button" class="btn secondary" data-goto="models">Browse catalog</button></div></div>`;
     $('ov-note').innerHTML = me && me.demo
       ? '<p class="muted">DEMO DATA: simulated fixtures for exploration. Grants and live actions are disabled. Inference dispatch needs a deployment flag this view does not verify.</p>'
       : '<p class="muted">No demo data: only resources you register or pair appear here. Inference dispatch needs a deployment flag this view does not verify.</p>';
-  } catch (e) { if (isStale(e)) return; state(el, 'error', e.message); }
+  } catch (e) { if (isStale(e)) return; kpis.innerHTML = ''; state(el, 'error', e.message); }
 }
 
 // "Connect your computer" onboarding. Installer-first and OS-aware: a primary
@@ -1213,7 +1242,7 @@ async function loadKeys() {
     // list and Revoke. A failed walk now degrades only the dropdown.
     const data = await api('/api/keys?limit=50');
     el.innerHTML = data.items.filter((k) => !k.revokedAt).map((k) =>
-      `<div class="card"><h2>${esc(k.name)}</h2><p class="muted">${esc(k.prefix)}… · scope: ${esc(k.scope)}${k.scope === 'heartbeat' && k.resourceId ? ` · resource: ${esc(k.resourceId)}` : ''}</p>
+      `<div class="card"><h2>${esc(k.name)}</h2><p class="muted"><code>${esc(k.prefix)}…</code> · scope: ${esc(k.scope)}${k.scope === 'heartbeat' && k.resourceId ? ` · resource: ${esc(k.resourceId)}` : ''}</p>
        <p class="muted">created ${esc(k.createdAt)} · expires ${esc(k.expiresAt || 'never')} · last used ${esc(k.lastUsedAt || 'never')}</p>
        <button type="button" class="danger" data-revkey="${esc(k.id)}">Revoke</button></div>`).join('');
     if (!data.items.some((k) => !k.revokedAt)) state(el, '', 'No API keys yet.');
@@ -1236,11 +1265,18 @@ async function loadUsage() {
   try {
     const data = await api('/api/usage?limit=50');
     const fmt = (v) => (v === null || v === undefined ? 'unknown' : '$' + Number(v).toFixed(4));
-    t.innerHTML = `<div class="card"><p>${data.totals.requests} requests · ${data.totals.tokensIn} in / ${data.totals.tokensOut} out tokens</p>
-      <p class="muted">model cost ${fmt(data.totals.modelCostUsd)} · execution cost ${fmt(data.totals.executionCostUsd)} (tracked separately; unmeasured stays unknown)</p></div>`;
-    el.innerHTML = data.items.map((u) =>
-      `<div class="card"><p>${esc(u.kind)} · ${u.requests} req · ${u.tokensIn}/${u.tokensOut} tok</p>
-       <p class="muted">${esc(u.at)} · source: ${esc(u.costSource)}</p></div>`).join('');
+    const cost = (label, v) => fmt(v) === 'unknown' ? { label, hatch: 'unknown', note: 'unmeasured' } : { label, value: fmt(v), note: 'tracked separately' };
+    t.innerHTML = kpiStrip([
+      { label: 'Requests', value: String(data.totals.requests) },
+      { label: 'Tokens in', value: String(data.totals.tokensIn) },
+      { label: 'Tokens out', value: String(data.totals.tokensOut) },
+      cost('Model cost', data.totals.modelCostUsd),
+      cost('Execution cost', data.totals.executionCostUsd)
+    ], 'Usage totals') + '<p class="muted note">Model cost and execution cost are tracked separately; unmeasured stays unknown, never zero.</p>';
+    el.innerHTML = data.items.length ? `<div class="table-wrap" tabindex="0" role="region" aria-label="Usage records"><table class="tbl"><thead><tr><th scope="col">Kind</th><th scope="col" class="num">Requests</th><th scope="col" class="num">Tokens in</th><th scope="col" class="num">Tokens out</th><th scope="col">Recorded</th><th scope="col">Cost source</th></tr></thead><tbody>`
+      + data.items.map((u) =>
+        `<tr><th scope="row">${esc(u.kind)}</th><td class="num">${esc(u.requests)}</td><td class="num">${esc(u.tokensIn)}</td><td class="num">${esc(u.tokensOut)}</td><td><time>${esc(u.at)}</time></td><td>${esc(u.costSource)}</td></tr>`).join('')
+      + '</tbody></table></div>' : '';
     if (!data.items.length) state(el, '', 'No usage recorded yet.');
   } catch (e) { if (isStale(e)) return; state(el, 'error', e.message); }
 }
@@ -1839,7 +1875,7 @@ function resetState() {
   // every sign-in before the new identity renders, so a same-document account
   // switch never shows the previous identity's data (incl. revealed secrets).
   statusPollToken++;
-  for (const id of ['status-strip', 'ov-cards', 'ov-note', 'fabric-flow', 'fabric-throughput', 'compute-list', 'shared-list', 'grant-list', 'key-list', 'usage-totals', 'usage-list', 'audit-list']) $(id).innerHTML = '';
+  for (const id of ['status-strip', 'ov-kpis', 'ov-cards', 'ov-note', 'fabric-flow', 'fabric-throughput', 'compute-list', 'shared-list', 'grant-list', 'key-list', 'usage-totals', 'usage-list', 'audit-list']) $(id).innerHTML = '';
   for (const id of ['fab-node-list', 'fab-inv-out', 'fab-inv-in', 'fab-conn-list', 'fab-grant-out', 'fab-grant-in', 'fab-deny-list', 'fab-authz-out']) $(id).innerHTML = '';
   for (const id of ['fab-inv-issuer', 'fab-accept-node', 'fab-authz-node', 'fab-prev-conn']) $(id).innerHTML = '';
   connect = null;

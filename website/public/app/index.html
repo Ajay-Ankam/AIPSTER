@@ -9,19 +9,21 @@
 <link rel="icon" href="/app/icon.svg" type="image/svg+xml">
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 <header class="topbar">
-  <div class="brand"><a class="wordmark" href="/" aria-label="AIPSTER home"><img class="wordmark-logo" src="/assets/aipster-wordmark-on-dark.svg" alt="" width="144" height="33"></a><span class="tag">control panel</span></div>
+  <div class="brand"><a class="wordmark" href="/" aria-label="AIPSTER home"><img class="wordmark-logo wm-light" src="/assets/aipster-wordmark.svg" alt="" width="144" height="33"><img class="wordmark-logo wm-dark" src="/assets/aipster-wordmark-on-dark.svg" alt="" width="144" height="33"></a><span class="tag">control panel</span></div>
   <div id="sessionbar" class="sessionbar" hidden>
     <span id="whoami"></span>
-    <button id="logout" type="button">Sign out</button>
+    <button id="logout" class="btn-s" type="button">Sign out</button>
   </div>
 </header>
 <main id="main">
   <section id="view-login" class="card" aria-labelledby="login-h">
     <h1 id="login-h">Sign in</h1>
-    <p class="muted">Sign in with GitHub. New here? Your account is created automatically on first sign-in — no invitation needed. A verified GitHub email is required.</p>
+    <p class="muted login-lede">Sign in with GitHub. New here? Your account is created automatically on first sign-in — no invitation needed. A verified GitHub email is required.</p>
     <p id="login-error" class="error" role="alert" hidden></p>
-    <button id="github-login" type="button">Sign in with GitHub</button>
+    <button id="github-login" type="button"><svg class="gh-mark" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>Sign in with GitHub</button>
+    <div class="login-divider" aria-hidden="true"><span>or</span></div>
     <h2>Demo sign-in</h2>
     <p class="muted">Explore the panel with the seeded demo account: isolated demo workspace, simulated data, restricted actions.</p>
     <form id="demo-form">
@@ -35,18 +37,21 @@
   <div id="view-app" hidden>
     <div id="demo-banner" class="card demo" role="status" hidden>Demo workspace: simulated data, clearly labeled. Grants, sharing, and live actions are disabled for this account.</div>
     <nav class="tabs" role="tablist" aria-label="Dashboard sections">
-      <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
-      <button role="tab" data-tab="compute" aria-selected="false">My Compute</button>
-      <button role="tab" data-tab="shared" aria-selected="false">Shared With Me</button>
-      <button role="tab" data-tab="sharing" aria-selected="false">Sharing</button>
-      <button role="tab" data-tab="models" aria-selected="false">Models</button>
-      <button role="tab" data-tab="federation" aria-selected="false">Federation</button>
-      <button role="tab" data-tab="keys" aria-selected="false">API Keys</button>
-      <button role="tab" data-tab="usage" aria-selected="false">Usage</button>
-      <button role="tab" data-tab="advice" aria-selected="false">Advice</button>
-      <button role="tab" data-tab="settings" aria-selected="false">Settings</button>
+      <span class="tabs-group" aria-hidden="true">Workspace</span>
+      <button role="tab" data-tab="overview" aria-selected="true"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>Overview</button>
+      <button role="tab" data-tab="compute" aria-selected="false"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="4" width="8" height="8" rx="1"/><path d="M6 1.5v2.5M10 1.5v2.5M6 12v2.5M10 12v2.5M1.5 6h2.5M1.5 10h2.5M12 6h2.5M12 10h2.5"/></svg>My Compute</button>
+      <button role="tab" data-tab="shared" aria-selected="false"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 9.5V13h12V9.5M8 2v7.5M5 6.5l3 3 3-3"/></svg>Shared With Me</button>
+      <button role="tab" data-tab="sharing" aria-selected="false"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="4" cy="8" r="2"/><circle cx="12" cy="3.5" r="2"/><circle cx="12" cy="12.5" r="2"/><path d="m5.8 7 4.4-2.5M5.8 9l4.4 2.5"/></svg>Sharing</button>
+      <span class="tabs-group" aria-hidden="true">Models and fabric</span>
+      <button role="tab" data-tab="models" aria-selected="false"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5zM2 5l6 3.5L14 5M8 8.5v6"/></svg>Models</button>
+      <button role="tab" data-tab="federation" aria-selected="false"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="3.5" cy="8" r="2"/><circle cx="12.5" cy="8" r="2"/><path d="M5.5 8h5" stroke-dasharray="1.5 1.5"/></svg>Federation</button>
+      <span class="tabs-group" aria-hidden="true">Access and account</span>
+      <button role="tab" data-tab="keys" aria-selected="false"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="5" cy="8" r="3"/><path d="M8 8h6.5M12 8v2.5M14 8v2"/></svg>API Keys</button>
+      <button role="tab" data-tab="usage" aria-selected="false"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 14h12M4 11V8M8 11V4M12 11V6.5"/></svg>Usage</button>
+      <button role="tab" data-tab="advice" aria-selected="false"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2.5 3h11v7.5H7L4 13v-2.5H2.5z"/></svg>Advice</button>
+      <button role="tab" data-tab="settings" aria-selected="false"><svg class="tab-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.5"/><circle cx="5.5" cy="11.5" r="1.5"/></svg>Settings</button>
     </nav>
-    <section id="tab-overview" role="tabpanel"><h1>Overview</h1><div id="status-strip" class="card" role="status"><p class="muted">Checking resource status…</p></div><section id="fabric-flow-panel" class="card" aria-labelledby="fabric-flow-h"><h2 id="fabric-flow-h">Fabric flow</h2><div id="fabric-flow" role="status"><p class="muted">Loading fabric flow…</p></div></section><section id="fabric-throughput-panel" class="card" aria-labelledby="fabric-throughput-h"><h2 id="fabric-throughput-h">Fabric throughput</h2><div id="fabric-throughput" role="status"><p class="muted">Loading throughput…</p></div></section><div id="ov-cards" class="grid"></div><div id="ov-note"></div><section id="experiments-panel" class="card" aria-labelledby="experiments-h"><h2 id="experiments-h">Experiments</h2><p class="muted">Shadow-only prototypes, kept separate from the dashboard and labelled where they run.</p><p><a href="/app/experiments/dsh-dgm/index.html">Open the admin-only DSH × DGM experiment</a></p><p class="muted">Administrator access required: the page asks the server's administration gate for authorization, so an ordinary or demo account sees a denial instead of the interactive view. Experimental: synthetic fixtures, shadow-only, no model calls, no applied changes.</p></section></section>
+    <section id="tab-overview" role="tabpanel"><header class="page-head"><h1>Overview</h1><p>Read-only snapshot of your resources, fabric and usage.</p></header><div id="ov-kpis"></div><div id="status-strip" class="card panel" role="status"><p class="muted">Checking resource status…</p></div><section id="fabric-flow-panel" class="card panel" aria-labelledby="fabric-flow-h"><h2 id="fabric-flow-h">Fabric flow</h2><div id="fabric-flow" role="status"><p class="muted">Loading fabric flow…</p></div></section><section id="fabric-throughput-panel" class="card panel" aria-labelledby="fabric-throughput-h"><h2 id="fabric-throughput-h">Fabric throughput</h2><div id="fabric-throughput" role="status"><p class="muted">Loading throughput…</p></div></section><div id="ov-cards" class="grid"></div><div id="ov-note"></div><section id="experiments-panel" class="card panel" aria-labelledby="experiments-h"><h2 id="experiments-h">Experiments</h2><p class="muted">Shadow-only prototypes, kept separate from the dashboard and labelled where they run.</p><p><a href="/app/experiments/dsh-dgm/index.html">Open the admin-only DSH × DGM experiment</a></p><p class="muted">Administrator access required: the page asks the server's administration gate for authorization, so an ordinary or demo account sees a denial instead of the interactive view. Experimental: synthetic fixtures, shadow-only, no model calls, no applied changes.</p></section></section>
     <section id="tab-compute" role="tabpanel" hidden>
       <h1>My Compute</h1>
       <section id="connect-card" class="card connect" aria-label="Connect your computer" hidden></section>
@@ -65,12 +70,13 @@
         <button type="submit">Register</button>
       </form>
       </details>
+      <h2>Resources</h2>
       <div id="compute-list" class="grid"></div>
     </section>
-    <section id="tab-shared" role="tabpanel" hidden><h1>Shared With Me</h1><div id="shared-list" class="grid"></div></section>
+    <section id="tab-shared" role="tabpanel" hidden><header class="page-head"><h1>Shared With Me</h1><p>Inference-only grants other owners have given you, with the quota used so far.</p></header><div id="shared-list" class="grid"></div></section>
     <section id="tab-sharing" role="tabpanel" hidden>
-      <h1>Sharing</h1>
-      <p class="muted">Inference-only grants with bounded quotas. <strong>Policy:</strong> grants never convey admin rights. <strong>Enforcement:</strong> server checks ownership, grant validity, and quotas before every dispatch.</p>
+      <header class="page-head"><h1>Sharing</h1>
+      <p class="muted">Inference-only grants with bounded quotas. <strong>Policy:</strong> grants never convey admin rights. <strong>Enforcement:</strong> server checks ownership, grant validity, and quotas before every dispatch.</p></header>
       <p id="demo-grants-note" class="muted" hidden>The demo account cannot create grants.</p>
       <form id="grant-form" class="card">
         <h2>New grant</h2>
@@ -84,8 +90,8 @@
       <h2>Outgoing grants</h2><div id="grant-list" class="grid"></div>
     </section>
     <section id="tab-models" role="tabpanel" hidden>
-      <h1>Models &amp; adapters</h1>
-      <p class="muted">Discovery and compatibility for Hugging Face models, LoRA adapters, and private assets. Browsing never downloads weights or changes a worker.</p>
+      <header class="page-head"><h1>Models &amp; adapters</h1>
+      <p class="muted">Discovery and compatibility for Hugging Face models, LoRA adapters, and private assets. Browsing never downloads weights or changes a worker.</p></header>
       <p id="demo-models-note" class="muted" hidden>The demo account browses fixtures only; compatibility checks, uploads, and deployment are disabled.</p>
       <form id="catalog-form" class="card">
         <h2>Browse catalog</h2>
@@ -130,8 +136,8 @@
       <div id="my-deployments" class="grid"></div>
     </section>
     <section id="tab-federation" role="tabpanel" hidden>
-      <h1>Federation</h1>
-      <p class="muted">Directional, non-transitive node sharing. Connecting grants <strong>zero</strong> resource access; every share needs an explicit preview, approval, and commit. Fixture transport only — no live peers in this build.</p>
+      <header class="page-head"><h1>Federation</h1>
+      <p class="muted">Directional, non-transitive node sharing. Connecting grants <strong>zero</strong> resource access; every share needs an explicit preview, approval, and commit. Fixture transport only — no live peers in this build.</p></header>
       <p id="demo-fab-note" class="muted" hidden>The demo account can view federation state but cannot invite, approve, or share.</p>
       <div id="fab-off" class="card" hidden>Federation is not enabled on this deployment.</div>
       <div id="fab-error" class="card" role="alert" hidden></div>
@@ -216,8 +222,8 @@
       </div>
     </section>
     <section id="tab-keys" role="tabpanel" hidden>
-      <h1>API Keys</h1>
-      <p class="muted">Secrets are shown <strong>once</strong> at creation. Only non-reversible verifiers are stored. Keys work for inventory/usage reads and (with inference scope) future jobs &mdash; never for sharing, key, or settings management. Heartbeat keys bind to one resource and can only post its heartbeats. These are AIPSTER keys, not provider keys.</p>
+      <header class="page-head"><h1>API Keys</h1>
+      <p class="muted">Secrets are shown <strong>once</strong> at creation. Only non-reversible verifiers are stored. Keys work for inventory/usage reads and (with inference scope) future jobs &mdash; never for sharing, key, or settings management. Heartbeat keys bind to one resource and can only post its heartbeats. These are AIPSTER keys, not provider keys.</p></header>
       <p id="demo-keys-note" class="muted" hidden>Sandbox credentials only: demo keys start with aip_demo_ and can never touch real resources.</p>
       <form id="key-form" class="card">
         <h2>New key</h2>
@@ -241,10 +247,10 @@
       </div>
       <h2>Your keys</h2><div id="key-list" class="grid"></div>
     </section>
-    <section id="tab-usage" role="tabpanel" hidden><h1>Usage</h1><div id="usage-totals"></div><div id="usage-list" class="grid"></div></section>
+    <section id="tab-usage" role="tabpanel" hidden><header class="page-head"><h1>Usage</h1><p>Recorded requests and tokens for your account. Model and execution cost are tracked separately.</p></header><div id="usage-totals"></div><div id="usage-list" class="grid"></div></section>
     <section id="tab-advice" role="tabpanel" hidden>
-      <h1>Fabric advice</h1>
-      <p class="muted">Advisory text about your own resources. Advice never runs inference, moves data, or changes anything: dispatch stays disabled and recommendations never name a model.</p>
+      <header class="page-head"><h1>Fabric advice</h1>
+      <p class="muted">Advisory text about your own resources. Advice never runs inference, moves data, or changes anything: dispatch stays disabled and recommendations never name a model.</p></header>
       <div id="adv-off" class="card" hidden>Advice is not enabled on this deployment.</div>
       <div id="adv-on" hidden>
       <p id="adv-mode" class="muted" role="status"></p>
@@ -263,7 +269,7 @@
       </div>
     </section>
     <section id="tab-settings" role="tabpanel" hidden>
-      <h1>Settings</h1>
+      <header class="page-head"><h1>Settings</h1><p>Your display name and the sign-in method this session uses.</p></header>
       <form id="settings-form" class="card">
         <label>Display name <input id="settings-name" required maxlength="80"></label>
         <p class="muted">Signed in as <span id="settings-email"></span> (<span id="settings-via">…</span>).</p>
