@@ -589,6 +589,31 @@ function workerCommands(os) {
   ];
 }
 
+// Manual-install block for the Connect panel: workerCommands plus the real
+// config creation the daemon requires (no config.toml is shipped and
+// install.py does not generate one; load_config reads the path directly).
+// The generated packet carries the same steps with approval gates; the
+// panel states them inline so a fresh manual install does not stop at
+// serve with a missing-file error. workerCommands itself is unchanged.
+function manualInstallCommands(os) {
+  const meta = OS_META[os] || OS_META.windows;
+  const lines = workerCommands(os);
+  const py = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
+  const copy = meta.posix ? 'cp configs/cpu.toml config.toml' : 'copy configs\\cpu.toml config.toml';
+  const setup = [
+    '# Before serve: create your own config (none is shipped):',
+    copy,
+    '# Edit config.toml yourself: absolute [[models]] path to your operator-provided GGUF file',
+    '# (+ absolute executable path if the engine is not on PATH). Nothing downloads a model or engine.',
+    '# Record identity (require cached_on_disk true), then run the planner (exit 2 means setup-required actions remain):',
+    py + ' model_identity.py <your-model.gguf>',
+    py + ' runtime_setup.py --config config.toml'
+  ];
+  const serveIdx = lines.findIndex((l) => / serve --config /.test(l));
+  if (serveIdx < 0) return lines;
+  return [...lines.slice(0, serveIdx), ...setup, lines[serveIdx]];
+}
+
 function workerPairingCommands(os) {
   const meta = OS_META[os] || OS_META.windows;
   const py = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
@@ -1001,7 +1026,7 @@ function paintConnectCard() {
     : (stage === 'awaiting' || authorizing)
       ? '<p><span class="pill warn">Pairing</span></p>'
       : '<p><span class="pill warn">Setup needed</span></p>';
-  const commands = unpickedTarget ? '' : workerCommands(connect.os).map(esc).join('\n');
+  const commands = unpickedTarget ? '' : manualInstallCommands(connect.os).map(esc).join('\n');
   const pairingCommands = workerPairingCommands(connect.os);
   const packagedPairPara = usable
     ? `<p>Packaged install? Open the AIPSTER Worker tray menu and choose Pair this computer (or run <code>aipster-worker pair</code> in a terminal), then type the code above when asked. The tray starts the sender for you while serving; update by reinstalling from a newer reviewed pin AIPSTER publishes (uninstall preserves pairing).</p>`

@@ -266,6 +266,9 @@ test('OS is suggested but correctable; wrong OS changes instructions honestly', 
   const linuxPre = nodesOf(linuxHtml.slice(linuxHtml.indexOf('<pre'), linuxHtml.indexOf('</pre>'))).filter((n) => n.nodeName === '#text').map((n) => n.value).join('');
   assert.ok(linuxPre.includes('.venv/bin/python test_installation.py'), 'Advanced follows the picked OS');
   assert.ok(linuxPre.includes('git sparse-checkout set --no-cone /local-worker/ /LICENSE'));
+  assert.ok(linuxPre.includes('cp configs/cpu.toml config.toml'), 'manual install creates the config before serve');
+  assert.ok(linuxPre.indexOf('cp configs/cpu.toml config.toml') < linuxPre.indexOf('.venv/bin/dendrite serve --config config.toml'), 'config creation precedes serve');
+  assert.ok(linuxPre.includes('.venv/bin/python runtime_setup.py --config config.toml'), 'manual install plans before serve');
   await mac.press('gen-setup');
   assert.equal(mac.captured.length, 2, 'Linux prompt copies too');
   assert.ok(mac.captured[1].includes('.venv/bin/python test_installation.py'));
@@ -635,6 +638,13 @@ test('Advanced keeps the pinned manual commands, warnings and platform labels', 
     'uv run --no-project --python 3.12.14 python install.py',
     '.\\.venv\\Scripts\\python.exe test_installation.py',
     '$env:DENDRITE_API_TOKEN = .\\.venv\\Scripts\\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"',
+    '# Before serve: create your own config (none is shipped):',
+    'copy configs\\cpu.toml config.toml',
+    '# Edit config.toml yourself: absolute [[models]] path to your operator-provided GGUF file',
+    '# (+ absolute executable path if the engine is not on PATH). Nothing downloads a model or engine.',
+    '# Record identity (require cached_on_disk true), then run the planner (exit 2 means setup-required actions remain):',
+    '.\\.venv\\Scripts\\python.exe model_identity.py <your-model.gguf>',
+    '.\\.venv\\Scripts\\python.exe runtime_setup.py --config config.toml',
     '.\\.venv\\Scripts\\dendrite.exe serve --config config.toml'
   ]);
   assert.ok(!/aip_|AIPSTER_(?:API_)?KEY|X-Aipster|\/api\//.test(commands), 'no AIPSTER credential or endpoint in worker commands');
