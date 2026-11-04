@@ -4,15 +4,19 @@
 // Inline SVG picks up the page tokens and dark mode; every colour is a CSS
 // class, never a literal. Each diagram is emitted twice (.dg-wide, .dg-narrow)
 // and a container query on the figure shows one. No dependencies.
-//   node scripts/diagrams.mjs          rewrite public/index.html
-//   node scripts/diagrams.mjs --check  exit 1 when public/index.html is stale
-import {readFile, writeFile} from 'node:fs/promises';
+// It also writes a static, light-theme copy of each wide layout to the
+// repository's assets/diagrams/<id>.svg for README.md: literal colours, no
+// script, no motion, so GitHub renders it as a plain image.
+//   node scripts/diagrams.mjs          rewrite public/index.html and assets/diagrams/
+//   node scripts/diagrams.mjs --check  exit 1 when either is stale
+import {readFile, writeFile, mkdir} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
 const ROOT = resolve(import.meta.dirname, '..');
 export const SOURCE = resolve(ROOT, 'diagrams/diagrams.json');
 export const PAGE = resolve(ROOT, 'public/index.html');
+export const STANDALONE_DIR = resolve(ROOT, '..', 'assets', 'diagrams');
 
 // Type sizes in SVG user units. Wide layouts only show at >= 0.92x scale and
 // narrow ones at >= 0.95x, so every size here renders at 12px or more.
@@ -295,6 +299,49 @@ export function renderDiagram(diagram) {
   return ['wide', 'narrow'].map(name => draw(diagram, name));
 }
 
+// The light tokens from public/styles.css, as literals: an SVG loaded as an
+// image cannot read the page's custom properties.
+const STANDALONE_CSS = [
+  'text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,sans-serif;fill:#0f1f1a}',
+  '.dg-bg{fill:#f8faf7;stroke:#d5ddd6}.dg-dot{fill:#c3cec5}.dg-dots{fill:url(#dg-dots)}',
+  '.dg-label{font-weight:600}.dg-sublabel,.dg-statelabel{fill:#4a5d55}',
+  '.dg-elabel{fill:#4a5d55;paint-order:stroke;stroke:#f8faf7;stroke-width:5px;stroke-linejoin:round}',
+  '.dg-group{fill:#4a5d55;font-weight:500}',
+  '.dg-box{fill:#ffffff;stroke:#c3cec5;stroke-width:1}.dg-owner .dg-box{fill:#f6e8dc;stroke:#a24e16}',
+  '.dg-s-optional .dg-box{stroke:#75897f;stroke-dasharray:4 3}',
+  '.dg-mark{fill:none;stroke:#0f1f1a;stroke-width:1.5}.dg-m-built{fill:#0f1f1a;stroke:none}',
+  '.dg-m-notlive,.dg-m-optional{stroke:#4a5d55;stroke-dasharray:2.2 2}',
+  '.dg-edge{fill:none;stroke:#75897f;stroke-width:1.5;stroke-linecap:round}',
+  '.dg-k-heartbeat{stroke-dasharray:1.5 4}.dg-k-optional{stroke-dasharray:6 5}.dg-k-architectural{stroke-dasharray:5 6}',
+  '.dg-arrow{fill:#75897f}.dg-port{fill:#ffffff;stroke:#75897f;stroke-width:1.5}',
+  '.dg-mesh .dg-edge{stroke-width:1.25}.dg-mesh .dg-k-architectural{stroke-width:1.5}.dg-idle{opacity:.45}',
+  '.dg-hub{fill:#0f1f1a}.dg-share{fill:#f6e8dc;stroke:#a24e16;stroke-width:1.5}',
+  '.dg-shape{stroke-width:1.5;fill:#ffffff}.dg-shape.dg-st-online{fill:#1d7048;stroke:#1d7048}',
+  '.dg-st-stale{stroke:#85590a}.dg-fill.dg-st-stale{fill:#85590a;stroke:none}',
+  '.dg-st-offline{stroke:#b42b1f}.dg-st-unknown{stroke:#4651b5;stroke-dasharray:2 2}',
+].join('');
+
+// The wide layout as a standalone file. Beams and halos exist only to be
+// animated on the site, so they are left out.
+export function renderStandalone(diagram) {
+  const [wide] = renderDiagram(diagram);
+  const [w, h] = diagram.layouts.wide.size.map(v => v * diagram.layouts.wide.grid);
+  const tagEnd = wide.indexOf('>') + 1, descEnd = wide.indexOf('</desc>') + '</desc>'.length;
+  const open = wide.slice(0, tagEnd)
+    .replace('<svg class="dg-svg dg-wide"', `<svg xmlns="http://www.w3.org/2000/svg" class="dg-svg dg-${diagram.type}"`)
+    .replace(' focusable="false"', '');
+  const body = wide.slice(descEnd, -'</svg>'.length)
+    .replace(/<g class="dg-beams">[^]*?<\/g>/, '')
+    .replace(/<circle class="dg-halo"[^>]*\/>/g, '');
+  return `${open}${wide.slice(tagEnd, descEnd)}<style>${STANDALONE_CSS}</style>`
+    + '<defs><pattern id="dg-dots" width="16" height="16" patternUnits="userSpaceOnUse"><circle class="dg-dot" cx="8" cy="8" r="1"/></pattern></defs>'
+    + `<rect class="dg-bg" x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" rx="8"/><rect class="dg-dots" width="${w}" height="${h}" rx="8"/>`
+    + `${body}</svg>\n`;
+}
+
+export const standalonePath = diagram => resolve(STANDALONE_DIR, `${diagram.id}.svg`);
+async function readOrNull(path) { try { return await readFile(path, 'utf8'); } catch { return null; } }
+
 export function apply(html, source) {
   let out = html;
   for (const diagram of source.diagrams) {
@@ -315,14 +362,19 @@ export async function load() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const {source, html} = await load();
   const next = apply(html, source);
+  const files = await Promise.all(source.diagrams.map(async diagram => ({
+    path: standalonePath(diagram), next: renderStandalone(diagram), current: await readOrNull(standalonePath(diagram))})));
+  const stale = files.filter(file => file.next !== file.current);
   if (process.argv.includes('--check')) {
-    if (next !== html) {
-      console.error('public/index.html diagrams are out of date: run `npm run diagrams`.');
+    if (next !== html || stale.length) {
+      console.error('Diagrams are out of date (public/index.html or assets/diagrams/): run `npm run diagrams`.');
       process.exit(1);
     }
     console.log(JSON.stringify({diagrams: source.diagrams.length, current: true}));
   } else {
     if (next !== html) await writeFile(PAGE, next);
-    console.log(JSON.stringify({diagrams: source.diagrams.length, written: next !== html}));
+    if (stale.length) await mkdir(STANDALONE_DIR, {recursive: true});
+    for (const file of stale) await writeFile(file.path, file.next);
+    console.log(JSON.stringify({diagrams: source.diagrams.length, written: next !== html || stale.length > 0}));
   }
 }

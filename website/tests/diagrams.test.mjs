@@ -7,7 +7,8 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {resolve} from 'node:path';
 import {parse} from 'parse5';
-import {load, apply, renderDiagram} from '../scripts/diagrams.mjs';
+import {readFile} from 'node:fs/promises';
+import {load, apply, renderDiagram, renderStandalone, standalonePath} from '../scripts/diagrams.mjs';
 
 const GENERATOR = resolve(import.meta.dirname, '..', 'scripts', 'diagrams.mjs');
 const {source, html} = await load();
@@ -143,4 +144,39 @@ test('edges that meet draw one port, not a stack', () => {
       assert.equal(new Set(ports).size, ports.length, `${diagram.id}/${attr(svg, 'class')}: duplicate port`);
     }
   }
+});
+
+test('README copies are static, light-theme renders of the current JSON', async () => {
+  for (const diagram of source.diagrams) {
+    const file = await readFile(standalonePath(diagram), 'utf8');
+    assert.equal(file, renderStandalone(diagram), `${diagram.id}.svg is current`);
+    const [svg] = svgs(file);
+    assert.equal(attr(svg, 'xmlns'), 'http://www.w3.org/2000/svg');
+    assert.equal(attr(svg, 'role'), 'img');
+    assert.deepEqual([attr(svg, 'width'), attr(svg, 'height')], diagram.layouts.wide.size.map(v => String(v * diagram.layouts.wide.grid)));
+    const children = svg.childNodes.filter(c => c.tagName);
+    assert.deepEqual(children.slice(0, 2).map(c => c.tagName), ['title', 'desc'], 'title and desc come first');
+    assert.equal(textOf(children[0]), diagram.title);
+    assert.equal(textOf(children[1]), diagram.desc);
+    assert.equal(attr(svg, 'aria-labelledby'), attr(children[0], 'id'));
+    walk(svg, node => {
+      if (!node.tagName) return;
+      assert.ok(!['script', 'foreignobject', 'image', 'use', 'animate', 'animatemotion', 'animatetransform', 'set'].includes(node.tagName.toLowerCase()), `${diagram.id}: <${node.tagName}>`);
+      for (const a of node.attrs) assert.ok(!/^on/i.test(a.name) && !['href', 'xlink:href'].includes(a.name), `${diagram.id}: ${a.name}`);
+    });
+    assert.ok(!/animation|@keyframes|transition|var\(|prefers-color-scheme|url\((?!#dg-dots\))/i.test(file), `${diagram.id}: no motion, tokens or external URLs`);
+    assert.ok(!/dg-beam|dg-halo/.test(file), `${diagram.id}: no animated-only layers`);
+  }
+});
+
+test('README embeds each diagram, with Fig. 1 beside the research diagram', async () => {
+  const readme = await readFile(resolve(import.meta.dirname, '..', '..', 'README.md'), 'utf8');
+  const at = needle => { const i = readme.indexOf(needle); assert.ok(i >= 0, needle); return i; };
+  for (const id of ['how', 'research', 'mesh']) assert.equal(readme.split(`(assets/diagrams/${id}.svg)`).length, 2, `${id} once`);
+  assert.ok(at('## How it would work') < at('(assets/diagrams/how.svg)'));
+  assert.ok(at('## Personal meshes') < at('(assets/diagrams/mesh.svg)'));
+  assert.ok(at('**Proposed design**') < at('(assets/diagrams/research.svg)'));
+  assert.ok(at('(assets/diagrams/research.svg)') < at('**Fig. 1') && at('**Fig. 1') < at('(assets/IRB-DGM-JEV-component-flow.png)'));
+  assert.ok(!readme.includes('website/public/assets/IRB-DGM'), 'Fig. 1 comes from the repository copy');
+  await readFile(resolve(import.meta.dirname, '..', '..', 'assets', 'IRB-DGM-JEV-component-flow.png'));
 });

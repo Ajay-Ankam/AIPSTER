@@ -39,18 +39,20 @@
     });
   }
 
-  // Runs fn once per element when it first becomes visible.
+  // Runs fn once per element when at least `threshold` of it is visible.
+  // An entry can report isIntersecting below the threshold, so the ratio is
+  // checked too and the element stays observed until it gets there.
   function onceVisible(els, fn, threshold) {
-    var left = els.length;
+    var left = els.length, min = threshold || 0;
     if (!left) return;
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (entry) {
-        if (!entry.isIntersecting) return;
+        if (!entry.isIntersecting || entry.intersectionRatio < min) return;
         io.unobserve(entry.target);
         fn(entry.target);
         if (!--left) io.disconnect();
       });
-    }, {threshold: threshold || 0});
+    }, {threshold: min});
     els.forEach(function (el) { io.observe(el); });
   }
 

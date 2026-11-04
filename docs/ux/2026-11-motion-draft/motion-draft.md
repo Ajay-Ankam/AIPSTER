@@ -13,7 +13,8 @@ Andrew: "go with your recommendations".
 - **Duplicate content removed.** The two flow diagrams stay. The four-step list under "How it would work" is gone, because the `how` diagram draws the same four steps with the same state labels. Fig. 1, the published IRB / DGM PNG (723 KB), is gone, because the `research` diagram draws the same pipeline; its PNG and SVG are removed from `website/public/assets/`. The repository copies in `assets/` stay for `README.md`. The model / LoRA figure is now Fig. 1 and sits full width, image beside caption.
 - **Motion cut.** Count-up (console KPIs and the status tallies) and the section-heading blur reveal are removed from `motion.js` and `styles.css`. The tallies stay as static numbers, and a test now counts the matrix rows behind each one.
 - **Kept.** Beams, spotlight, dot grid, the 6px magnet, the two-sweep sheen and decrypt on the two id labels.
-- **Review fixes.** The landing CSP is pinned (see the policy section). Edges that meet at one point now draw one port, not a stack (four circles had been drawn at (520,80) in the `how` diagram). `release.json` moves to revision `2026-11-04.1`.
+- **README.** `README.md` keeps Fig. 1 from the repository copy in `assets/` and embeds the three new diagrams from `assets/diagrams/`, which the generator writes (see below).
+- **Review fixes.** One-shot effects start only when an entry's `intersectionRatio` reaches the requested threshold, not on the first `isIntersecting` entry (Codex review; `tests/motion.test.mjs`). The landing CSP is pinned (see the policy section). Edges that meet at one point now draw one port, not a stack (four circles had been drawn at (520,80) in the `how` diagram). `release.json` moves to revision `2026-11-04.1`.
 
 ## Licence
 
@@ -35,7 +36,7 @@ All of them are progressive enhancement:
 | 3 | Spotlight | The build matrix, the Fig. 1 card and the two flow diagrams | SpotlightCard | It is a soft copper wash at 9% `color-mix` of `--copper`, so it suits a hairline console. Only on `pointer: fine`. | No highlight. |
 | 4 | Magnet | "Open the control panel" | Magnet | It gives the single primary CTA a physical feel. It drifts at most 6px when the pointer is within 80px, and springs back with `--dur-3` / `--ease-out`. Only on `pointer: fine`. | Static button. Keyboard focus never moves it. |
 | 5 | Dot grid | Hero band behind the copy and console | DotGrid | It is the Gumloop / Mintlify canvas. The static grid is drawn with `--line-2` dots, and a second layer of `--copper` dots shows only inside a 10rem mask around the pointer. | Static grid (CSS only, no JS needed). |
-| 6 | Beams | Diagram edges | Beams / FloatingLines | Flow is explained by motion along the real edges. Request and result edges carry a short copper pulse three times. Dashed edges (heartbeat, optional, architectural) flow three times. Online machines in "Your mesh" pulse three times. Everything starts when the figure is 35% in view. | Static, finished diagram. There is no SMIL; `check.mjs` bans `<animate>`. |
+| 6 | Beams | Diagram edges | Beams / FloatingLines | Flow is explained by motion along the real edges. Request and result edges carry a short copper pulse three times. Dashed edges (heartbeat, optional, architectural) flow three times. Online machines in "Your mesh" pulse three times. Everything starts when 35% of the figure is in view; an earlier `isIntersecting` entry below that ratio is ignored. | Static, finished diagram. There is no SMIL; `check.mjs` bans `<animate>`. |
 
 One pointer handler serves effects 3, 4 and 5. It is passive and rAF-throttled, and in each frame it reads every rect before it writes any custom property, so there is no layout thrash. Each IntersectionObserver disconnects once all of its targets have fired, and no timers are left running. `motion.js` is 4.9 KB of readable source, about 3.5 KB with comments and whitespace removed, and 2.0 KB gzipped.
 
@@ -67,7 +68,8 @@ Motion is deliberately not used on mesh lanes. The caption says the lanes "are a
     - nodes overlap;
     - an edge label hits a node or leaves the canvas;
     - wrapped text does not fit its box.
-  - `--check` exits 1 when `index.html` is out of date.
+  - It also writes `assets/diagrams/<id>.svg` at the repository root: the wide layout as a standalone light-theme SVG for `README.md`, with literal colours, `<title>` and `<desc>`, no script and no motion (beams and halos are left out).
+  - `--check` exits 1 when `index.html` or any of those files is out of date.
 - **SVG.**
   - Each SVG has `role="img"`, a `<title>` (`aria-labelledby`) and a `<desc>` (`aria-describedby`). Ids are unique per diagram and layout.
   - Text is real `<text>` with a `font-size` attribute. All strokes and fills come from CSS classes using tokens, so dark mode follows `prefers-color-scheme`.
