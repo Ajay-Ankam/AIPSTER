@@ -43,6 +43,7 @@ import { all, first, rid16 } from '../lib/store.js';
 import { httpError } from '../lib/validate.js';
 import { resourceLiveness } from '../lib/status.mjs';
 import { CONTENT_MAX } from './worker-transport.mjs';
+import { matchDeny } from '../fabric/policy.mjs';
 
 export const ADMISSION_TTL_MS = 10 * 60 * 1000;
 // Per-principal limits. Three independent caps, because one number cannot
@@ -99,7 +100,12 @@ const OWNER_GRANT_REVISION = 1;
 const FAR_FUTURE = '9999-12-31T23:59:59.999Z';
 
 const SUCCEEDED_KEYS = new Set(['request_id', 'node_id', 'runtime_id', 'model_id', 'runtime_instance',
-  'model_fingerprint', 'simulated', 'content', 'elapsed_ms', 'usage', 'cache', 'truncated']);
+  'model_fingerprint', 'simulated', 'content', 'elapsed_ms', 'usage', 'cache', 'truncated', 'finish_reason']);
+// Upstream terminal finish evidence the worker may repeat into L2 results.
+// Absent on legacy results (treated downstream as finish-unavailable, never
+// invented); anything else here is refused. tool_calls in particular must
+// never travel as a completion until tool execution is actually supported.
+const FINISH_REASONS = new Set(['stop', 'length', 'content_filter']);
 const FAILED_KEYS = new Set(['reason', 'detail', 'elapsed_ms', 'usage', 'cache']);
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -279,6 +285,10 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       if (!r || r.incarnation !== authority.incarnation || r.owner_id !== op.principal_id) return 'authority_changed';
       return null;
     }
+    if (typeof authority.grant_id === 'string' && authority.grant_id.startsWith(FABRIC_GRANT_PREFIX)
+      && authority.grant_id.length > FABRIC_GRANT_PREFIX.length) {
+      return fabricAuthorityProblem(op, binding, authority);
+    }
     const g = await first(db, `SELECT g.*, r.incarnation AS live_incarnation
       FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.id = ?`, authority.grant_id);
     if (!g) return 'authority_changed';
@@ -290,12 +300,68 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
     return null;
   }
 
+  // Fabric in-flight re-verification: terminal loss (revoked status,
+  // quarantine, suspended connection, matching deny) reads as 'revoked' so
+  // in-flight work withholds its result; version/incarnation/binding drift
+  // reads as 'authority_changed'. Spend is never touched here.
+  async function fabricAuthorityProblem(op, binding, authority) {
+    if (typeof authority.grant_revision !== 'number' || typeof authority.incarnation !== 'string') {
+      return 'authority_changed';
+    }
+    const g = await first(db, 'SELECT * FROM fabric_grants WHERE id = ?', authority.grant_id);
+    if (!g) return 'authority_changed';
+    if (g.status !== 'enforced'
+      || (g.quarantine_reason !== undefined && g.quarantine_reason !== null)) return 'revoked';
+    const conn = g.connection_id
+      ? await first(db, 'SELECT state FROM connections WHERE id = ?', g.connection_id)
+      : null;
+    if (!conn || conn.state !== 'active') return 'revoked';
+    if (g.version !== authority.grant_revision) return 'authority_changed';
+    const r0 = await first(db, 'SELECT id, owner_id, incarnation FROM resources WHERE id = ?', binding.resource_id);
+    if (!r0) return 'authority_changed';
+    // A deny that lands after admission reads as lost access, not drift.
+    if (await fabricDenied(db, { owner_id: r0.owner_id, principal_id: op.principal_id, resource_id: binding.resource_id })) {
+      return 'revoked';
+    }
+    const live = await fabricGrantLive({
+      grant_id: authority.grant_id, principal_id: op.principal_id, resource_id: binding.resource_id,
+    });
+    if (!live) return 'authority_changed';
+    if (live.resource.incarnation !== authority.incarnation) return 'authority_changed';
+    return null;
+  }
   async function liveAuthoritySql(op, binding, authority) {
     // Returns { sql, binds } for use inside a conditional UPDATE.
     if (isOwnerGrant(authority.grant_id)) {
       return {
         sql: `EXISTS (SELECT 1 FROM resources r WHERE r.id = ? AND r.incarnation = ? AND r.owner_id = ?)`,
         binds: [binding.resource_id, authority.incarnation, op.principal_id],
+      };
+    }
+    if (typeof authority.grant_id === 'string' && authority.grant_id.startsWith(FABRIC_GRANT_PREFIX)
+      && authority.grant_id.length > FABRIC_GRANT_PREFIX.length) {
+      return {
+        sql: `EXISTS (
+          SELECT 1 FROM fabric_grants g
+          JOIN connections c ON c.id = g.connection_id
+          JOIN resources r ON r.id = ?
+          JOIN fabric_nodes n ON n.id = g.recipient_node
+          WHERE g.id = ? AND g.status = 'enforced' AND g.quarantine_reason IS NULL
+            AND c.state = 'active' AND r.owner_id = g.exporter_id
+            AND g.version = ? AND r.incarnation = ?
+            AND n.owner_id = ? AND n.workspace = g.recipient_workspace
+            AND EXISTS (SELECT 1 FROM json_each(g.consumers) WHERE value = ?)
+            AND EXISTS (SELECT 1 FROM json_each(g.snapshot)
+              WHERE json_extract(value, '$.resourceId') = ? AND json_extract(value, '$.incarnation') = ?)
+            AND NOT EXISTS (
+              SELECT 1 FROM fabric_denies d
+              WHERE d.owner_id = r.owner_id
+                AND (d.principal IS NULL OR d.principal = ?)
+                AND (d.resource_id IS NULL OR d.resource_id = ?)
+                AND (d.action IS NULL OR d.action IN ('infer', 'inference'))))`,
+        binds: [binding.resource_id, authority.grant_id, authority.grant_revision, authority.incarnation,
+          op.principal_id, op.principal_id, binding.resource_id, authority.incarnation,
+          op.principal_id, binding.resource_id],
       };
     }
     return {
@@ -331,6 +397,11 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       let grant_id;
       let revision;
       let pool_id;
+      // The coordinator pins peer_node/peer_workspace from issuance; for
+      // fabric grants the peer is the *recipient* (importer side), not the
+      // resource node/owner as in the app/owner paths below.
+      let peerNode = resource.node_id || resource.id;
+      let peerWorkspace = resource.owner_id;
       if (grantId === null) {
         if (resource.owner_id !== p.principal_id) {
           throw httpError(403, 'Owner admission requires resource ownership.', 'OWNER_MISMATCH');
@@ -338,6 +409,36 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
         grant_id = ownerGrantId(resource_id);
         revision = OWNER_GRANT_REVISION;
         pool_id = `${OWNER_PREFIX}${p.principal_id}:${dayOf(t)}`;
+      } else if (typeof grantId === 'string' && grantId.startsWith(FABRIC_GRANT_PREFIX)
+        && grantId.length > FABRIC_GRANT_PREFIX.length) {
+        const live = await fabricGrantLive({ grant_id: grantId, principal_id: p.principal_id, resource_id });
+        if (!live) throw httpError(403, 'No matching grant.', 'NO_MATCHING_GRANT');
+        // Issuance-time terms the coordinator cannot re-derive: model and
+        // per-request ceilings, demo parity, and a usable time window.
+        // Spend accounting itself lives on the stable grant id (per the
+        // restricted demo policy in the module header), so no pool choice
+        // beyond the grant pool is invented here.
+        if (!live.models.includes(model_id)) throw httpError(403, 'No matching grant.', 'NO_MATCHING_GRANT');
+        const maxT = Number(live.ceilings.maxTokens);
+        const maxR = Number(live.ceilings.maxRequests);
+        if (!Number.isSafeInteger(maxT) || !Number.isSafeInteger(maxR) || max_tokens > maxT) {
+          throw httpError(403, 'No matching grant.', 'NO_MATCHING_GRANT');
+        }
+        if (Date.parse(live.grant.expiry) <= t) throw httpError(403, 'No matching grant.', 'NO_MATCHING_GRANT');
+        const exporter = await first(db, 'SELECT demo FROM "user" WHERE id = ?', live.grant.exporter_id);
+        const consumer = await first(db, 'SELECT demo FROM "user" WHERE id = ?', p.principal_id);
+        if (!exporter || !consumer || Number(exporter.demo || 0) !== Number(consumer.demo || 0)) {
+          throw httpError(403, 'No matching grant.', 'NO_MATCHING_GRANT');
+        }
+        if (Number(live.grant.used_tokens) + max_tokens > maxT
+          || Number(live.grant.used_jobs) + 1 > maxR) {
+          throw httpError(429, 'Grant capacity is exhausted for this request.', 'GRANT_QUOTA_EXHAUSTED');
+        }
+        grant_id = grantId;
+        revision = live.grant.version;
+        pool_id = `${GRANT_POOL_PREFIX}${grantId}`;
+        peerNode = live.grant.recipient_node;
+        peerWorkspace = live.grant.recipient_workspace;
       } else {
         const g = await first(db, 'SELECT * FROM grants WHERE id = ?', grantId);
         if (!g || g.revoked_at !== null) throw httpError(403, 'No matching grant.', 'NO_MATCHING_GRANT');
@@ -374,7 +475,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
           WHERE (SELECT COUNT(*) FROM dispatch_admissions
             WHERE principal_id = ? AND expires_at > ?) < ?`).bind(
           admission_ref, p.principal_id, p.tenant_id, grant_id, revision, resource_id, resource.incarnation,
-          resource.node_id || resource.id, resource.owner_id, INFERENCE_ROUTE, resource_id, runtime,
+          peerNode, peerWorkspace, INFERENCE_ROUTE, resource_id, runtime,
           runtime, model_id, model_id, max_tokens, json(pools), expires_at, isoAt(t),
           p.principal_id, t, cap),
       ]);
@@ -402,7 +503,103 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
     return rows.map((r) => r.model_id);
   }
 
-  async function readGrant({ grant_id } = {}) {
+  // Fabric-backed grants (`fg_*`, committed by the fabric control plane) are
+  // resolved against live persisted state: enforced + unquarantined + active
+  // connection + exporter-held live incarnation + recipient node owned by
+  // the caller + caller in consumers + no matching owner-scoped deny.
+  // Anything else returns null (fail-closed); the coordinator's matchGrant
+  // re-verifies recipient/consumer/action/model/time/route/quota/revision
+  // against the pinned admission. Route is the internal dispatch route:
+  // the fabric transport route ('fixture') lives in a different namespace
+  // and is enforced on the control-plane path, not here.
+  const FABRIC_GRANT_PREFIX = 'fg_';
+  const safeJson = (v, fallback) => {
+    try {
+      const p = typeof v === 'string' ? JSON.parse(v) : v;
+      return p === undefined ? fallback : p;
+    } catch {
+      return fallback;
+    }
+  };
+  const isIso = (v) => typeof v === 'string' && !Number.isNaN(Date.parse(v));
+  // Owner-scoped deny match (same shape as authorizationPreview): no
+  // cross-tenant deny bleed, none for a removed resource. Fabric persists
+  // the 'infer' verb; the dispatch gate matches 'inference'.
+  async function fabricDenied(db, { owner_id, principal_id, resource_id } = {}) {
+    if (!isStr(owner_id) || !isStr(principal_id) || !isStr(resource_id)) return false;
+    const denies = await all(db, `SELECT principal, resource_id AS resourceId, action FROM fabric_denies
+      WHERE owner_id = ? AND (resource_id = ? OR resource_id IS NULL)`, owner_id, resource_id);
+    const req = { consumer: principal_id, resourceId: resource_id, action: 'inference' };
+    for (const d of denies) {
+      const denyAction = d && d.action === 'infer' ? 'inference' : d && d.action;
+      if (d && matchDeny(req, {
+        principal: d.principal ?? undefined,
+        resourceId: d.resourceId ?? undefined,
+        action: denyAction ?? undefined,
+      })) return true;
+    }
+    return false;
+  }
+  // Shared live-authority read for fabric grants: every check is a persisted
+  // D1 relationship (grant row, connection, live resource, recipient-node
+  // ownership, consumers, owner-scoped denies). Returns the parsed pieces
+  // or null; never throws for missing rows. Used by readGrant, issuance,
+  // and the coordinator's live re-verification below.
+  async function fabricGrantLive({ grant_id, principal_id, resource_id } = {}) {
+    if (!isStr(grant_id) || !isStr(principal_id) || !isStr(resource_id)) return null;
+    const g = await first(db, 'SELECT * FROM fabric_grants WHERE id = ?', grant_id);
+    if (!g || g.status !== 'enforced'
+      || (g.quarantine_reason !== undefined && g.quarantine_reason !== null)) return null;
+    const conn = await first(db, 'SELECT id, state FROM connections WHERE id = ?', g.connection_id);
+    if (!conn || conn.state !== 'active') return null;
+    const r = await first(db, 'SELECT id, owner_id, incarnation FROM resources WHERE id = ?', resource_id);
+    if (!r || r.owner_id !== g.exporter_id) return null;
+    const snapshot = safeJson(g.snapshot, null);
+    const entry = Array.isArray(snapshot) ? snapshot.find((s) => s && s.resourceId === resource_id) : null;
+    if (!entry || !isStr(entry.incarnation) || entry.incarnation !== r.incarnation) return null;
+    // Recipient binding off persisted ownership (ownNode semantics):
+    // the caller must own the recipient node, whose workspace must match
+    // the grant — strangers get null, never an existence oracle.
+    const node = await first(db, 'SELECT id, workspace FROM fabric_nodes WHERE id = ? AND owner_id = ?',
+      g.recipient_node, principal_id);
+    if (!node || node.workspace !== g.recipient_workspace) return null;
+    const consumers = safeJson(g.consumers, null);
+    if (!Array.isArray(consumers) || !consumers.includes(principal_id)) return null;
+    if (await fabricDenied(db, { owner_id: r.owner_id, principal_id, resource_id })) return null;
+    const rawActions = safeJson(g.actions, null);
+    const models = safeJson(g.models, null);
+    const ceilings = safeJson(g.ceilings, null);
+    if (!Array.isArray(rawActions) || !Array.isArray(models) || !ceilings || typeof ceilings !== 'object'
+      || Array.isArray(ceilings)) return null;
+    // Action namespace seam: fabric commits the 'infer' verb (preview
+    // terms; "Connection only carries inference"), while the dispatch gate
+    // matches the fixed 'inference' action. Map the known verb; anything
+    // else passes through and is judged by matchGrant.
+    const actions = rawActions.map((a) => (a === 'infer' ? 'inference' : a));
+    if (!Number.isSafeInteger(g.version) || !isIso(g.created_at) || !isIso(g.expiry)) return null;
+    // Spend counters must be strict nonnegative safe integers before any
+    // headroom is accepted. A pre-0029 schema reads them as undefined, and
+    // Number(undefined)/Number(null) coercion would silently pass NaN/zero
+    // headroom and mint an admission with no spend recorded. Missing, null,
+    // fractional, negative, non-finite, or non-numeric values (including
+    // numeric strings) are never valid counters: the grant is not live.
+    if (!Number.isSafeInteger(g.used_tokens) || g.used_tokens < 0
+      || !Number.isSafeInteger(g.used_jobs) || g.used_jobs < 0) return null;
+    return { grant: g, connection: conn, resource: r, entry, node, consumers, actions, models, ceilings };
+  }
+  async function fabricGrantView({ grant_id, principal_id, resource_id } = {}) {
+    const live = await fabricGrantLive({ grant_id, principal_id, resource_id });
+    if (!live) return null;
+    const { grant: g, resource: r, consumers, actions, models, ceilings } = live;
+    return {
+      id: g.id, status: 'enforced', revoked: false, revision: g.version,
+      recipientNode: g.recipient_node, recipientWorkspace: g.recipient_workspace,
+      consumers, resourceId: r.id, incarnation: r.incarnation,
+      actions, models, notBefore: g.created_at, expiry: g.expiry,
+      ceilings, route: INFERENCE_ROUTE,
+    };
+  }
+  async function readGrant({ grant_id, principal_id, resource_id } = {}) {
     if (!isStr(grant_id)) return null;
     if (isOwnerGrant(grant_id)) {
       const resourceId = grant_id.slice(OWNER_PREFIX.length);
@@ -419,6 +616,9 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
         // instead of surfacing as NO_MATCHING_GRANT here.
         ceilings: { maxTokens: Number.MAX_SAFE_INTEGER }, route: INFERENCE_ROUTE,
       };
+    }
+    if (grant_id.startsWith(FABRIC_GRANT_PREFIX) && grant_id.length > FABRIC_GRANT_PREFIX.length) {
+      return fabricGrantView({ grant_id, principal_id, resource_id });
     }
     const g = await first(db, `SELECT g.*, r.node_id AS live_node_id, r.incarnation AS live_incarnation
       FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.id = ?`, grant_id);
@@ -632,9 +832,29 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       let batch;
       if (pool_id.startsWith(GRANT_POOL_PREFIX) && pool_id.length > GRANT_POOL_PREFIX.length) {
         const grantId = pool_id.slice(GRANT_POOL_PREFIX.length);
-        // Charge at hold, net of routing refunds, only for an unrevoked grant
-        // with headroom, no existing hold for this (op, pool), and a still-live
-        // unfenced operation at this generation.
+        if (grantId.startsWith(FABRIC_GRANT_PREFIX) && grantId.length > FABRIC_GRANT_PREFIX.length) {
+          // Fabric pools charge the grant's own cumulative counters (see the
+          // restricted demo policy in the module header): spend persists on
+          // the stable grant id across revisions, never replenishes, and new
+          // holds fail closed below revised limits. No routing refunds exist
+          // on the fabric path; the admit CAS re-verifies terminality.
+          batch = [
+            db.prepare(`UPDATE fabric_grants SET used_tokens = used_tokens + ?, used_jobs = used_jobs + 1
+              WHERE id = ? AND status = 'enforced' AND quarantine_reason IS NULL
+                AND used_jobs + 1 <= json_extract(ceilings, '$.maxRequests')
+                AND used_tokens + ? <= json_extract(ceilings, '$.maxTokens')
+                AND (SELECT state FROM connections WHERE id = fabric_grants.connection_id) = 'active'
+                AND NOT EXISTS (SELECT 1 FROM dispatch_holds WHERE op_id = ? AND pool_id = ?)
+                AND ${opAlive}`).bind(
+              amount, grantId, amount, op_id, pool_id, op_id, generation, op_id, generation),
+            insertHold.bind(hold_id, op_id, generation, pool_id, 'grant', amount, 1, t, t,
+              op_id, generation, op_id, generation),
+            advance.bind(t, op_id, generation),
+          ];
+        } else {
+          // Charge at hold, net of routing refunds, only for an unrevoked grant
+          // with headroom, no existing hold for this (op, pool), and a still-live
+          // unfenced operation at this generation.
         batch = [
           db.prepare(`UPDATE grants SET used_tokens = used_tokens + ?, used_jobs = used_jobs + ?
             WHERE id = ? AND revoked_at IS NULL
@@ -647,6 +867,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
             op_id, generation, op_id, generation),
           advance.bind(t, op_id, generation),
         ];
+        }
       } else if (pool_id.startsWith(OWNER_PREFIX) && pool_id.length > OWNER_PREFIX.length) {
         const rest = pool_id.slice(OWNER_PREFIX.length);
         const sep = rest.lastIndexOf(':');
@@ -870,10 +1091,18 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
               WHERE o.op_id = ? AND o.generation = ? AND o.phase = 'released')`).bind(
           t, h.hold_id, op_id, generation, op_id, generation));
         if (h.pool_kind === 'grant') {
-          batch.push(db.prepare(`UPDATE grants SET used_tokens = used_tokens - ?, used_jobs = used_jobs - ?
-            WHERE id = ? AND used_tokens >= ? AND used_jobs >= ? AND changes() = 1`).bind(
-            Number(h.amount), Number(h.jobs), h.pool_id.slice(GRANT_POOL_PREFIX.length),
-            Number(h.amount), Number(h.jobs)));
+          const gid = h.pool_id.slice(GRANT_POOL_PREFIX.length);
+          // Fabric spend returns to the same cumulative counters it was
+          // charged from; a missing or already-released row releases nothing.
+          if (gid.startsWith(FABRIC_GRANT_PREFIX) && gid.length > FABRIC_GRANT_PREFIX.length) {
+            batch.push(db.prepare(`UPDATE fabric_grants SET used_tokens = used_tokens - ?, used_jobs = used_jobs - ?
+              WHERE id = ? AND used_tokens >= ? AND used_jobs >= ? AND changes() = 1`).bind(
+              Number(h.amount), Number(h.jobs), gid, Number(h.amount), Number(h.jobs)));
+          } else {
+            batch.push(db.prepare(`UPDATE grants SET used_tokens = used_tokens - ?, used_jobs = used_jobs - ?
+              WHERE id = ? AND used_tokens >= ? AND used_jobs >= ? AND changes() = 1`).bind(
+              Number(h.amount), Number(h.jobs), gid, Number(h.amount), Number(h.jobs)));
+          }
         } else {
           batch.push(db.prepare(`UPDATE dispatch_pool_usage SET used_tokens = used_tokens - ?, updated_at = ?
             WHERE pool_id = ? AND used_tokens >= ? AND changes() = 1`).bind(
@@ -1100,6 +1329,10 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
         || result.model_fingerprint !== job.model_fingerprint) return { ok: false, reason: 'result_mismatch' };
       if (result.simulated !== false) return { ok: false, reason: 'simulated_result' };
       if (result.truncated !== undefined && result.truncated !== false) return { ok: false, reason: 'invalid_result' };
+      if (result.finish_reason !== undefined
+        && (typeof result.finish_reason !== 'string' || !FINISH_REASONS.has(result.finish_reason))) {
+        return { ok: false, reason: 'invalid_result' };
+      }
       // Same limit as the HTTP worker-result validator (worker-transport.mjs):
       // a real completion is far longer than the 256-char identifier default.
       if (!isStr(result.content, CONTENT_MAX) || !result.content.trim()) {
@@ -1166,6 +1399,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
     // coordinator authority
     resolveAdmission, readGrant, claimOperation, getOperation, acquireHold, admit, redeemStart,
     fenceStart, releaseHolds, recordDispatch, markUncertain, recordCancelIntent, recheckRelease, settle,
+    validateBinding,
     // issuer + bound-job transport primitives (L2)
     issueAdmission, enqueueJob, leaseNextJob, completeJob, readJob,
   };

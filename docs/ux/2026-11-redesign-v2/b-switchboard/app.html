@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIPSTER control panel (prototype B, Switchboard)</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="app">
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="brand-cell">
+      <a class="brand" href="index.html" aria-label="AIPSTER home"><picture><source srcset="../../../../website/public/assets/aipster-wordmark.svg" media="(prefers-color-scheme: light)"><img src="../../../../website/public/assets/aipster-wordmark-on-dark.svg" alt="" width="144" height="33"></picture></a>
+      <span class="tag">control panel</span>
+    </div>
+    <button class="jump" type="button" aria-label="Jump to a section"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg><span>Jump to…</span><kbd>⌘K</kbd></button>
+    <div class="session">
+      <span class="who">Demo explorer (demo)</span>
+      <button class="btn btn-s" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <div class="shell">
+    <nav class="rail" data-scroll-x role="tablist" aria-label="Dashboard sections" aria-orientation="vertical">
+      <div class="rail-group" role="presentation">
+        <span>Workspace</span>
+        <button role="tab" aria-selected="true" data-tab="overview"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>Overview</button>
+        <button role="tab" aria-selected="false" data-tab="compute"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1"/><path d="M6 1.5v2.5M10 1.5v2.5M6 12v2.5M10 12v2.5M1.5 6h2.5M1.5 10h2.5M12 6h2.5M12 10h2.5"/></svg>My Compute<span class="count">1</span></button>
+        <button role="tab" aria-selected="false" data-tab="shared"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 9.5V13h12V9.5M8 2v7.5M5 6.5l3 3 3-3"/></svg>Shared With Me<span class="count">0</span></button>
+        <button role="tab" aria-selected="false" data-tab="sharing"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="4" cy="8" r="2"/><circle cx="12" cy="3.5" r="2"/><circle cx="12" cy="12.5" r="2"/><path d="m5.8 7 4.4-2.5M5.8 9l4.4 2.5"/></svg>Sharing</button>
+      </div>
+      <div class="rail-group" role="presentation">
+        <span>Models and fabric</span>
+        <button role="tab" aria-selected="false" data-tab="models"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5zM2 5l6 3.5L14 5M8 8.5v6"/></svg>Models</button>
+        <button role="tab" aria-selected="false" data-tab="federation"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="3.5" cy="8" r="2"/><circle cx="12.5" cy="8" r="2"/><path d="M5.5 8h5" stroke-dasharray="1.5 1.5"/></svg>Federation</button>
+      </div>
+      <div class="rail-group" role="presentation">
+        <span>Access and account</span>
+        <button role="tab" aria-selected="false" data-tab="keys"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="5" cy="8" r="3"/><path d="M8 8h6.5M12 8v2.5M14 8v2"/></svg>API Keys</button>
+        <button role="tab" aria-selected="false" data-tab="usage"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 14h12M4 11V8M8 11V4M12 11V6.5"/></svg>Usage</button>
+        <button role="tab" aria-selected="false" data-tab="advice"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 3h11v7.5H7L4 13v-2.5H2.5z"/></svg>Advice</button>
+        <button role="tab" aria-selected="false" data-tab="settings"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7"/><circle cx="10.5" cy="4.5" r="1.5"/><circle cx="5.5" cy="11.5" r="1.5"/></svg>Settings</button>
+      </div>
+      <div class="rail-foot">
+        <p><span class="chip chip-demo">DEMO</span> Isolated demo workspace</p>
+        <p>Simulated data. Grants, sharing and live actions are disabled.</p>
+      </div>
+    </nav>
+
+    <main id="main" class="main">
+      <section class="page" role="tabpanel" aria-labelledby="ov-title">
+        <div class="page-head">
+          <div>
+            <h1 id="ov-title">Overview</h1>
+            <p>Read-only snapshot of your resources, fabric and usage.</p>
+          </div>
+          <div class="snap"><span class="chip">snapshot</span><time class="muted" datetime="2026-11-03T20:22:18.592Z">2026-11-03T20:22:18.592Z</time></div>
+        </div>
+
+        <div class="demo-banner" role="status"><strong>Demo workspace</strong> Simulated data, clearly labelled. Grants, sharing and live actions are disabled for this account.</div>
+
+        <dl class="kpis kpis-app" aria-label="Fabric summary">
+          <div class="kpi"><dt>Resources</dt><dd>1</dd><small>0 online, 0 stale, 1 offline, 0 unknown</small></div>
+          <div class="kpi"><dt>Reachable</dt><dd>0</dd><small>heartbeat freshness, not readiness</small></div>
+          <div class="kpi"><dt>Shared with me</dt><dd>0</dd><small>active grants</small></div>
+          <div class="kpi"><dt>Requests</dt><dd>12</dd><small>cumulative</small></div>
+          <div class="kpi"><dt>Tokens</dt><dd>2,300</dd><small>900 in, 1,400 out, cumulative</small></div>
+          <div class="kpi"><dt>Measured rate</dt><dd class="hatch"><span>Not measured</span></dd><small>no tok/s exist in this build</small></div>
+        </dl>
+
+        <div class="page-col">
+          <section class="panel" id="fabric-flow-panel" aria-labelledby="fabric-flow-h">
+            <div class="panel-head"><h2 id="fabric-flow-h">Fabric flow</h2><p>Heartbeat freshness, not inference readiness.</p></div>
+            <div class="panel-body">
+              <div class="bay" role="group" aria-label="Fabric flow: the browser session reads the AIPSTER API, which reports worker resources from heartbeats. Request and result lanes are architectural, not live connections.">
+                <div class="bay-map">
+                  <div class="stage"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="10" rx="1.5"/><path d="M1.5 5.5h13"/></svg><b>Browser session</b><small>signed-in owner, read-only view</small></div>
+                  <div class="lane" aria-hidden="true"><span>Request</span></div>
+                  <div class="stage"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/></svg><b>AIPSTER API</b><small>status, inventory and usage reads</small></div>
+                  <div class="lane" aria-hidden="true"><span>Request to node</span></div>
+                  <ul class="nodes">
+                    <li class="node is-selected">
+                      <div class="node-head"><strong>Demo inference node (simulated)</strong><span class="st st-offline">offline</span></div>
+                      <div class="node-meta"><span class="mono">r_demo_1</span><span>local</span><span class="chip chip-demo">DEMO</span></div>
+                      <dl class="node-facts"><div><dt>CPU</dt><dd>demo cpu</dd></div><div><dt>GPU</dt><dd>none</dd></div><div><dt>Last seen</dt><dd>never</dd></div></dl>
+                      <p class="node-note">Not currently reachable. Capabilities (declared): <span class="chip">demo-echo</span></p>
+                    </li>
+                    <li class="node-group">
+                      <p>Prototype fixture rows (shapes from the site’s tests), not demo data. They do not change any count on this page.</p>
+                      <ul class="nodes">
+                        <li class="node">
+                          <div class="node-head"><strong>lab</strong><span class="st st-online">online</span></div>
+                          <div class="node-meta"><span class="mono">r_1</span><span>local</span><span>home lab</span></div>
+                          <dl class="node-facts"><div><dt>CPU</dt><dd>16-core x86</dd></div><div><dt>GPU</dt><dd>none recorded</dd></div><div><dt>Last seen</dt><dd>1s ago</dd></div></dl>
+                          <p class="node-note">Heartbeat seen (reachability only, not ready to run).</p>
+                        </li>
+                        <li class="node">
+                          <div class="node-head"><strong>lab</strong><span class="st st-stale">stale</span></div>
+                          <div class="node-meta"><span class="mono">r_st</span><span>local</span></div>
+                          <dl class="node-facts"><div><dt>CPU</dt><dd><span class="hatch hatch-inline"><span>not reported</span></span></dd></div><div><dt>Last seen</dt><dd>10m ago</dd></div></dl>
+                          <p class="node-note">Not currently reachable.</p>
+                        </li>
+                        <li class="node">
+                          <div class="node-head"><strong>lab</strong><span class="st st-unknown">unknown</span></div>
+                          <div class="node-meta"><span class="mono">r_un</span><span>local</span></div>
+                          <dl class="node-facts"><div><dt>CPU</dt><dd><span class="hatch hatch-inline"><span>not reported</span></span></dd></div><div><dt>Last seen</dt><dd>never</dd></div></dl>
+                          <p class="node-note">Not currently reachable.</p>
+                        </li>
+                      </ul>
+                    </li>
+                  </ul>
+                </div>
+                <div class="returns">
+                  <span><i class="sw-heartbeat"></i>Heartbeat returns: reachability only (none seen)</span>
+                  <span><i class="sw-result"></i>Result returns: usage totals only</span>
+                  <span><i></i>Request lanes: architectural, dispatch availability unverified here</span>
+                </div>
+              </div>
+              <div class="fabric-foot">
+                <div class="legend" aria-label="Legend">
+                  <span><i></i>Request (architectural)</span>
+                  <span><i class="sw-heartbeat"></i>Heartbeat</span>
+                  <span><i class="sw-result"></i>Result (architectural: usage totals only)</span>
+                  <span><i class="sw-unsupported"></i>Resident, cached, unprovisioned (unsupported)</span>
+                </div>
+                <p class="note">Online means a fresh heartbeat, stale an older one, unknown a flag without heartbeat, offline not flagged. <strong>Demo data:</strong> simulated fixture, not a live node. This panel does not update until Overview reloads.</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="res-h">
+            <div class="panel-head"><h2 id="res-h">Resources</h2><p>1 resource, 0 shared with me</p></div>
+            <div class="table-wrap" data-scroll-x tabindex="0" role="region" aria-label="Resources table">
+              <table class="tbl">
+                <thead><tr><th scope="col">Name</th><th scope="col">ID</th><th scope="col">Kind</th><th scope="col">State</th><th scope="col">Last seen</th><th scope="col">CPU</th><th scope="col">GPU</th><th scope="col">Capabilities</th></tr></thead>
+                <tbody>
+                  <tr class="is-selected" aria-selected="true"><th scope="row"><a class="row-link" href="#inspector">Demo inference node (simulated)</a></th><td class="mono">r_demo_1</td><td>local</td><td><span class="st st-offline">offline</span></td><td class="mono">never</td><td class="mono">demo cpu</td><td class="mono">none</td><td><span class="chip">demo-echo</span></td></tr>
+                  <tr class="group"><th colspan="8" scope="colgroup">Prototype fixture rows (shapes from the site’s tests), not demo data</th></tr>
+                  <tr><th scope="row">lab</th><td class="mono">r_1</td><td>local</td><td><span class="st st-online">online</span></td><td class="mono">1s ago</td><td class="mono">16-core x86</td><td class="mono">none recorded</td><td><span class="chip">text</span></td></tr>
+                  <tr><th scope="row">lab</th><td class="mono">r_st</td><td>local</td><td><span class="st st-stale">stale</span></td><td class="mono">10m ago</td><td><em class="nr">not reported</em></td><td><em class="nr">not reported</em></td><td><em class="nr">none recorded</em></td></tr>
+                  <tr><th scope="row">lab</th><td class="mono">r_un</td><td>local</td><td><span class="st st-unknown">unknown</span></td><td class="mono">never</td><td><em class="nr">not reported</em></td><td><em class="nr">not reported</em></td><td><em class="nr">none recorded</em></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="panel-foot"><p class="note">Worker heartbeats prove reachability only, never inference acceptance. Nothing here means ready to run.</p></div>
+          </section>
+
+          <section class="panel" id="fabric-throughput-panel" aria-labelledby="tp-h">
+            <div class="panel-head"><h2 id="tp-h">Fabric throughput</h2><span class="pill pill-bad">measured rate: unavailable</span></div>
+            <div class="panel-body">
+              <div class="bench-plot" role="img" aria-label="Generation rate: not measured. No tokens-per-second scale exists in this build.">
+                <div class="axis" aria-hidden="true"><span>0</span><span>tok/s scale unavailable</span></div>
+                <div class="hatch"><span>Not measured</span></div>
+              </div>
+              <dl class="totals">
+                <div><dt>Requests (cumulative)</dt><dd>12</dd></div>
+                <div><dt>Tokens in / out (cumulative, not a rate)</dt><dd>900 / 1400</dd></div>
+                <div><dt>Model cost</dt><dd><span class="hatch hatch-inline"><span>unknown (unmeasured)</span></span></dd></div>
+                <div><dt>Execution cost</dt><dd><span class="hatch hatch-inline"><span>unknown (unmeasured)</span></span></dd></div>
+                <div><dt>Coverage</dt><dd>totals cover all 1 rows</dd></div>
+              </dl>
+              <p class="note">Throughput unavailable: no measured tokens/sec exist in this build. Unmeasured values stay unknown, never zero.</p>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="jumps-h">
+            <div class="panel-head"><h2 id="jumps-h">Sections</h2></div>
+            <div class="jumps">
+              <div><h3>My resources</h3><p>1 total · 0 reachable</p></div>
+              <div><h3>Shared with me</h3><p>0 active grant(s)</p></div>
+              <div><h3>Usage</h3><p>12 requests · 2300 tokens</p></div>
+              <div><h3>Models &amp; adapters</h3><p>0 private · 0 active deployment(s)</p><button class="btn btn-s" type="button" data-goto="models">Browse catalog</button></div>
+            </div>
+            <div class="panel-foot"><p class="note"><strong>Demo data:</strong> simulated fixtures for exploration. Grants and live actions are disabled. Inference dispatch needs a deployment flag this view does not verify.</p></div>
+          </section>
+
+          <section class="panel exp" id="experiments-panel" aria-labelledby="experiments-h">
+            <div class="panel-head"><h2 id="experiments-h">Experiments</h2><span class="chip">admin only</span></div>
+            <div class="panel-body">
+              <p class="note">Shadow-only prototypes, kept separate from the dashboard and labelled where they run.</p>
+              <p><a href="../../../../website/public/app/experiments/dsh-dgm/index.html">Open the admin-only DSH × DGM experiment</a></p>
+              <p class="note">Administrator access required: the page asks the server’s administration gate for authorization, so an ordinary or demo account sees a denial instead of the interactive view. Experimental: synthetic fixtures, shadow-only, no model calls, no applied changes.</p>
+            </div>
+          </section>
+        </div>
+
+        <aside class="inspector" id="inspector" aria-labelledby="insp-h">
+          <section class="panel">
+            <div class="panel-body insp-title">
+              <span class="st st-offline">offline</span>
+              <h2 id="insp-h">Demo inference node (simulated)</h2>
+              <p class="note">Not currently reachable. Last seen never.</p>
+            </div>
+            <div class="panel-body insp-section">
+              <dl class="facts">
+                <dt>ID</dt><dd>r_demo_1</dd>
+                <dt>Kind</dt><dd>local</dd>
+                <dt>Workspace</dt><dd>DEMO</dd>
+                <dt>CPU</dt><dd>demo cpu</dd>
+                <dt>GPU</dt><dd>none</dd>
+                <dt>Heartbeat</dt><dd>never, offline</dd>
+                <dt>Capabilities</dt><dd>demo-echo (declared)</dd>
+              </dl>
+            </div>
+          </section>
+          <section class="panel" aria-labelledby="insp-m-h">
+            <div class="panel-head"><h2 id="insp-m-h">Measurements</h2><p>none in contract</p></div>
+            <div class="panel-body">
+              <div class="meter"><div class="meter-head"><span>CPU load</span><span>not reported</span></div><div class="hatch"></div><small class="muted">Heartbeats carry no load numbers.</small></div>
+              <div class="meter"><div class="meter-head"><span>Memory</span><span>not reported</span></div><div class="hatch"></div><small class="muted">No memory readings in contract.</small></div>
+              <div class="meter"><div class="meter-head"><span>Generation rate</span><span>not measured</span></div><div class="hatch"></div><small class="muted">No measured tok/s exist in this build.</small></div>
+              <div class="meter"><div class="meter-head"><span>Accelerator</span><span>unavailable</span></div><div class="hatch"></div><small class="muted">No accelerator inventory.</small></div>
+              <div class="meter"><div class="meter-head"><span>Runtime, latency, prompt</span><span>unavailable</span></div><div class="hatch"></div><small class="muted">No runtime telemetry in contract.</small></div>
+              <p class="note">Memory, runtime and resident model: not reported. Models: not reported.</p>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

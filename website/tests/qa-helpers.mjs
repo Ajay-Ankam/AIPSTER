@@ -53,8 +53,8 @@ async function connectPair(t) {
   return { nodeA: regA.json, nodeB: regB.json, conn: acc.json };
 }
 
-async function commitFlow(t, connId, resourceIds = ['r_gpu1']) {
-  const prev = await readJson(await t.call('/v1/fabric/previews', { method: 'POST', headers: S(t, t.alice, { 'Idempotency-Key': freshKey() }), body: { connectionId: connId, resourceIds, consumers: ['bob-op'], models: ['llama'], maxTokens: 1000, maxRequests: 10 } }));
+async function commitFlow(t, connId, resourceIds = ['r_gpu1'], consumers = ['bob-op']) {
+  const prev = await readJson(await t.call('/v1/fabric/previews', { method: 'POST', headers: S(t, t.alice, { 'Idempotency-Key': freshKey() }), body: { connectionId: connId, resourceIds, consumers, models: ['llama'], maxTokens: 1000, maxRequests: 10 } }));
   assert.equal(prev.status, 201);
   const appr = await readJson(await t.call('/v1/fabric/approvals', { method: 'POST', headers: S(t, t.alice, { 'Idempotency-Key': freshKey() }), body: { previewId: prev.json.id } }));
   assert.equal(appr.status, 201);

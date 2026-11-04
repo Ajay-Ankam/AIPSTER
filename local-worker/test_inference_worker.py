@@ -168,8 +168,9 @@ WORKER_RESULT_MAX_BYTES = 1024 * 1024                       # L20
 SUCCEEDED_ALLOWED = frozenset({                             # L48-49
     "request_id", "node_id", "runtime_id", "model_id", "runtime_instance",
     "model_fingerprint", "simulated", "content", "elapsed_ms", "usage", "cache",
-    "truncated",
+    "truncated", "finish_reason",
 })
+FINISH_REASONS = frozenset({"stop", "length", "content_filter"})
 FAILED_ALLOWED = frozenset({"reason", "detail", "elapsed_ms", "usage", "cache"})  # L63
 
 
@@ -195,6 +196,9 @@ def _valid_succeeded_result(result):                        # L46-59
     if result.get("simulated") is not False:                # L53
         return False
     if "truncated" in result and result["truncated"] is not False:  # L54
+        return False
+    if ("finish_reason" in result                        # FABRIC067 R3 delta
+            and result["finish_reason"] not in FINISH_REASONS):
         return False
     content = result.get("content")                         # L55
     if (not isinstance(content, str) or not content.strip()
@@ -457,7 +461,9 @@ class InferenceWorkerTests(unittest.TestCase):
         result = posted["body"]["result"]
         self.assertEqual(set(result), {"request_id", "node_id", "runtime_id", "model_id",
                                        "runtime_instance", "model_fingerprint", "simulated",
-                                       "content", "elapsed_ms", "usage", "cache"})
+                                       "content", "elapsed_ms", "usage", "cache",
+                                       "finish_reason"})
+        self.assertEqual(result["finish_reason"], "stop")
         self.assertEqual(result["request_id"], "job_1")
         self.assertEqual(result["node_id"], FAKE_RESOURCE)
         self.assertEqual(result["runtime_id"], "ganglion")
@@ -831,7 +837,9 @@ class InferenceWorkerTests(unittest.TestCase):
         self.assertEqual(succeeded["lease_id"], "lease-000001")
         self.assertEqual(set(succeeded["result"]), {
             "request_id", "node_id", "runtime_id", "model_id", "runtime_instance",
-            "model_fingerprint", "simulated", "content", "elapsed_ms", "usage", "cache"})
+            "model_fingerprint", "simulated", "content", "elapsed_ms", "usage", "cache",
+            "finish_reason"})
+        self.assertEqual(succeeded["result"]["finish_reason"], "stop")
         self.assertEqual(succeeded["result"]["runtime_instance"],
                          "ganglion-instance-0001")
         self.assertEqual(succeeded["result"]["model_fingerprint"],
@@ -926,6 +934,54 @@ class InferenceWorkerTests(unittest.TestCase):
         self.assertEqual(code, pairing.EXIT_OK, err)
         self.assertEqual(self.api.results[0]["body"]["result"]["reason"],
                          "GANGLION_INVALID_RESPONSE")
+
+    # -- FABRIC067 R3: finish-reason propagation -------------------------
+
+    def test_finish_stop_travels_into_the_posted_result(self):
+        self.api.leases = [lease()]
+        code, _, err = self.run_quiet(self.runner(), max_cycles=1)
+        self.assertEqual(code, pairing.EXIT_OK, err)
+        body = self.api.results[0]["body"]
+        self.assertEqual(body["status"], "succeeded")
+        self.assertEqual(body["result"]["finish_reason"], "stop")
+        self.assertIsNone(validate_worker_result_report(body))
+
+    def test_tool_calls_finish_is_refused_as_failure(self):
+        self.ganglion.completion_body = {
+            "object": "text_completion",
+            "choices": [{"index": 0, "text": "hello", "finish_reason": "tool_calls"}]}
+        self.api.leases = [lease()]
+        code, _, err = self.run_quiet(self.runner(), max_cycles=1)
+        self.assertEqual(code, pairing.EXIT_OK, err)
+        body = self.api.results[0]["body"]
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["result"]["reason"], "FINISH_UNSUPPORTED")
+        self.assertNotIn("content", body["result"])
+        self.assertNotIn("finish_reason", body["result"])
+
+    def test_non_string_finish_is_a_typed_failure_not_a_crash(self):
+        self.ganglion.completion_body = {
+            "object": "text_completion",
+            "choices": [{"index": 0, "text": "hello", "finish_reason": {"stop": True}}]}
+        self.api.leases = [lease()]
+        code, _, err = self.run_quiet(self.runner(), max_cycles=1)
+        self.assertEqual(code, pairing.EXIT_OK, err)
+        body = self.api.results[0]["body"]
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["result"]["reason"], "FINISH_UNSUPPORTED")
+        self.assertNotIn("finish_reason", body["result"])
+
+    def test_missing_finish_posts_the_legacy_shape(self):
+        self.ganglion.completion_body = {
+            "object": "text_completion",
+            "choices": [{"index": 0, "text": "hello"}]}
+        self.api.leases = [lease()]
+        code, _, err = self.run_quiet(self.runner(), max_cycles=1)
+        self.assertEqual(code, pairing.EXIT_OK, err)
+        body = self.api.results[0]["body"]
+        self.assertEqual(body["status"], "succeeded")
+        self.assertNotIn("finish_reason", body["result"])
+        self.assertIsNone(validate_worker_result_report(body))
         self.assertEqual(self.ganglion.hits["completions"], 1)
 
     def test_404_completions_falls_back_to_chat_once(self):
