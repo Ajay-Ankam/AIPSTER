@@ -47,6 +47,7 @@ import argparse
 import itertools
 import json
 import os
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
@@ -66,6 +67,9 @@ DEFAULT_MAX_TOKENS = 64
 BODY_MAX_BYTES = 256 * 1024
 RESPONSE_MAX_BYTES = 1024 * 1024
 TOKEN_MAX_CHARS = 1024
+# Caller idempotency keys travel end to end (proxy -> fabric route) so SDK
+# retries reconcile instead of redispatching. Same shape the route enforces.
+IDEMPOTENCY_KEY_RE_TEXT = r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}"
 ROLES = ("system", "user", "assistant", "tool")
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
@@ -191,17 +195,21 @@ def _opener():
     return build_opener(ProxyHandler({}), _RefuseRedirect())
 
 
-def forward_to_fabric(origin, path, bearer, payload_bytes, timeout):
+def forward_to_fabric(origin, path, bearer, payload_bytes, timeout, idempotency_key=None):
     """Exchange with ONE fixed fabric path. Returns (status, body_bytes).
 
     Any HTTP response (including 3xx/4xx/5xx) is returned unfolded for the
-    caller to map; redirects are never followed. Raises OSError only on
-    transport failure (timeout, refused, reset), which the caller treats as
-    an UNCERTAIN outcome, never as proof of non-dispatch.
+    caller to map; redirects are never followed. Non-2xx statuses relay
+    unchanged so SDKs raise typed errors instead of parsing receipts as
+    completions. Raises OSError only on transport failure (timeout, refused,
+    reset), which the caller treats as an UNCERTAIN outcome, never as proof
+    of non-dispatch.
     """
     url = origin + path
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + bearer,
                "User-Agent": "aipster-fabric-openai-proxy/1"}
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
     req = Request(url, data=payload_bytes, headers=headers, method="POST" if payload_bytes is not None else "GET")
     try:
         with _opener().open(req, timeout=timeout) as resp:
@@ -335,9 +343,10 @@ class FabricOpenAIProxyHandler(BaseHTTPRequestHandler):
                 return None
         return bearer
 
-    def _relay(self, bearer, path, payload_bytes, route):
+    def _relay(self, bearer, path, payload_bytes, route, idempotency_key=None):
         try:
-            status, data = forward_to_fabric(self.fabric_origin, path, bearer, payload_bytes, self.timeout)
+            status, data = forward_to_fabric(self.fabric_origin, path, bearer, payload_bytes,
+                                             self.timeout, idempotency_key=idempotency_key)
         except OSError:
             # Transport failure, possibly AFTER the POST was sent: the outcome
             # is uncertain. Never auto-retried, never claimed undispatched.
@@ -403,9 +412,17 @@ class FabricOpenAIProxyHandler(BaseHTTPRequestHandler):
         if not ok:
             self._send_json(value["http"], openai_error(value["http"], value["code"], value["message"]), route)
             return
+        # Caller idempotency keys travel end to end so SDK retries reconcile
+        # instead of redispatching. A supplied malformed key is refused here,
+        # matching the route contract; an absent key is simply not forwarded.
+        idem = self.headers.get("Idempotency-Key")
+        if idem is not None and not re.fullmatch(IDEMPOTENCY_KEY_RE_TEXT, idem):
+            self._send_json(400, openai_error(400, "invalid_request",
+                                             "Idempotency-Key must match [A-Za-z0-9][A-Za-z0-9._:-]{7,127}."), route)
+            return
         payload = json.dumps({"model": value["model"], "messages": value["messages"],
                               "max_tokens": value["max_tokens"]}).encode("utf-8")
-        self._relay(bearer, FABRIC_CHAT_PATH, payload, route)
+        self._relay(bearer, FABRIC_CHAT_PATH, payload, route, idempotency_key=idem)
 
 
 def _bounded_upstream_error(data):

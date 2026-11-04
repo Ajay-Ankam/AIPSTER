@@ -93,16 +93,91 @@ gated on controller budget/target reconciliation. No generation ran this turn.
 monitor / #84 hold unchanged. WEB066 applies the idle contract; controller
 owns deployment + budget reconciliation + the e2e go-ahead.
 
-## 9. Commit
+## 9. Commits (this packet is the durable evidence log)
 
-Files: `website/src/inference/fabric-openai.mjs`,
+- `1bb6a47` — initial adapter + proxy + focused tests (evidence: sections 6-7).
+- `224d5c5` — R1 HOLD work: caller contract, redirect refusal, bounded logs,
+  honest errors, stream:false, single-message honesty, first route handler
+  (evidence: section 10, now marked pending per R2 correction above).
+- R2 commit (this turn) — see section 11.
+
+## 11. R2 HOLD work (concrete R2 on 224d5c5; status: PENDING independent result)
+
+All three reproduced failures are fixed against the probe's own fixture
+setup, plus the readiness contract R2 requires. Prior sections are preserved
+verbatim; nothing below rewrites them.
+
+1. Release-authority bypass — `mapSettled` (route module) now honors the
+   coordinator's own withheld decision AND rechecks CURRENT authority via
+   `store.recheckRelease({op_id, generation})` on every surfacing (initial,
+   status, settled replay, conflict-reconcile, post-revocation). Refused or
+   unreadable authority withholds with reasons; withheld content never
+   escapes. Regression: fixture `recheckRelease` forced to
+   `{ok:false, reason:'synthetic_release_refused'}` yields 503
+   `release_withheld` on both chat and status paths.
+2. Idempotency — the key is looked up BEFORE any placement or admission. A
+   recorded key allocates nothing: same payload reconciles read-only to the
+   recorded operation (reusing the recorded deadline so retries match the
+   digest); changed payload keeps 409 `IDEMPOTENCY_CONFLICT`. Supplied
+   malformed keys are 400 (absent keys are server-generated for keyless
+   clients); the proxy forwards valid caller `Idempotency-Key` end to end
+   and 400s malformed ones. Unknown outcomes reconcile via the documented
+   `GET /v1/operations/<key>` status route (exact insertion in the
+   contract). Budget expiry answers 409 `operation_in_progress` with
+   op/job correlation, `status_route`, and `automatic_retry: false` — no
+   202 is ever emitted, so no SDK can parse a receipt as a completion.
+3. Readiness contract — NEW `local-worker/model_readiness.py` builds typed
+   per-runtime model evidence from the loopback upstream list (no ambient
+   authority, no non-loopback, no foreign runtimes); NEW
+   `website/src/inference/model-readiness.mjs` strictly validates
+   worker-origin evidence (server-stamped freshness, allowlisted runtimes,
+   explicit MODEL_NOT_ADVERTISED exclusion, deterministic auto pick, no
+   invented capacity or GPU). The route selects ONLY from that evidence:
+   `not-advertised` is 404 before issuance with zero admissions. Owner call
+   site for `pairing.py` (attach ready-pairs into `runtimes[].models`) is in
+   the contract with the intake-compatibility proof (unknown runtime keys
+   already persist; zero worker.js change needed for transport). Managed
+   runtimes report no models yet — stated gap, not silent mapping.
+   Execution runner needs no owned change: `inference_worker.py:861-869`
+   already refuses unlisted models pre-completion (precise citation).
+
+Real-store proof — `website/tests/fabric-openai-d1-integration067.test.mjs`
+(6 tests, green): REAL disposable D1 store (repo migrations over
+node:sqlite) + REAL route with the DEFAULT candidate loader + a fixture
+worker that leases and completes clearly labeled synthetic jobs (no model
+call, no network). Two owner nodes with different resident models/runtimes
+(auto picks freshest, explicit picks evidencing node), stale/unready never
+win, unknown model excluded pre-admission, wrong owner dispatches nothing,
+and post-settle ownership transfer withholds on the status path via the real
+`recheckRelease`.
+
+Test evidence this turn (all observed, synthetic local only): website
+adapter 34/34, readiness 13/13, route 19/19, D1 integration 6/6; proxy
+16/16, worker helper 6/6. `worker.js`, `pairing.py`, `inference_worker.py`,
+native packaging/icons/controllers untouched; no DDL applied, no grants,
+keys, credentials, installs, pushes, or production changes.
+
+Files owned this turn: `website/src/inference/fabric-openai.mjs`,
+`website/src/inference/model-readiness.mjs`,
+`website/src/inference/fabric-openai-route.mjs`,
 `local-worker/fabric_openai_proxy.py`,
+`local-worker/model_readiness.py`,
 `website/tests/fabric-openai067.test.mjs`,
+`website/tests/model-readiness067.test.mjs`,
+`website/tests/fabric-openai-route067.test.mjs`,
+`website/tests/fabric-openai-d1-integration067.test.mjs`,
 `local-worker/test_fabric_openai_proxy.py`,
+`local-worker/test_model_readiness.py`,
 `docs/fabric-openai067-integration-contract.md`,
 `docs/fabric-openai067-e2e-plan.md`, this packet.
 
-## 10. HOLD resolution (independent review, head 1bb6a47 preserved)
+## 10. R1 HOLD work (independent review, head 1bb6a47 preserved) — intermediately superseded
+
+CORRECTION (R2): this section's "resolved" claims are corrected to PENDING
+independent result. The proxy corrections below were accepted as meaningful;
+three handler failures remained and are fixed in section 11. The suite output
+in sections 6-7 is preserved verbatim as the evidence for candidate
+`1bb6a47` and was not rewritten.
 
 All six reproduced defects are fixed and regression-tested; the suite output
 above (sections 6-7) is retained as the evidence for candidate `1bb6a47` and

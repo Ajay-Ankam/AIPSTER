@@ -15,15 +15,21 @@ functional wiring but production holds remain.
 4. `serve-jobs` is explicitly operator-started on the chosen worker host with
    its resident upstream listing the target model on `/v1/models`.
 5. Local proxy running: `python fabric_openai_proxy.py --fabric-origin
-   <staging-origin> --port 8089` with `AIPSTER_FABRIC_API_KEY` set to the
-   existing per-user inference key (heartbeat key never qualifies).
+   <staging-origin> --port 8089`. The caller sends its existing per-user
+   inference key in the `Authorization` header (heartbeat key never
+   qualifies; the proxy holds no ambient credential).
 
 ## The single request (<=64 output tokens, <=60 s)
 
+Send a caller idempotency key (the proxy forwards `Idempotency-Key` end to
+end; retries reconcile instead of redispatching). A pending outcome is HTTP
+409 `operation_in_progress` with `status_route`, never a 202 and never a
+completion: reconcile it read-only via that route; never resubmit.
+
 ```powershell
-$env:AIPSTER_FABRIC_API_KEY = '<existing-user-key>'  # never logged
+$headers = @{ 'Idempotency-Key' = '<client-generated-key>'; 'Authorization' = 'Bearer <existing-user-key>' }
 Invoke-WebRequest -Uri 'http://127.0.0.1:8089/v1/chat/completions' -Method POST `
-  -ContentType 'application/json' -TimeoutSec 60 `
+  -ContentType 'application/json' -Headers $headers -TimeoutSec 60 `
   -Body '{"model":"auto","messages":[{"role":"user","content":"Reply with exactly: fabric-ok"}],"max_tokens":64}'
 ```
 

@@ -61,7 +61,8 @@ class FixtureFabricHandler(BaseHTTPRequestHandler):
     def _record(self, extra=None):
         FixtureFabricHandler.seen.append({
             "method": self.command, "path": self.path,
-            "authorization": self.headers.get("Authorization"), "extra": extra,
+            "authorization": self.headers.get("Authorization"),
+            "idempotency_key": self.headers.get("Idempotency-Key"), "extra": extra,
         })
 
     def do_GET(self):  # noqa: N802
@@ -277,6 +278,21 @@ class ProxyCase(unittest.TestCase):
             status, _ = raw_request(self.port, "GET", "/v1/models", headers=authed())
         self.assertEqual(status, 200)
         self.assertEqual(FixtureFabricHandler.seen[-1]["authorization"], "Bearer " + CALLER_KEY)
+
+    def test_caller_idempotency_key_forwarded_verbatim_or_refused(self):
+        status, _ = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}]},
+                              authed({"Idempotency-Key": "caller-key-00000001"}))
+        self.assertEqual(status, 200)
+        self.assertEqual(FixtureFabricHandler.seen[-1]["idempotency_key"], "caller-key-00000001")
+        n = len(FixtureFabricHandler.seen)
+        status, out = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}]},
+                                authed({"Idempotency-Key": "bad key!"}))
+        self.assertEqual(status, 400)
+        self.assertEqual(len(FixtureFabricHandler.seen), n)
+        status, _ = self.chat({"model": "auto", "messages": [{"role": "user", "content": "x"}]},
+                              authed())
+        self.assertEqual(status, 200)
+        self.assertIsNone(FixtureFabricHandler.seen[-1]["idempotency_key"])
 
     # -- defect 5: stream:false accepted ---------------------------------------
     def test_stream_false_accepted_and_stream_true_refused_before_forward(self):
