@@ -4,6 +4,22 @@
 // missing field is shown as unknown, never as zero or healthy.
 'use strict';
 
+// Presentation only: a status line keeps its exact text and gains a data-tone
+// the stylesheet uses to draw it (busy, read, gap, denied or failed).
+function stateTone(text) {
+  if (/…$/.test(text)) return 'busy';
+  if (/(AUTH_REQUIRED|ADMIN_FORBIDDEN)/.test(text)) return 'denied';
+  if (/HTTP \d|request failed|^(Refused|Quarantined|Outcome unknown|Cancelled)/.test(text)) return 'error';
+  if (/^(Unavailable|state: (?!available\b))/.test(text)) return 'gap';
+  if (/^(Authorized|Loaded|Created|Delivered|Attached|Reconciled|Replayed|Ready|state: available)/.test(text)) return 'ok';
+  return 'idle';
+}
+
+function paintState(el, text) {
+  el.textContent = text;
+  if (el.setAttribute) el.setAttribute('data-tone', stateTone(text));
+}
+
 function paintAuthButtons(authorized) {
   const signin = document.getElementById('signin-github');
   const signout = document.getElementById('signout');
@@ -18,18 +34,18 @@ async function loadStatus() {
     const res = await fetch('/api/admin/v1/status', { credentials: 'same-origin' });
     const body = await res.json().catch(() => null);
     if (res.ok && body && body.grant) {
-      grant.textContent = 'Authorized as ' + body.grant.role + ' (scope ' + body.grant.scope + '). '
-        + 'Elevation: ' + (body.elevation || 'unknown') + '. Mutations: ' + (body.mutations || 'unknown') + '.';
+      paintState(grant, 'Authorized as ' + body.grant.role + ' (scope ' + body.grant.scope + '). '
+        + 'Elevation: ' + (body.elevation || 'unknown') + '. Mutations: ' + (body.mutations || 'unknown') + '.');
       paintAuthButtons(true);
     } else if (body && body.code) {
-      grant.textContent = 'Not authorized (' + body.code + '). Sign in with an administration grant.';
+      paintState(grant, 'Not authorized (' + body.code + '). Sign in with an administration grant.');
       paintAuthButtons(false);
     } else {
-      grant.textContent = 'Authorization unknown (HTTP ' + res.status + ').';
+      paintState(grant, 'Authorization unknown (HTTP ' + res.status + ').');
       paintAuthButtons(false);
     }
   } catch {
-    grant.textContent = 'Authorization unknown (request failed).';
+    paintState(grant, 'Authorization unknown (request failed).');
     paintAuthButtons(false);
   }
 }
@@ -52,7 +68,7 @@ async function signInWithGitHub() {
     if (!res.ok || !url) throw new Error('Sign-in did not return a redirect.');
     if (typeof location !== 'undefined') location.assign(url);
   } catch {
-    grant.textContent = 'Sign-in failed (request failed).';
+    paintState(grant, 'Sign-in failed (request failed).');
   }
 }
 
@@ -63,7 +79,7 @@ async function signOut() {
       method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}',
     });
   } catch {
-    grant.textContent = 'Sign-out failed (request failed).';
+    paintState(grant, 'Sign-out failed (request failed).');
     return;
   }
   loadStatus();
@@ -85,11 +101,11 @@ function enterDemo() {
   const box = document.getElementById('demo-result');
   const exit = document.getElementById('demo-exit');
   const rows = DEMO_USERS.map((it) =>
-    '<tr><td>' + esc(it.id) + '</td><td>' + esc(it.name) + '</td><td>' + esc(it.email)
-    + '</td><td>' + esc(it.provider) + '</td><td>' + esc(it.status) + '</td><td>' + esc(it.tenant)
-    + '</td><td>not applicable (demo)</td><td>' + unknown(it.keys_active) + '</td></tr>').join('');
-  box.innerHTML = '<p class="banner">Synthetic demo — fixture data only. No real users, no privileges, no live requests.</p>'
-    + '<table><tr><th>id</th><th>name</th><th>email</th><th>provider</th><th>status</th><th>tenant</th><th>admin roles</th><th>keys</th></tr>' + rows + '</table>';
+    '<tr><td class="id">' + esc(it.id) + '</td><td>' + esc(it.name) + '</td><td>' + esc(it.email)
+    + '</td><td>' + esc(it.provider) + '</td><td>' + statusPill(it.status) + '</td><td>' + esc(it.tenant)
+    + '</td><td class="nr">not applicable (demo)</td><td class="num">' + unknown(it.keys_active) + '</td></tr>').join('');
+  box.innerHTML = '<p class="banner banner-demo">Synthetic demo — fixture data only. No real users, no privileges, no live requests.</p>'
+    + '<table class="tbl"><thead><tr><th>id</th><th>name</th><th>email</th><th>provider</th><th>status</th><th>tenant</th><th>admin roles</th><th>keys</th></tr></thead><tbody>' + rows + '</tbody></table>';
   if (exit) exit.hidden = false;
 }
 
@@ -102,7 +118,7 @@ function exitDemo() {
 
 async function loadSection(section, endpoint) {
   const state = section.querySelector('.state');
-  state.textContent = 'Loading…';
+  paintState(state, 'Loading…');
   try {
     const res = await fetch(endpoint, { credentials: 'same-origin' });
     const body = await res.json().catch(() => null);
@@ -111,14 +127,14 @@ async function loadSection(section, endpoint) {
       if (body.reason_code) parts.push('reason: ' + body.reason_code);
       if (body.metric) parts.push('metric: ' + body.metric);
       if (Array.isArray(body.items)) parts.push('items: ' + body.items.length + ' (total ' + (body.total === null ? 'unknown' : body.total) + ')');
-      state.textContent = parts.join(', ') + '.';
+      paintState(state, parts.join(', ') + '.');
     } else if (body && body.code) {
-      state.textContent = 'Unavailable: ' + body.code + ' (HTTP ' + res.status + ').';
+      paintState(state, 'Unavailable: ' + body.code + ' (HTTP ' + res.status + ').');
     } else {
-      state.textContent = 'Unavailable: HTTP ' + res.status + '.';
+      paintState(state, 'Unavailable: HTTP ' + res.status + '.');
     }
   } catch {
-    state.textContent = 'Unavailable: request failed.';
+    paintState(state, 'Unavailable: request failed.');
   }
 }
 
@@ -154,6 +170,13 @@ loadStatus();
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const unknown = (v) => (v === null || v === undefined ? 'unknown' : String(v));
+// Presentation helpers: a decorative state shape (the text beside it stays the
+// source of truth) and hatched unknown counts, never drawn as zero.
+const MARKS = { online: 'online', stale: 'stale', offline: 'offline', unknown: 'unknown' };
+const mark = (state) => '<span class="mark mark-' + (MARKS[state] || 'unknown') + '" aria-hidden="true"></span>';
+const count = (v) => (v === null || v === undefined ? '<span class="hatch-inline"><span>unknown</span></span>' : esc(v));
+const PILLS = { active: 'ok', suspended: 'bad', expired: 'muted', pass: 'ok', fail: 'bad' };
+const statusPill = (s) => '<span class="pill pill-' + (PILLS[s] || 'muted') + '">' + esc(s) + '</span>';
 
 function requestFailure(body, status) {
   if (body && body.code) return body.code + ' (HTTP ' + status + ')';
@@ -167,7 +190,7 @@ async function loadOverview() {
   const section = document.getElementById('overview');
   const state = section.querySelector('.state');
   const box = document.getElementById('overview-result');
-  state.textContent = 'Loading…';
+  paintState(state, 'Loading…');
   box.textContent = '';
   try {
     const res = await fetch('/api/admin/v1/overview', { credentials: 'same-origin' });
@@ -175,21 +198,22 @@ async function loadOverview() {
     const body = await res.json().catch(() => null);
     if (mySeq !== overviewSeq) return;
     if (!res.ok || !body) {
-      state.textContent = 'Unavailable: ' + requestFailure(body, res.status) + '.';
+      paintState(state, 'Unavailable: ' + requestFailure(body, res.status) + '.');
       return;
     }
     if (body.state !== 'available' || !body.resources) {
-      state.textContent = 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').';
+      paintState(state, 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').');
       return;
     }
-    state.textContent = 'Loaded ' + unknown(body.observed_at) + '.';
+    paintState(state, 'Loaded ' + unknown(body.observed_at) + '.');
     const r = body.resources;
-    box.innerHTML = '<table>'
-      + '<tr><th>resources total</th><td>' + unknown(r.total) + '</td></tr>'
-      + '<tr><th>online</th><td>' + unknown(r.online) + '</td></tr>'
-      + '<tr><th>stale</th><td>' + unknown(r.stale) + '</td></tr>'
-      + '<tr><th>offline</th><td>' + unknown(r.offline) + '</td></tr>'
-      + '<tr><th>unknown</th><td>' + unknown(r.unknown) + '</td></tr>'
+    box.innerHTML = '<table class="kpi-table"><caption class="sr">Resource counts</caption>'
+      + '<tr><th>resources total</th><td>' + count(r.total) + '</td></tr>'
+      + '<tr><th>' + mark('online') + 'online</th><td>' + count(r.online) + '</td></tr>'
+      + '<tr><th>' + mark('stale') + 'stale</th><td>' + count(r.stale) + '</td></tr>'
+      + '<tr><th>' + mark('offline') + 'offline</th><td>' + count(r.offline) + '</td></tr>'
+      + '<tr><th>' + mark('unknown') + 'unknown</th><td>' + count(r.unknown) + '</td></tr>'
+      + '</table><table class="kv"><caption class="sr">Measurement gaps</caption>'
       + '<tr><th>fabrics</th><td>' + esc(body.fabrics_state || 'unknown')
       + (body.fabrics_reason_code ? ' (' + esc(body.fabrics_reason_code) + ')' : '') + '</td></tr>'
       + '<tr><th>usable capacity</th><td>' + esc(body.usable_capacity_state || 'unknown') + '</td></tr>'
@@ -198,7 +222,7 @@ async function loadOverview() {
       + '</table>';
   } catch {
     if (mySeq !== overviewSeq) return;
-    state.textContent = 'Unavailable: request failed.';
+    paintState(state, 'Unavailable: request failed.');
   }
 }
 
@@ -217,7 +241,7 @@ async function loadResources(offset) {
   const myOffset = Math.max(0, offset || 0);
   resourcesOffset = myOffset;
   const mySeq = ++resourcesSeq;
-  state.textContent = 'Loading…';
+  paintState(state, 'Loading…');
   box.textContent = '';
   pages.hidden = true;
   try {
@@ -226,25 +250,25 @@ async function loadResources(offset) {
     const body = await res.json().catch(() => null);
     if (mySeq !== resourcesSeq) return;
     if (!res.ok || !body) {
-      state.textContent = 'Unavailable: ' + requestFailure(body, res.status) + '.';
+      paintState(state, 'Unavailable: ' + requestFailure(body, res.status) + '.');
       return;
     }
     if (body.state !== 'available' || !Array.isArray(body.items)) {
-      state.textContent = 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').';
+      paintState(state, 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').');
       return;
     }
     const total = Number.isSafeInteger(body.total) && body.total >= 0 ? body.total : null;
-    state.textContent = 'Loaded ' + unknown(body.observed_at) + '.';
+    paintState(state, 'Loaded ' + unknown(body.observed_at) + '.');
     if (!body.items.length) {
       box.textContent = total === 0 ? 'No resources registered (empty).' : 'No rows on this page.';
     } else {
       const rows = body.items.map((it) =>
-        '<tr><td>' + esc(it.id) + '</td><td>' + esc(it.name) + '</td><td>' + esc(it.kind)
+        '<tr><td class="id">' + esc(it.id) + '</td><td class="name">' + mark(it.liveness) + esc(it.name) + '</td><td>' + esc(it.kind)
         + '</td><td>' + esc(it.liveness) + '</td><td>' + esc(it.lastSeenAt || 'unknown')
         + '</td><td>' + unknown(it.usable) + '</td><td>' + unknown(it.configured)
         + '</td><td>' + unknown(it.authenticated) + '</td></tr>').join('');
-      box.innerHTML = '<table><tr><th>id</th><th>name</th><th>kind</th><th>liveness</th>'
-        + '<th>last seen</th><th>usable</th><th>configured</th><th>authenticated</th></tr>' + rows + '</table>';
+      box.innerHTML = '<table class="tbl"><thead><tr><th>id</th><th>name</th><th>kind</th><th>liveness</th>'
+        + '<th>last seen</th><th>usable</th><th>configured</th><th>authenticated</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }
     // Window bounds and Next come from offset plus limit (echoed when sane,
     // else requested): items.length shrinks when malformed rows skip, so it
@@ -267,7 +291,7 @@ async function loadResources(offset) {
     }
   } catch {
     if (mySeq !== resourcesSeq) return;
-    state.textContent = 'Unavailable: request failed.';
+    paintState(state, 'Unavailable: request failed.');
   }
 }
 
@@ -292,7 +316,7 @@ async function loadAudit(offset) {
   const myOffset = Math.max(0, offset || 0);
   auditOffset = myOffset;
   const mySeq = ++auditSeq;
-  state.textContent = 'Loading…';
+  paintState(state, 'Loading…');
   box.textContent = '';
   pages.hidden = true;
   try {
@@ -301,26 +325,26 @@ async function loadAudit(offset) {
     const body = await res.json().catch(() => null);
     if (mySeq !== auditSeq) return;
     if (!res.ok || !body) {
-      state.textContent = 'Unavailable: ' + requestFailure(body, res.status) + '.';
+      paintState(state, 'Unavailable: ' + requestFailure(body, res.status) + '.');
       return;
     }
     if (body.state !== 'available' || !Array.isArray(body.items)) {
       // Unavailable is a measurement failure, never an empty feed.
-      state.textContent = 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').';
+      paintState(state, 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').');
       return;
     }
     const total = Number.isSafeInteger(body.total) && body.total >= 0 ? body.total : null;
-    state.textContent = 'Loaded ' + unknown(body.observed_at) + '.';
+    paintState(state, 'Loaded ' + unknown(body.observed_at) + '.');
     if (!body.items.length) {
       box.textContent = total === 0 ? 'No audit events recorded (empty).' : 'No rows on this page.';
     } else {
       const rows = body.items.map((it) => {
         const action = it.action_known && typeof it.action === 'string' ? esc(it.action) : 'unknown';
         const at = it.at_known && typeof it.at === 'string' ? esc(it.at) : 'unknown';
-        return '<tr><td>' + esc(it.id) + '</td><td>' + action + '</td><td>'
-          + esc(it.category || 'unknown') + '</td><td>' + at + '</td></tr>';
+        return '<tr><td class="id">' + esc(it.id) + '</td><td>' + action + '</td><td>'
+          + esc(it.category || 'unknown') + '</td><td class="num">' + at + '</td></tr>';
       }).join('');
-      box.innerHTML = '<table><tr><th>event</th><th>action</th><th>category</th><th>at</th></tr>' + rows + '</table>';
+      box.innerHTML = '<table class="tbl"><thead><tr><th>event</th><th>action</th><th>category</th><th>at</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }
     // Window bounds come from offset plus limit, never from items.length:
     // rows the server declined to project still occupy a slot in total, and
@@ -343,7 +367,7 @@ async function loadAudit(offset) {
     }
   } catch {
     if (mySeq !== auditSeq) return;
-    state.textContent = 'Unavailable: request failed.';
+    paintState(state, 'Unavailable: request failed.');
   }
 }
 
@@ -356,7 +380,7 @@ async function loadCoverage() {
   const section = document.getElementById('coverage');
   const state = section.querySelector('.state');
   const box = document.getElementById('coverage-result');
-  state.textContent = 'Loading…';
+  paintState(state, 'Loading…');
   box.textContent = '';
   try {
     const res = await fetch('/api/admin/v1/coverage', { credentials: 'same-origin' });
@@ -364,25 +388,25 @@ async function loadCoverage() {
     const body = await res.json().catch(() => null);
     if (mySeq !== coverageSeq) return;
     if (!res.ok || !body) {
-      state.textContent = 'Unavailable: ' + requestFailure(body, res.status) + '.';
+      paintState(state, 'Unavailable: ' + requestFailure(body, res.status) + '.');
       return;
     }
     if (body.state !== 'available' || !Array.isArray(body.items)) {
-      state.textContent = 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').';
+      paintState(state, 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').');
       return;
     }
-    state.textContent = 'Loaded ' + unknown(body.observed_at) + '.';
+    paintState(state, 'Loaded ' + unknown(body.observed_at) + '.');
     if (!body.items.length) {
       box.textContent = 'No coverage rows recorded.';
     } else {
       const rows = body.items.map((it) =>
-        '<tr><td>' + esc(it.metric) + '</td><td>' + esc(it.release_state)
-        + '</td><td>' + esc(it.reason_code || 'unknown') + '</td><td>' + unknown(it.supported_runtime) + '</td></tr>').join('');
-      box.innerHTML = '<table><tr><th>metric</th><th>release state</th><th>reason</th><th>runtime</th></tr>' + rows + '</table>';
+        '<tr><td class="id">' + esc(it.metric) + '</td><td><span class="chip">' + esc(it.release_state)
+        + '</span></td><td class="id">' + esc(it.reason_code || 'unknown') + '</td><td>' + unknown(it.supported_runtime) + '</td></tr>').join('');
+      box.innerHTML = '<table class="tbl"><thead><tr><th>metric</th><th>release state</th><th>reason</th><th>runtime</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }
   } catch {
     if (mySeq !== coverageSeq) return;
-    state.textContent = 'Unavailable: request failed.';
+    paintState(state, 'Unavailable: request failed.');
   }
 }
 
@@ -395,7 +419,7 @@ async function loadHealth() {
   const section = document.getElementById('operations');
   const state = section.querySelector('.state');
   const box = document.getElementById('operations-result');
-  state.textContent = 'Loading…';
+  paintState(state, 'Loading…');
   box.textContent = '';
   try {
     const res = await fetch('/api/admin/v1/operations/health', { credentials: 'same-origin' });
@@ -403,16 +427,16 @@ async function loadHealth() {
     const body = await res.json().catch(() => null);
     if (mySeq !== healthSeq) return;
     if (!res.ok || !body) {
-      state.textContent = 'Unavailable: ' + requestFailure(body, res.status) + '.';
+      paintState(state, 'Unavailable: ' + requestFailure(body, res.status) + '.');
       return;
     }
     if (body.state !== 'available' || !body.control_plane || !body.compatibility) {
-      state.textContent = 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').';
+      paintState(state, 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').');
       return;
     }
-    state.textContent = 'Loaded ' + unknown(body.observed_at) + '.';
+    paintState(state, 'Loaded ' + unknown(body.observed_at) + '.');
     const c = body.collectors || {};
-    box.innerHTML = '<table>'
+    box.innerHTML = '<table class="kv">'
       + '<tr><th>control plane (d1)</th><td>' + esc(body.control_plane.d1 || 'unknown') + '</td></tr>'
       + '<tr><th>admin grants table</th><td>' + esc(body.control_plane.admin_grants || 'unknown') + '</td></tr>'
       + '<tr><th>collectors</th><td>' + esc(c.state || 'unknown')
@@ -428,7 +452,7 @@ async function loadHealth() {
       + '</table>';
   } catch {
     if (mySeq !== healthSeq) return;
-    state.textContent = 'Unavailable: request failed.';
+    paintState(state, 'Unavailable: request failed.');
   }
 }
 
@@ -449,7 +473,7 @@ async function loadUsers(offset) {
   const myOffset = Math.max(0, offset || 0);
   usersOffset = myOffset;
   const mySeq = ++usersSeq;
-  state.textContent = 'Loading…';
+  paintState(state, 'Loading…');
   box.textContent = '';
   pages.hidden = true;
   try {
@@ -458,15 +482,15 @@ async function loadUsers(offset) {
     const body = await res.json().catch(() => null);
     if (mySeq !== usersSeq) return;
     if (!res.ok || !body) {
-      state.textContent = 'Unavailable: ' + requestFailure(body, res.status) + '.';
+      paintState(state, 'Unavailable: ' + requestFailure(body, res.status) + '.');
       return;
     }
     if (body.state !== 'available' || !Array.isArray(body.items)) {
-      state.textContent = 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').';
+      paintState(state, 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').');
       return;
     }
     const total = Number.isSafeInteger(body.total) && body.total >= 0 ? body.total : null;
-    state.textContent = 'Loaded ' + unknown(body.observed_at) + '.';
+    paintState(state, 'Loaded ' + unknown(body.observed_at) + '.');
     if (!body.items.length) {
       box.textContent = total === 0 ? 'No users recorded (empty).' : 'No rows on this page.';
     } else {
@@ -479,10 +503,10 @@ async function loadUsers(offset) {
         return esc(it.admin_roles.join(', ') || 'none');
       };
       const rows = body.items.map((it) =>
-        '<tr><td>' + esc(it.id) + '</td><td>' + esc(it.name || 'unknown') + '</td><td>' + esc(it.email || 'unknown')
-        + '</td><td>' + esc(it.provider || 'unknown') + '</td><td>' + esc(it.status) + '</td><td>' + esc(it.tenant)
-        + '</td><td>' + roleCell(it) + '</td><td>' + unknown(it.keys_active) + '</td></tr>').join('');
-      box.innerHTML = '<table><tr><th>id</th><th>name</th><th>email</th><th>provider</th><th>status</th><th>tenant</th><th>admin roles</th><th>keys</th></tr>' + rows + '</table>';
+        '<tr><td class="id">' + esc(it.id) + '</td><td class="name">' + esc(it.name || 'unknown') + '</td><td>' + esc(it.email || 'unknown')
+        + '</td><td>' + esc(it.provider || 'unknown') + '</td><td>' + statusPill(it.status) + '</td><td>' + esc(it.tenant)
+        + '</td><td>' + roleCell(it) + '</td><td class="num">' + unknown(it.keys_active) + '</td></tr>').join('');
+      box.innerHTML = '<table class="tbl"><thead><tr><th>id</th><th>name</th><th>email</th><th>provider</th><th>status</th><th>tenant</th><th>admin roles</th><th>keys</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }
     const effOffset = Number.isSafeInteger(body.offset) && body.offset >= 0 ? body.offset : myOffset;
     const effLimit = Number.isSafeInteger(body.limit) && body.limit > 0 ? body.limit : USERS_LIMIT;
@@ -502,7 +526,7 @@ async function loadUsers(offset) {
     }
   } catch {
     if (mySeq !== usersSeq) return;
-    state.textContent = 'Unavailable: request failed.';
+    paintState(state, 'Unavailable: request failed.');
   }
 }
 
@@ -522,7 +546,7 @@ async function loadSessions(offset) {
   const myOffset = Math.max(0, offset || 0);
   sessionsOffset = myOffset;
   const mySeq = ++sessionsSeq;
-  state2.textContent = 'Loading…';
+  paintState(state2, 'Loading…');
   box.textContent = '';
   pages.hidden = true;
   try {
@@ -531,23 +555,23 @@ async function loadSessions(offset) {
     const body = await res.json().catch(() => null);
     if (mySeq !== sessionsSeq) return;
     if (!res.ok || !body) {
-      state2.textContent = 'Unavailable: ' + requestFailure(body, res.status) + '.';
+      paintState(state2, 'Unavailable: ' + requestFailure(body, res.status) + '.');
       return;
     }
     if (body.state !== 'available' || !Array.isArray(body.items)) {
-      state2.textContent = 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').';
+      paintState(state2, 'Unavailable: ' + (body.reason_code ? body.reason_code + ' ' : '') + '(' + unknown(body.state) + ').');
       return;
     }
     const total = Number.isSafeInteger(body.total) && body.total >= 0 ? body.total : null;
-    state2.textContent = 'Loaded ' + unknown(body.observed_at) + '.';
+    paintState(state2, 'Loaded ' + unknown(body.observed_at) + '.');
     if (!body.items.length) {
       box.textContent = total === 0 ? 'No sessions recorded (empty).' : 'No rows on this page.';
     } else {
       const rows = body.items.map((it) =>
-        '<tr><td>' + esc(it.id) + '</td><td>' + esc(it.user_id || 'unknown') + '</td><td>' + esc(it.issued_at || 'unknown')
-        + '</td><td>' + esc(it.expires_at || 'unknown') + '</td><td>' + (it.active ? 'active' : 'expired')
+        '<tr><td class="id">' + esc(it.id) + '</td><td class="id">' + esc(it.user_id || 'unknown') + '</td><td class="num">' + esc(it.issued_at || 'unknown')
+        + '</td><td class="num">' + esc(it.expires_at || 'unknown') + '</td><td>' + statusPill(it.active ? 'active' : 'expired')
         + '</td><td>' + esc(it.authentication_method || 'unknown') + '</td><td>' + esc(it.presence) + '</td></tr>').join('');
-      box.innerHTML = '<table><tr><th>session</th><th>user</th><th>issued</th><th>expires</th><th>state</th><th>auth method</th><th>presence</th></tr>' + rows + '</table>';
+      box.innerHTML = '<table class="tbl"><thead><tr><th>session</th><th>user</th><th>issued</th><th>expires</th><th>state</th><th>auth method</th><th>presence</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }
     const effOffset = Number.isSafeInteger(body.offset) && body.offset >= 0 ? body.offset : myOffset;
     const effLimit = Number.isSafeInteger(body.limit) && body.limit > 0 ? body.limit : SESSIONS_LIMIT;
@@ -567,7 +591,7 @@ async function loadSessions(offset) {
     }
   } catch {
     if (mySeq !== sessionsSeq) return;
-    state2.textContent = 'Unavailable: request failed.';
+    paintState(state2, 'Unavailable: request failed.');
   }
 }
 
@@ -628,7 +652,7 @@ async function loadDgmRuns() {
 
 async function createDgmRun() {
   const state = document.getElementById('dgm-create-state');
-  state.textContent = 'Creating…';
+  paintState(state, 'Creating…');
   const fixture = document.getElementById('dgm-fixture').value;
   const held = !!document.getElementById('dgm-held').checked;
   const label = document.getElementById('dgm-label').value || '';
@@ -637,24 +661,24 @@ async function createDgmRun() {
       method: 'POST', body: JSON.stringify(label ? { fixture, held, label } : { fixture, held })
     });
     if (res.ok && body) {
-      state.textContent = 'Created ' + body.runId + ' (' + body.status + ' / ' + body.envelopeLabel + ').';
+      paintState(state, 'Created ' + body.runId + ' (' + body.status + ' / ' + body.envelopeLabel + ').');
       loadDgmRuns();
       loadDgmRun(body.runId);
     } else {
-      state.textContent = 'Refused: ' + dgmFailure(body, res.status) + '.';
+      paintState(state, 'Refused: ' + dgmFailure(body, res.status) + '.');
     }
   } catch {
-    state.textContent = 'Refused: request failed.';
+    paintState(state, 'Refused: request failed.');
   }
 }
 
 function dgmDetailHtml(run) {
   const row = (label, value) => '<tr><th>' + dgmEsc(label) + '</th><td>' + value + '</td></tr>';
   const gates = (Array.isArray(run.gates) ? run.gates : []).map((g) =>
-    '<tr><td>' + dgmEsc(g.name) + '</td><td>' + (g.passed ? 'pass' : 'fail') +
+    '<tr><td class="id">' + dgmEsc(g.name) + '</td><td>' + statusPill(g.passed ? 'pass' : 'fail') +
     '</td><td>' + dgmEsc(g.evidence) + '</td></tr>').join('');
   const events = (Array.isArray(run.events) ? run.events : []).map((e) =>
-    '<tr><td>' + dgmEsc(e.sequence) + '</td><td>' + dgmEsc(e.event) +
+    '<tr><td class="num">' + dgmEsc(e.sequence) + '</td><td class="id">' + dgmEsc(e.event) +
     '</td><td>' + dgmEsc(e.detail) + '</td></tr>').join('');
   const telem = run.telemetry || {};
   const latency = telem.latencySummary || {};
@@ -663,15 +687,15 @@ function dgmDetailHtml(run) {
   const archive = (Array.isArray(prov.archive) ? prov.archive : []).map((a) =>
     '<tr><td>' + dgmEsc(a.scorePpm) + '</td><td>' + (a.baseline ? 'baseline' : 'candidate (fixture)') + '</td></tr>').join('');
   return '<span id="dgm-run-' + dgmEsc(run.runId) + '"></span>'
-    + '<table>' + row('run', dgmEsc(run.runId)) + row('fixture', dgmEsc(run.fixture) + ' (fixture)')
+    + '<table class="kv">' + row('run', dgmEsc(run.runId)) + row('fixture', dgmEsc(run.fixture) + ' (fixture)')
     + row('evaluation', dgmEsc(run.evaluation)) + row('status', dgmEsc(run.status))
     + row('envelope', dgmEsc(run.envelopeLabel)) + row('label', dgmEsc(run.label || ''))
     + row('advice reason', dgmEsc(run.adviceReason)) + row('settlement', dgmEsc(run.settlement)) + '</table>'
-    + '<h3>Readiness gates</h3><table><tr><th>gate</th><th>verdict</th><th>evidence</th></tr>' + gates + '</table>'
-    + '<h3>Archived candidates (fixture)</h3><table><tr><th>score ppm</th><th>kind</th></tr>'
-    + (archive || '<tr><td colspan="2">no archived entries (run never settled)</td></tr>') + '</table>'
-    + '<h3>Budget/event trace</h3><table><tr><th>#</th><th>event</th><th>detail</th></tr>' + events + '</table>'
-    + '<h3>Telemetry (fixture rows, real persistence)</h3><table>'
+    + '<h3>Readiness gates</h3><table class="tbl"><thead><tr><th>gate</th><th>verdict</th><th>evidence</th></tr></thead><tbody>' + gates + '</tbody></table>'
+    + '<h3>Archived candidates (fixture)</h3><table class="tbl"><thead><tr><th>score ppm</th><th>kind</th></tr></thead><tbody>'
+    + (archive || '<tr><td colspan="2" class="empty-row">no archived entries (run never settled)</td></tr>') + '</tbody></table>'
+    + '<h3>Budget/event trace</h3><table class="tbl"><thead><tr><th>#</th><th>event</th><th>detail</th></tr></thead><tbody>' + events + '</tbody></table>'
+    + '<h3>Telemetry (fixture rows, real persistence)</h3><table class="kv">'
     + row('read status', dgmEsc(telem.readStatus) + ' (' + dgmEsc(telem.freshnessNote) + ')')
     + row('outcome counts', dgmEsc(JSON.stringify(telem.outcomeCounts || {})))
     + row('latency', dgmEsc('count=' + dgmUnknown(latency.count)
@@ -690,7 +714,7 @@ function dgmControlState(status) {
 async function loadDgmRun(runId) {
   const state = document.getElementById('dgm-run-state');
   const detail = document.getElementById('dgm-run-detail');
-  state.textContent = 'Loading…';
+  paintState(state, 'Loading…');
   detail.innerHTML = '';
   dgmCurrentRun = null;
   dgmControlState(null);
@@ -698,21 +722,21 @@ async function loadDgmRun(runId) {
     const { res, body } = await dgmFetch('/api/admin/v1/dgm/preview/runs/' + encodeURIComponent(runId));
     if (res.ok && body) {
       dgmCurrentRun = body.runId;
-      state.textContent = body.runId + ' — ' + body.status + ' / ' + body.envelopeLabel + '.';
+      paintState(state, body.runId + ' — ' + body.status + ' / ' + body.envelopeLabel + '.');
       detail.innerHTML = dgmDetailHtml(body);
       dgmControlState(body.status);
     } else {
-      state.textContent = 'Unavailable: ' + dgmFailure(body, res.status) + '.';
+      paintState(state, 'Unavailable: ' + dgmFailure(body, res.status) + '.');
     }
   } catch {
-    state.textContent = 'Unavailable: request failed.';
+    paintState(state, 'Unavailable: request failed.');
   }
 }
 
 async function dgmControl(action) {
   if (!dgmCurrentRun) return;
   const state = document.getElementById('dgm-run-state');
-  state.textContent = 'Loading…';
+  paintState(state, 'Loading…');
   try {
     const { res, body } = await dgmFetch(
       '/api/admin/v1/dgm/preview/runs/' + encodeURIComponent(dgmCurrentRun) + '/' + action, { method: 'POST' });
@@ -720,10 +744,10 @@ async function dgmControl(action) {
       loadDgmRuns();
       loadDgmRun(body.runId);
     } else {
-      state.textContent = 'Refused: ' + dgmFailure(body, res.status) + '.';
+      paintState(state, 'Refused: ' + dgmFailure(body, res.status) + '.');
     }
   } catch {
-    state.textContent = 'Refused: request failed.';
+    paintState(state, 'Refused: request failed.');
   }
 }
 
@@ -762,7 +786,7 @@ let museAttachKey = null; // key captured when the rendered result was drawn
 
 function museSetState(id, text) {
   const el = document.getElementById(id);
-  if (el) el.textContent = text;
+  if (el) paintState(el, text);
 }
 
 function museUsd(value) {
@@ -842,7 +866,7 @@ function museRenderStatus(body) {
         + row('ledger updated', esc(spend.updatedAt || 'unknown'));
   const missing = musePrerequisites(body).map((m) => '<li>' + esc(m) + '</li>').join('');
   if (box) {
-    box.innerHTML = '<table>'
+    box.innerHTML = '<table class="kv">'
       + row('model', esc(provider.model || 'unknown'))
       + row('provider configured', museLiveConfigured() ? 'yes (synthetic-live)' : 'no (fixture only)')
       + row('reported evaluation', esc(body.evaluation || 'unknown'))
@@ -851,7 +875,7 @@ function museRenderStatus(body) {
       + row('output bound', museCount((provider.bounds || {}).outputMaxTokens) + ' tokens / deadline '
         + museCount((provider.bounds || {}).deadlineMs) + ' ms')
       + spendRows
-      + '</table><h3>Missing prerequisites</h3><ul>' + missing + '</ul>'
+      + '</table><h3>Missing prerequisites</h3><ul class="checklist">' + missing + '</ul>'
       + '<p class="note">A fixture dry run performs no provider call and cannot incur spend. Live mode stays disabled unless the server reports it configured.</p>';
   }
   museSetState('dgm-muse-state', 'Loaded ' + unknown(body.observedAt) + '.');
@@ -915,7 +939,7 @@ function museRenderResult(entry) {
     : 'unknown';
   const input = r.proposalInput && typeof r.proposalInput.fixture === 'string' ? r.proposalInput.fixture : null;
   const row = (label, value) => '<tr><th>' + esc(label) + '</th><td>' + value + '</td></tr>';
-  let html = '<h3>Operation result</h3><table>'
+  let html = '<h3>Operation result</h3><table class="kv">'
     + row('operation key', esc(entry.opKey))
     + row('state', esc(entry.state || 'delivered'))
     + row('mode', esc(r.mode || entry.mode || 'unknown'))
