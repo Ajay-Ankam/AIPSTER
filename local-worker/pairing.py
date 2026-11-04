@@ -699,11 +699,13 @@ def _disk_bytes(path):
         return None
 
 
-def _reportable_runtimes(config_path):
+def _reportable_runtimes(config_path, data_dir=None):
     """Runtimes this node can honestly claim, from its own worker config.
 
     Conservative by design (never claims what it cannot see): mock runtimes
-    are not capacity, attach-mode readiness needs a live daemon probe, and a
+    are not capacity; an attach runtime counts only when the running local
+    worker reports one of its configured models ready (attach_readiness,
+    needs `data_dir` or the token env var, never probed otherwise); a
     managed runtime counts only when its engine executable resolves on PATH.
     Unknown kinds and unreadable configs report nothing.
     """
@@ -715,9 +717,21 @@ def _reportable_runtimes(config_path):
     except Exception:
         return []
     found = []
+    attached = None  # probed lazily, at most once per report
     for runtime in getattr(config, "runtimes", []) or []:
         name = CAPABILITY_RUNTIME_NAMES.get(getattr(runtime, "kind", ""))
-        if name is None or getattr(runtime, "mode", "") != "managed":
+        if name is None:
+            continue
+        mode = getattr(runtime, "mode", "")
+        if mode == "attach":
+            if data_dir is None and not _worker_token(config, None):
+                continue
+            if attached is None:
+                attached = {rid for rid, _ in attach_readiness(config, data_dir)[0]}
+            if runtime.id in attached and all(r["name"] != name for r in found):
+                found.append({"name": name, "formats": list(CAPABILITY_FORMATS)})
+            continue
+        if mode != "managed":
             continue
         executable = getattr(runtime, "executable", None)
         if not executable or not shutil.which(str(executable)):
@@ -752,7 +766,7 @@ def build_capability_report(config_path=None, data_dir=None):
         "schema_version": CAPABILITY_SCHEMA_VERSION,
         "os": (platform.system() or "unknown")[:64],
         "arch": (platform.machine() or "unknown")[:64],
-        "runtimes": _reportable_runtimes(config_path),
+        "runtimes": _reportable_runtimes(config_path, data_dir),
         "mem": {"ramTotalBytes": ram_total, "ramAvailBytes": ram_avail},
         "disk": {"totalBytes": disk_total, "availBytes": disk_avail},
     }

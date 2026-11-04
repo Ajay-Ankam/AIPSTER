@@ -288,6 +288,26 @@ class AttachUsableTests(unittest.TestCase):
         source = (ROOT / "pairing.py").read_text(encoding="utf-8")
         self.assertIn("usable = decide_usable(args.config, data_dir, usable_why)", source)
 
+    def test_capability_report_claims_verified_attach_runtime(self):
+        node = self.node(body=node_report())
+        config = write_config(self.data, node.port)
+        self.assertEqual(pairing._reportable_runtimes(str(config), self.data),
+                         [{"name": "llama-server", "formats": ["gguf"]}])
+        report = pairing.build_capability_report(str(config), self.data)
+        if report is not None:  # None only when psutil/disk cannot be measured
+            self.assertEqual(report["runtimes"], [{"name": "llama-server", "formats": ["gguf"]}])
+
+    def test_capability_report_drops_unready_or_unprobed_attach(self):
+        node = self.node(body=node_report(runtime={"state": "unavailable"}))
+        config = write_config(self.data, node.port)
+        self.assertEqual(pairing._reportable_runtimes(str(config), self.data), [])
+        node.body = node_report()
+        self.assertEqual(pairing._reportable_runtimes(str(config)), [],
+                         "no data dir and no token env: attach is never probed")
+        self.assertEqual(len(node.seen), 1)
+        node.body = b"{bad"
+        self.assertEqual(pairing._reportable_runtimes(str(config), self.data), [])
+
 
 if __name__ == "__main__":
     unittest.main()
