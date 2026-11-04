@@ -46,6 +46,8 @@ import { CONTENT_MAX } from './worker-transport.mjs';
 import { matchDeny } from '../fabric/policy.mjs';
 
 export const ADMISSION_TTL_MS = 10 * 60 * 1000;
+// Queued jobs examined per worker lease poll (bounded scan; skipped jobs age out).
+const LEASE_SCAN_LIMIT = 16;
 // Per-principal limits. Three independent caps, because one number cannot
 // express "how much may run at once", "how much new work may arrive" and "how
 // much history may be kept":
@@ -1290,31 +1292,60 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       const t = Number.isSafeInteger(at) ? at : clock();
       const lease_id = rid16('lease_');
       const tIso = isoAt(t);
-      // One atomically selected queued job: matching resource, redeemed and
-      // unfenced operation, no recorded uncertainty, deadline still ahead.
-      const [res] = await db.batch([
-        db.prepare(`UPDATE dispatch_jobs
-          SET status = 'leased', lease_id = ?, leased_at = ?, updated_at = ?
-          WHERE job_id = (SELECT j.job_id FROM dispatch_jobs j
-              JOIN dispatch_operations o ON o.op_id = j.op_id AND o.generation = j.generation
-              WHERE j.resource_id = ? AND j.status = 'queued' AND j.deadline_at > ?
-                AND o.phase IN ('redeemed', 'dispatched') AND o.uncertain_phase IS NULL
-                AND NOT EXISTS (SELECT 1 FROM dispatch_fences f
-                  WHERE f.op_id = j.op_id AND f.generation = j.generation)
-                AND EXISTS (SELECT 1 FROM dispatch_start_redemptions s
-                  WHERE s.op_id = j.op_id AND s.generation = j.generation)
-              ORDER BY j.created_at, j.job_id LIMIT 1)
-            AND status = 'queued'`).bind(lease_id, tIso, tIso, resource_id, t),
-      ]);
-      if (changed(res) !== 1) return null;
-      const row = await first(db, 'SELECT * FROM dispatch_jobs WHERE lease_id = ?', lease_id);
-      if (!row) return null;
-      return {
-        job_id: row.job_id,
-        lease_id: row.lease_id,
-        envelope: JSON.parse(row.envelope_json),
-        deadline_at: Number(row.deadline_at),
-      };
+      // Queued jobs in order: matching resource, redeemed and unfenced
+      // operation, no recorded uncertainty, deadline still ahead.
+      const leasable = `j.resource_id = ? AND j.status = 'queued' AND j.deadline_at > ?
+        AND EXISTS (SELECT 1 FROM dispatch_operations o
+          WHERE o.op_id = j.op_id AND o.generation = j.generation
+            AND o.phase IN ('redeemed', 'dispatched') AND o.uncertain_phase IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM dispatch_fences f
+          WHERE f.op_id = j.op_id AND f.generation = j.generation)
+        AND EXISTS (SELECT 1 FROM dispatch_start_redemptions s
+          WHERE s.op_id = j.op_id AND s.generation = j.generation)`;
+      const candidates = await all(db, `SELECT j.job_id, j.op_id, j.generation FROM dispatch_jobs j
+        WHERE ${leasable} ORDER BY j.created_at, j.job_id LIMIT ${LEASE_SCAN_LIMIT}`, resource_id, t);
+      for (const cand of candidates || []) {
+        // Cross-owner (fabric) work is handed to the exporter's worker only
+        // while the consent still holds at lease time: a job queued before a
+        // revoke, pause, suspension, deny, or grant expiry must not consume
+        // exporter compute. Such a job is skipped (it stays queued and ages
+        // out at its deadline); jobs behind it remain leasable. The CAS below
+        // re-asserts the same live authority so a concurrent narrowing wins.
+        const cond = [];
+        const binds = [];
+        const op = await opRow(cand.op_id);
+        if (!op || Number(op.generation) !== Number(cand.generation)) continue;
+        let binding;
+        try { binding = JSON.parse(op.binding_json); } catch { continue; }
+        if (!isObj(binding)) continue;
+        if (typeof binding.grant_id === 'string' && binding.grant_id.startsWith(FABRIC_GRANT_PREFIX)) {
+          const authority = {
+            grant_id: binding.grant_id, grant_revision: binding.grant_revision, incarnation: binding.incarnation,
+          };
+          if (await authorityProblem(op, binding, authority)) continue;
+          const g = await first(db, 'SELECT expiry FROM fabric_grants WHERE id = ?', binding.grant_id);
+          if (!g || !(Date.parse(g.expiry) > t)) continue;
+          const live = await liveAuthoritySql(op, binding, authority);
+          cond.push(live.sql);
+          binds.push(...live.binds);
+        }
+        const [res] = await db.batch([
+          db.prepare(`UPDATE dispatch_jobs AS j
+            SET status = 'leased', lease_id = ?, leased_at = ?, updated_at = ?
+            WHERE j.job_id = ? AND ${leasable}${cond.length ? ` AND ${cond.join(' AND ')}` : ''}`).bind(
+            lease_id, tIso, tIso, cand.job_id, resource_id, t, ...binds),
+        ]);
+        if (changed(res) !== 1) continue;
+        const row = await first(db, 'SELECT * FROM dispatch_jobs WHERE lease_id = ?', lease_id);
+        if (!row) return null;
+        return {
+          job_id: row.job_id,
+          lease_id: row.lease_id,
+          envelope: JSON.parse(row.envelope_json),
+          deadline_at: Number(row.deadline_at),
+        };
+      }
+      return null;
     });
   }
 
