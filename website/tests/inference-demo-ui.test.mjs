@@ -70,7 +70,10 @@ test('fixture: submit serializer rejects forged/unsupported fields and bad shape
     { ...SUBMIT_BASE, idempotencyKey: 'short' }, { ...SUBMIT_BASE, idempotencyKey: 'has space in key' },
     { ...SUBMIT_BASE, prompt: '' }, { ...SUBMIT_BASE, prompt: '   ' }, { ...SUBMIT_BASE, prompt: 'p'.repeat(65537) },
     { ...SUBMIT_BASE, maxTokens: 0 }, { ...SUBMIT_BASE, maxTokens: 4097 },
-    { ...SUBMIT_BASE, deadlineAt: Date.now() - 1000 }, { ...SUBMIT_BASE, deadlineAt: Date.now() + 180001 },
+    // Over-limit case sits well past MAX_DEADLINE_MS_UI (180000): the
+    // serializer reads Date.now() itself after this array is built, so a
+    // 1 ms margin (180001) flaked whenever a millisecond elapsed in between.
+    { ...SUBMIT_BASE, deadlineAt: Date.now() - 1000 }, { ...SUBMIT_BASE, deadlineAt: Date.now() + 240000 },
     { ...SUBMIT_BASE, deadlineAt: 'soon' },
   ]) {
     assert.equal(serializeSubmitBody(bad).ok, false, JSON.stringify(bad).slice(0, 80));
