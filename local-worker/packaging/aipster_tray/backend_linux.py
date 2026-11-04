@@ -85,8 +85,7 @@ def copy_via_helper(text):
 # lands, the desktop must show that explicitly and must never copy the
 # local serving address as if it were an endpoint.
 ENDPOINT_UNAVAILABLE_NOTE = (
-    "Fabric endpoint unavailable. No OpenAI-compatible fabric address "
-    "is configured yet.")
+    "Fabric endpoint not configured. Open Settings to add your fabric OpenAI base URL.")
 
 
 def verified_share_endpoint():
@@ -392,14 +391,15 @@ class LinuxWindowBackend(LinuxBaseBackend):
         # endpoint". None is verified in this build, so the menu gets ""
         # (endpoint line hidden, copy action disabled) plus an explicit
         # note. The local serving address is never passed here.
-        endpoint = verified_share_endpoint()
+        endpoint = self.configured_fabric_endpoint()
         overlay = ctl.pairing or {"key": st.PAIR_UNPAIRED, "line": st.UNPAIRED_LINE,
                                   "sender": "Sender: stopped"}
         self.widgets["header"].config(text=f"AIPSTER Worker — {st.STATE_TEXT[state]}")
         self.widgets["endpoint"].config(text=endpoint)
         self.widgets["endpoint_note"].config(
-            text=ENDPOINT_UNAVAILABLE_NOTE if not endpoint else "")
-        shown_detail = detail if state in (st.PORT_BUSY, st.ERROR) else ""
+            text=("Fabric address configured; connection and inference are not verified."
+                  if endpoint else ENDPOINT_UNAVAILABLE_NOTE))
+        shown_detail = detail
         self.widgets["detail"].config(text=shown_detail)
         self.widgets["pair_line"].config(text=overlay.get("line", ""))
         self.widgets["sender_line"].config(text=overlay.get("sender", ""))
@@ -412,16 +412,92 @@ class LinuxWindowBackend(LinuxBaseBackend):
             if item["kind"] != "action":
                 continue
             button = tk.Button(frame, text=item["label"],
-                               state="normal" if item["enabled"] else "disabled",
+                               state="normal" if (bool(endpoint) if item["id"] == "copy_endpoint" else item["enabled"]) else "disabled",
                                command=lambda action=item["id"]: self._click(action))
             button.pack(fill="x", pady=1)
             self.widgets["action_buttons"][item["id"]] = button
+
+    def configured_fabric_endpoint(self):
+        from .app_settings_linux import load_settings, validate_fabric_url
+        if self.controller is None:
+            return ""
+        try:
+            value = load_settings(self.controller.data)
+            if not value.get("fabric_confirmed"):
+                return ""
+            return validate_fabric_url(value.get("fabric_base_url", ""),
+                                       self.controller.endpoint_label())
+        except (ValueError, OSError):
+            return ""
+
+    def open_config(self, path=None):
+        """Native app preferences; never writes worker runtime or pairing files."""
+        import tkinter as tk
+        from .app_settings_linux import load_settings, save_settings
+        if self.root is None or self.controller is None:
+            return None
+        previous = getattr(self, "settings_window", None)
+        if previous is not None and previous.winfo_exists():
+            previous.lift()
+            return previous
+        dialog = tk.Toplevel(self.root)
+        self.settings_window = dialog
+        dialog.title("AIPSTER Worker Settings")
+        dialog.transient(self.root)
+        dialog.resizable(True, False)
+        try:
+            saved = load_settings(self.controller.data)
+            settings_error = ""
+        except ValueError as exc:
+            saved = {}
+            settings_error = str(exc)
+        url = tk.StringVar(dialog, saved.get("fabric_base_url", ""))
+        confirmed = tk.BooleanVar(dialog, saved.get("fabric_confirmed", False))
+        tk.Label(dialog, text="Fabric OpenAI base URL", anchor="w").pack(fill="x", padx=16, pady=(16,4))
+        entry = tk.Entry(dialog, textvariable=url, width=64)
+        entry.pack(fill="x", padx=16)
+        tk.Label(dialog, text="Use the fabric gateway or local fabric proxy address ending in /v1.\nDo not enter a model-server URL, worker control URL, or API key.",
+                 justify="left", wraplength=480).pack(fill="x", padx=16, pady=8)
+        tk.Checkbutton(dialog, text="I confirm this address routes through the AIPSTER fabric",
+                       variable=confirmed).pack(anchor="w", padx=12)
+        tk.Label(dialog, text="Saving an address does not start services or verify inference.\nYour coding client supplies its own fabric API key.",
+                 justify="left", wraplength=480).pack(fill="x", padx=16, pady=8)
+        feedback = tk.StringVar(dialog, settings_error)
+        tk.Label(dialog, textvariable=feedback, fg="red", wraplength=480,
+                 justify="left").pack(fill="x", padx=16)
+        def save():
+            try:
+                value = save_settings(self.controller.data, url.get(), confirmed.get(),
+                                      self.controller.endpoint_label())
+            except (ValueError, OSError) as exc:
+                feedback.set(str(exc))
+                return
+            dialog.destroy()
+            self.note_to_user("Fabric address saved; readiness is not verified."
+                              if value.get("fabric_base_url") else "Fabric address cleared.")
+        buttons = tk.Frame(dialog)
+        buttons.pack(fill="x", padx=16, pady=16)
+        tk.Button(buttons, text="Save", command=save).pack(side="right")
+        tk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="right", padx=8)
+        self.settings_widgets = {"url": url, "confirmed": confirmed,
+                                 "feedback": feedback, "save": save}
+        entry.focus_set()
+        return dialog
 
     def _click(self, action):
         if self.controller is None:
             return
         try:
-            self.controller.menu_action(action)
+            if action == "copy_endpoint":
+                endpoint = self.configured_fabric_endpoint()
+                if not endpoint:
+                    self.note_to_user("No fabric endpoint configured. Open Settings first.")
+                elif self.copy_text(endpoint):
+                    self.note_to_user("Fabric base URL copied. Connection and inference are not verified.")
+                else:
+                    self.note_to_user("Clipboard unavailable. The configured address remains visible above.")
+            else:
+                self.controller.menu_action(action)
         except Exception as exc:  # noqa: BLE001 - UI must survive action errors
             self.log(f"backend=linux-window action {action} failed: {exc}")
         self.refresh_current()
