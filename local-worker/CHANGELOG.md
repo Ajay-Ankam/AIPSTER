@@ -1,5 +1,23 @@
 # local-worker install changelog
 
+## 2026-11-04 — Repin to reviewed main 0e6b608; sender token propagation (N4)
+
+- Worker pin moves to `0e6b60890c736207664d122c62e39d8c4affd2fa` (reviewed
+  main: merge of PR104 from exact head `55e5675...`, all technical CI and
+  advisory PASS; contains `6483c2f` as ancestor). Under `local-worker/` the
+  PR104 delta adds the fabric proxy, capability model IDs, and upstream
+  finish-reason evidence; readiness, install, vendor, exits, and configs are
+  unchanged, so the verified-readiness contract still applies.
+- N4 fix: the sender terminal must hold the same `DENDRITE_API_TOKEN` as the
+  running daemon (session only; a different terminal does not inherit the
+  daemon env; never written to a file, URL, or log). Without the matching
+  token the readiness probe cannot authenticate and the worker heartbeats
+  `usable=false`; no usable value is ever claimed without that probe.
+- Packets (Step 7, Step 0 restart), the Connect panel, and the README pairing
+  section all carry the token-session requirement with per-OS provisioning
+  (`$env:` / `export`). Pairing safeguard and single-sender transition
+  preserved.
+
 ## 2026-11-04 — Repin to merged readiness 6483c2f; usable is verified readiness
 
 - Worker pin moves to `6483c2f379795beec188d3cda2641b3c891e2098` (current

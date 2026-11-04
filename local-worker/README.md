@@ -25,8 +25,8 @@ From PowerShell in a fresh directory (historical tested Windows x64 mock check â
 git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
 cd AIPSTER
 git sparse-checkout set --no-cone /local-worker/ /LICENSE
-git fetch origin 6483c2f379795beec188d3cda2641b3c891e2098
-git checkout --detach 6483c2f379795beec188d3cda2641b3c891e2098
+git fetch origin 0e6b60890c736207664d122c62e39d8c4affd2fa
+git checkout --detach 0e6b60890c736207664d122c62e39d8c4affd2fa
 cd local-worker
 uv run --no-project --python 3.12.14 python install.py
 .\.venv\Scripts\dendrite.exe inspect --config configs/mock.toml
@@ -71,15 +71,15 @@ anything else changed, back it up and use a fresh clone instead.
 
 1. Stop the running `heartbeat-loop` sender terminal with Ctrl+C. Old senders
    hold no lock, so confirm only one sender runs afterwards.
-2. Fetch the reviewed revision (current pin `6483c2f`):
+2. Fetch the reviewed revision (current pin `0e6b608`):
 ```powershell
-git fetch origin 6483c2f379795beec188d3cda2641b3c891e2098
+git fetch origin 0e6b60890c736207664d122c62e39d8c4affd2fa
 ```
 3. Hash-gate the overlay: the LF-normalized local `pairing.py` must equal the
    reviewed blob:
 ```powershell
 $blob = .\local-worker\.venv\Scripts\python.exe -c "import hashlib,pathlib;b=pathlib.Path('local-worker/pairing.py').read_bytes().replace(b'\r\n',b'\n');print(hashlib.sha1(b'blob '+str(len(b)).encode()+b'\x00'+b).hexdigest())"
-$want = git rev-parse 6483c2f379795beec188d3cda2641b3c891e2098:local-worker/pairing.py
+$want = git rev-parse 0e6b60890c736207664d122c62e39d8c4affd2fa:local-worker/pairing.py
 if ($blob.Trim() -ne $want.Trim()) { Write-Output 'STOP: pairing.py does not match the reviewed overlay; use a fresh clone instead' }
 ```
    If it prints STOP, do not continue; use a fresh clone.
@@ -89,7 +89,7 @@ git checkout -- local-worker/pairing.py
 ```
 5. Move to the reviewed revision:
 ```powershell
-git checkout --detach 6483c2f379795beec188d3cda2641b3c891e2098
+git checkout --detach 0e6b60890c736207664d122c62e39d8c4affd2fa
 ```
 6. Do NOT keep `.venv`: the vendored `dendrite` package changed across these
    pins (including the `pairing.py` readiness rework in the merged revision),
@@ -124,6 +124,16 @@ start it in that terminal, next to the daemon's `serve` terminal:
 ```
 
 (The mock-era flow used `configs/mock.toml`; use your real `config.toml`.)
+
+Start the sender in a terminal holding the same `DENDRITE_API_TOKEN` as the
+running daemon: set it in that session only before running the command, the
+same private per-session handling as Step 4 of the generated prompt (Windows:
+`$env:`, POSIX: `export`) â€” a different terminal does not inherit the
+daemon's environment, and the token is never written to a file, URL, or log
+and never pasted into a chat. The sender needs the matching token for its
+authenticated `/v1/node` readiness probe; without it the worker heartbeats
+`usable=false` even when everything else is ready, and no usable value is
+ever claimed without that probe.
 
 Mock always reports `usable=false`. Heartbeats prove reachability only, never
 inference readiness; `/api/jobs` remains disabled. Choose Done or reopen My
@@ -429,8 +439,8 @@ latest: on any pin mismatch, stop and report instead of adapting silently.
 git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
 cd AIPSTER
 git sparse-checkout set --no-cone /local-worker/ /LICENSE
-git fetch origin 6483c2f379795beec188d3cda2641b3c891e2098
-git checkout --detach 6483c2f379795beec188d3cda2641b3c891e2098
+git fetch origin 0e6b60890c736207664d122c62e39d8c4affd2fa
+git checkout --detach 0e6b60890c736207664d122c62e39d8c4affd2fa
 cd local-worker
 uv run --no-project --python 3.12.14 python install.py
 .venv/bin/python test_installation.py
