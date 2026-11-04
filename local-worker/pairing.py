@@ -454,7 +454,14 @@ def _attach_readiness(config, data_dir, timeout):
     runtimes, models = report["runtimes"], report["models"]
     configured = {r.id for r in getattr(config, "runtimes", []) or []
                   if getattr(r, "mode", "") == "attach" and getattr(r, "kind", "") != "mock"}
-    reported, live = set(), set()
+    # Only models THIS config selects, with the upstream identity it selects:
+    # a worker started from an older config (same ids, different
+    # upstream_model) or reporting removed models must not count.
+    wanted = {(getattr(m, "runtime", None), getattr(m, "id", None)):
+              getattr(m, "upstream_model", None)
+              for m in getattr(config, "models", []) or []
+              if getattr(m, "runtime", None) in configured}
+    reported, live = set(), {}
     for runtime in runtimes:
         if not isinstance(runtime, dict) or not _is_str(runtime.get("id")):
             continue
@@ -464,22 +471,31 @@ def _attach_readiness(config, data_dir, timeout):
         reported.add(rid)
         if (runtime.get("mode") == "attach" and runtime.get("state") in ("ready", "generating")
                 and runtime.get("simulated") is False and not runtime.get("last_error")):
-            live.add(rid)
+            live[rid] = runtime
     if not reported:
         return set(), "no configured attach runtime in worker report"
     if not live:
         return set(), "attach runtime not ready (state/error/simulated)"
-    ready = set()
+    ready, stale = set(), False
     for model in models:
         if not isinstance(model, dict):
             continue
         rid, mid = model.get("runtime"), model.get("id")
-        if (_is_str(rid) and _is_str(mid) and rid in live
+        if not (_is_str(rid) and _is_str(mid) and rid in live and (rid, mid) in wanted
                 and model.get("available") is True and model.get("resident") is True
                 and model.get("simulated") is False):
+            continue
+        upstream = wanted[(rid, mid)]
+        runtime = live[rid]
+        if (_is_str(upstream) and runtime.get("loaded_model") == mid
+                and runtime.get("model_fingerprint") == "attached:" + upstream):
             ready.add((rid, mid))
+        else:
+            stale = True
     if not ready:
-        return set(), "attach runtime ready but no model resident/available"
+        if stale:
+            return set(), "attach model identity does not match config (restart the worker)"
+        return set(), "attach runtime ready but no configured model resident/available"
     return ready, "attach model ready"
 
 
@@ -519,12 +535,15 @@ def managed_readiness(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
                 live.add(runtime["id"])
         if not live:
             return set(), "managed runtime not reported healthy by worker"
+        wanted = {(getattr(m, "runtime", None), getattr(m, "id", None))
+                  for m in getattr(config, "models", []) or []
+                  if getattr(m, "runtime", None) in configured}
         ready = set()
         for model in report["models"]:
             if not isinstance(model, dict):
                 continue
             rid, mid = model.get("runtime"), model.get("id")
-            if (_is_str(rid) and _is_str(mid) and rid in live
+            if (_is_str(rid) and _is_str(mid) and rid in live and (rid, mid) in wanted
                     and model.get("available") is True and model.get("simulated") is False):
                 ready.add((rid, mid))
         if not ready:
