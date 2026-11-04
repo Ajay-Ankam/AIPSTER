@@ -28,6 +28,14 @@ from aipster_tray.firstrun import (build_info, data_dir, ensure_private_token,
 from aipster_tray.state import http_origin
 
 
+def bundle_dir_fallback():
+    """Installed app dir holding the frozen bundle (read-only probe)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    from aipster_tray.firstrun import bundle_dir
+    return bundle_dir()
+
+
 class Tee:
     """Mirror a text stream to a log file without ever touching secrets."""
 
@@ -123,7 +131,8 @@ def sender_forward(args, config):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="AIPSTER local worker launcher")
-    parser.add_argument("command", nargs="?", choices=["run", "inspect", "tray", "pair", "sender"],
+    parser.add_argument("command", nargs="?", choices=["run", "inspect", "tray", "pair", "sender",
+                                                       "delivery-check", "runtime-plan"],
                         default="run")
     parser.add_argument("tray_command", nargs="?",
                         help="with 'tray': status | start | stop | restart | quit")
@@ -133,9 +142,18 @@ def main(argv=None):
     parser.add_argument("--api-base", default=None,
                         help="with 'pair'/'sender': AIPSTER API base (default: production)")
     parser.add_argument("--data-dir", default=None,
-                        help="with 'pair'/'sender': worker data dir (default: installed location)")
+                        help="with 'pair'/'sender'/'delivery-check': worker data dir (default: installed location)")
+    parser.add_argument("--app-dir", default=None,
+                        help="with 'delivery-check': installed app dir holding the frozen bundle "
+                             "(default: the bundle beside the launcher)")
     parser.add_argument("--config", default=None,
-                        help="with 'pair'/'sender': worker config (sender default: installed config)")
+                        help="with 'pair'/'sender': worker config (sender default: installed config); "
+                             "with 'runtime-plan': config to evaluate (required)")
+    parser.add_argument("--json", action="store_true",
+                        help="with 'runtime-plan': emit the structured plan as JSON")
+    parser.add_argument("--consent", choices=("yes", "no"), default="no",
+                        help="with 'runtime-plan': record explicit install/configuration consent "
+                             "(default: no; recorded only, never acted on)")
     parser.add_argument("--name", default=None,
                         help="with 'pair': display-name hint (default: hostname)")
     parser.add_argument("--code", default=None,
@@ -150,6 +168,23 @@ def main(argv=None):
     if args.version:
         print(build_info())
         return 0
+    if args.command == "delivery-check":
+        from delivery_check import check_delivery, format_result
+        app_dir = Path(args.app_dir) if args.app_dir else bundle_dir_fallback()
+        data = Path(args.data_dir) if args.data_dir else data_dir()
+        result = check_delivery(app_dir, data)
+        print(format_result(result))
+        return result["exit_code"]
+    if args.command == "runtime-plan":
+        # Preflight planning only, BEFORE any setup/token/provisioning path:
+        # no data dir creation, no token, no config write, no engine run.
+        if not args.config:
+            parser.error("--config is required with 'runtime-plan'")
+        from runtime_setup import main as runtime_plan_main
+        plan_argv = ["--config", args.config, "--consent", args.consent]
+        if args.json:
+            plan_argv.append("--json")
+        return runtime_plan_main(plan_argv)
     if args.command == "tray":
         from aipster_tray.controller import main as tray_main
         return tray_main([args.tray_command or "status"])
