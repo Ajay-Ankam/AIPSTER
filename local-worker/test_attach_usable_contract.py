@@ -203,7 +203,17 @@ class ManagedDendriteContractTests(DendriteContractTests):
         self.assertTrue(usable, f"recovery: {why}")
 
     def test_llama_down_then_recovery(self):
-        self.skipTest("managed runtime has no attached server to take down")
+        # Managed analogue of "engine down": the model file disappears while
+        # the worker stays up. The worker's own model_available check makes
+        # it unusable, and it recovers when the file is restored.
+        model = self.data / "model.gguf"
+        saved = model.read_bytes()
+        model.unlink()
+        usable, why = self.decide()
+        self.assertFalse(usable, why)
+        model.write_bytes(saved)
+        usable, why = self.decide()
+        self.assertTrue(usable, f"recovery: {why}")
 
 if __name__ == "__main__":
     unittest.main()
