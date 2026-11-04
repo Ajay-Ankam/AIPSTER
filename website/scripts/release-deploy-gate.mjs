@@ -18,15 +18,113 @@ import {CANONICAL_REPO, MAIN_CHECK_NAME, WORKER_CHECK_NAME,
 import {bindEvidence, fetchAssociatedPRs, fetchPR,
   fetchPRFiles, fetchReviews, parseHoldsFile,
   requireCheckPass, resolveAcceptance, resolvePermissionsFor,
-  resolveReviewState, standingLogins, verifyCheckProducers,
+  resolveMaintainer, resolveReviewState, standingLogins, verifyCheckProducers,
+  HOLD_REGISTRY_PATH, PINNED_OWNER,
   INSTALLER_CHECK_NAME, INSTALLER_WORKFLOW_FILE,
   SITE_WORKFLOW_FILE, WORKER_WORKFLOW_FILE} from './release-gate.mjs';
 
 const SHA_RE = /^[a-f0-9]{40}$/;
 
+// Historical release allowances (RELEASE158). Default OFF: an absent file
+// or an empty `allowances` map changes nothing. An entry is a maintainer's
+// explicit, auditable decision about named historical commits only — never
+// a wildcard, never evidence, never automatic. It applies only when ALL of:
+// manual mode; dispatch actor is the pinned owner; live equals the entry's
+// pinned liveSha (so it is inert once live moves past it); exactly one PR
+// in the range touched this file, its head blob equals the target blob,
+// and that PR carries a maintainer review at its head naming
+// `RELEASE-HISTORICAL-ALLOWANCE <id> <sha256 of the file>` (the dispatch
+// shortcut never counts for this). Active holds, CI, producers, blocking
+// reviews and integration proof are never relaxed by an allowance.
+export const ALLOWANCE_PATH = '.github/release-historical-allowances.json';
+export const ALLOWANCE_MARKER = 'RELEASE-HISTORICAL-ALLOWANCE';
+const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function exactKeys(obj, keys, label) {
+  assert(obj && typeof obj === 'object' && !Array.isArray(obj), `${label} must be an object`);
+  const got = Object.keys(obj).sort();
+  assert.deepEqual(got, [...keys].sort(), `${label} has missing or unknown keys`);
+}
+
+function shaList(list, label) {
+  assert(Array.isArray(list) && list.length > 0, `${label} must be a non-empty list`);
+  for (const s of list) assert(SHA_RE.test(s || ''), `${label} entries must be full 40-hex SHAs`);
+  assert.equal(new Set(list).size, list.length, `${label} has duplicates`);
+  return list;
+}
+
+export function parseAllowancesFile(json) {
+  if (json === null || json === undefined) return {};
+  exactKeys(json, ['version', 'allowances'], 'Allowance file');
+  assert.equal(json.version, 1, 'Allowance file version must be 1');
+  const out = {};
+  for (const [id, e] of Object.entries(json.allowances || {})) {
+    assert(ID_RE.test(id), `Allowance id ${id} is malformed`);
+    exactKeys(e, ['liveSha', 'registryTouches', 'supersededHeads', 'decision', 'approvedBy'],
+      `Allowance ${id}`);
+    assert(SHA_RE.test(e.liveSha || ''), `Allowance ${id} liveSha must be a full SHA`);
+    assert.equal(e.approvedBy, PINNED_OWNER, `Allowance ${id} must name the pinned owner`);
+    assert(typeof e.decision === 'string' && e.decision.trim().length >= 20,
+      `Allowance ${id} needs a written decision`);
+    assert(Array.isArray(e.registryTouches), `Allowance ${id} registryTouches must be a list`);
+    if (e.registryTouches.length) shaList(e.registryTouches, `Allowance ${id} registryTouches`);
+    assert(Array.isArray(e.supersededHeads), `Allowance ${id} supersededHeads must be a list`);
+    for (const s of e.supersededHeads) {
+      exactKeys(s, ['pr', 'head', 'merge', 'repairedBy', 'reason'], `Allowance ${id} superseded head`);
+      assert(Number.isSafeInteger(s.pr) && s.pr > 0, `Allowance ${id} superseded pr must be a number`);
+      shaList([s.head, s.merge], `Allowance ${id} superseded head/merge`);
+      assert(Array.isArray(s.repairedBy) && s.repairedBy.length > 0,
+        `Allowance ${id} PR ${s.pr} needs a repair chain`);
+      for (const r of s.repairedBy) {
+        exactKeys(r, ['pr', 'head'], `Allowance ${id} repair`);
+        assert(Number.isSafeInteger(r.pr) && r.pr !== s.pr, `Allowance ${id} repair pr invalid`);
+        assert(SHA_RE.test(r.head || ''), `Allowance ${id} repair head must be a full SHA`);
+      }
+      assert(typeof s.reason === 'string' && s.reason.trim().length >= 20,
+        `Allowance ${id} PR ${s.pr} needs a written reason`);
+    }
+    assert(e.registryTouches.length || e.supersededHeads.length,
+      `Allowance ${id} allows nothing`);
+    out[id] = e;
+  }
+  return out;
+}
+
+// Returns {id, entry} only when every activation condition holds; otherwise
+// null with a recorded reason. Never throws for "not active": callers keep
+// their original fail-closed refusal and add the reason to it.
+export function activeAllowance({allowances, allowanceDigest, mode, dispatchActor,
+  liveSha, targetSha, git, allowanceTouchers, permissions}) {
+  const why = (reason) => { activeAllowance.lastReason = reason; return null; };
+  const entries = Object.entries(allowances || {}).filter(([, e]) => e.liveSha === liveSha);
+  if (entries.length === 0) return why('no allowance pinned to this live SHA');
+  assert.equal(entries.length, 1, 'More than one allowance pinned to this live SHA (fail closed)');
+  const [id, entry] = entries[0];
+  if (mode !== 'manual') return why('allowances apply to manual dispatch only');
+  if (dispatchActor !== PINNED_OWNER) return why('dispatch actor is not the pinned owner');
+  if (!/^[a-f0-9]{64}$/.test(allowanceDigest || '')) return why('allowance file digest unavailable');
+  if (allowanceTouchers.length !== 1) {
+    return why(`exactly one PR in range must introduce ${ALLOWANCE_PATH} (found ${allowanceTouchers.length})`);
+  }
+  const [t] = allowanceTouchers;
+  const headBlob = git.blobAt(t.head, ALLOWANCE_PATH);
+  const targetBlob = git.blobAt(targetSha, ALLOWANCE_PATH);
+  if (!headBlob || headBlob !== targetBlob) {
+    return why(`PR ${t.number} head blob of ${ALLOWANCE_PATH} differs from the target`);
+  }
+  const marker = `${ALLOWANCE_MARKER} ${id} ${allowanceDigest}`;
+  const ok = (t.reviews || []).some((r) => (r.state === 'APPROVED' || r.state === 'COMMENTED')
+    && r.commitId === t.head && typeof r.body === 'string' && r.body.includes(marker)
+    && resolveMaintainer({login: r.user, association: r.association,
+      permission: permissions?.[r.user]}).maintainer);
+  if (!ok) return why(`PR ${t.number} lacks a maintainer review at ${t.head} naming "${marker}"`);
+  return {id, entry};
+}
+
 export async function evaluateDeployGate({git, request, fetchChecks,
   fetchHeadChecks, liveSha, targetSha, mode, dispatchActor,
-  dispatchActorAssociation, holds, permissions}) {
+  dispatchActorAssociation, holds, permissions,
+  allowances = {}, allowanceDigest = null}) {
   assert(SHA_RE.test(liveSha || ''), 'An exact live SHA is required');
   assert(SHA_RE.test(targetSha || ''), 'An exact target SHA is required');
   assert(mode === 'auto' || mode === 'manual', 'Mode must be auto or manual');
@@ -43,6 +141,19 @@ export async function evaluateDeployGate({git, request, fetchChecks,
   assert(Array.isArray(range) && range.length > 0,
     'Empty range without equality: refetch main (fail closed)');
   const evaluated = [];
+  // Superseded-head candidates are DEFERRED, not accepted: they are only
+  // resolved after the whole range is evaluated and the allowance is proven
+  // active. Any other evidence failure throws immediately, as before.
+  const deferred = [];
+  const allowanceTouchers = [];
+  const supersededEntry = (pr, merge) => {
+    for (const [id, e] of Object.entries(allowances || {})) {
+      for (const s of e.supersededHeads) {
+        if (s.pr === pr.number && s.head === pr.headSha && s.merge === merge) return {id, s};
+      }
+    }
+    return null;
+  };
   for (const sha of range) {
     assert(SHA_RE.test(sha || ''), 'Range returned a non-SHA');
     const second = git.secondParent(sha);
@@ -66,7 +177,16 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       const fresh = await resolvePermissionsFor({request,
         logins: standingLogins(reviews, pr.headSha)});
       permissions = {...(permissions || {}), ...fresh};
-      const evidence = bindEvidence({pr, reviews, permissions});
+      let evidence;
+      try {
+        evidence = bindEvidence({pr, reviews, permissions});
+      } catch (err) {
+        const hit = supersededEntry(pr, sha);
+        if (!hit) throw err;
+        deferred.push({number: pr.number, head: pr.headSha, merge: sha, ...hit,
+          evidenceError: String(err && err.message || err)});
+        evidence = [];
+      }
       assert(second === pr.headSha,
         `Merge ${sha} does not integrate reviewed head ${pr.headSha}`);
       const acceptance = resolveAcceptance({reviews: reviews,
@@ -112,6 +232,9 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       }
       await verifyCheckProducers({request, checks: headChecks,
         specs: headSpecs});
+      if (files.includes(ALLOWANCE_PATH)) {
+        allowanceTouchers.push({number: pr.number, head: pr.headSha, reviews});
+      }
       evaluated.push({merge: sha, number: pr.number, head: pr.headSha,
         evidence: evidence.length, acceptedBy: acceptance.by, via: acceptance.via});
     }
@@ -121,11 +244,47 @@ export async function evaluateDeployGate({git, request, fetchChecks,
   // The range aggregate is computed once: it drives BOTH the hold-registry
   // guard below and worker conditionality. A range touching the control
   // file fails closed however it touches it (modify/remove/replace) —
-  // history is preserved by refusing, never by rewriting it.
+  // history is preserved by refusing, never by rewriting it — UNLESS an
+  // active historical allowance names exactly the touching commits.
   const changed = git.changedFiles(liveSha, targetSha);
-  const {HOLD_REGISTRY_PATH} = await import('./release-gate.mjs');
-  assert(!changed.includes(HOLD_REGISTRY_PATH),
-    `Release range touches the hold registry (${HOLD_REGISTRY_PATH}): refused — clearance needs a separately approved owner operation`);
+  const used = [];
+  // Resolve at most one active allowance. Nothing below runs (and nothing
+  // is relaxed) unless the range actually needs it.
+  const needsAllowance = deferred.length > 0 || changed.includes(HOLD_REGISTRY_PATH);
+  let active = null;
+  let inactiveReason = '';
+  if (needsAllowance) {
+    activeAllowance.lastReason = '';
+    active = activeAllowance({allowances, allowanceDigest, mode, dispatchActor,
+      liveSha, targetSha, git, allowanceTouchers, permissions});
+    inactiveReason = active ? '' : ` [allowance inactive: ${activeAllowance.lastReason}]`;
+  }
+  if (changed.includes(HOLD_REGISTRY_PATH)) {
+    // Default path is byte-for-byte the original refusal: no listing, no
+    // relaxation, unless an allowance is proven active.
+    assert(active,
+      `Release range touches the hold registry (${HOLD_REGISTRY_PATH}): refused — clearance needs a separately approved owner operation${inactiveReason}`);
+    const touches = git.registryTouches(liveSha, targetSha, HOLD_REGISTRY_PATH);
+    assert(Array.isArray(touches), 'Registry touch listing failed (fail closed)');
+    const pinned = active ? active.entry.registryTouches : [];
+    const same = active && touches.length === pinned.length
+      && [...touches].sort().join() === [...pinned].sort().join();
+    assert(same,
+      `Release range touches the hold registry (${HOLD_REGISTRY_PATH}): refused — clearance needs a separately approved owner operation`
+      + (active ? ` (allowance ${active.id} pins ${pinned.length} touch(es); range has ${touches.length}: ${touches.join(', ')})` : inactiveReason));
+    used.push({allowance: active.id, registryTouches: touches});
+  }
+  for (const d of deferred) {
+    assert(active && active.id === d.id,
+      `PR ${d.number} head ${d.head}: ${d.evidenceError}${inactiveReason || ' (allowance does not cover this head)'}`);
+    for (const r of d.s.repairedBy) {
+      const repaired = evaluated.find((p) => p.number === r.pr && p.head === r.head);
+      assert(repaired && repaired.evidence > 0,
+        `PR ${d.number} repair PR ${r.pr} head ${r.head} is not merged in this range with its own bound evidence`);
+    }
+    used.push({allowance: d.id, supersededHead: {pr: d.number, head: d.head,
+      repairedBy: d.s.repairedBy}});
+  }
   // Fresh trusted hold governs before any production step: any active
   // GLOBAL hold, or any active hold on an ancestor-or-self of the target
   // (proven by git, never assumed), blocks both paths. A descendant
@@ -157,6 +316,7 @@ export async function evaluateDeployGate({git, request, fetchChecks,
   }
   await verifyCheckProducers({request, checks, specs: targetSpecs});
   return {ok: true, mode, live: liveSha, target: targetSha, prs: evaluated,
+    historicalAllowances: used,
     residualRace: 'Recheck main immediately before the irreversible step.'};
 }
 
@@ -191,6 +351,19 @@ export function realGit(cwd) {
     changedFiles: (live, target) =>
       run(['diff', '--name-only', live, target]).split('\n')
         .map(s => s.trim()).filter(Boolean),
+    // Every commit (all parents, not first-parent) in live..target that
+    // touched `path`: the exact set an allowance must pin.
+    registryTouches: (live, target, path) =>
+      run(['log', '--format=%H', `${live}..${target}`, '--', path]).split('\n')
+        .map(s => s.trim()).filter(Boolean),
+    // Blob id of `path` at `sha`, or null when absent.
+    blobAt: (sha, path) => {
+      try {
+        return run(['rev-parse', `${sha}:${path}`]);
+      } catch {
+        return null;
+      }
+    },
   };
 }
 
@@ -204,6 +377,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const {readFile: read} = await import('node:fs/promises');
   const holds = parseHoldsFile(JSON.parse(
     await read(resolve(root, '.github/release-holds.json'), 'utf8')));
+  // Optional trusted allowance file (default off when absent). Its sha256
+  // must appear in the maintainer's allowance review; read from the same
+  // trusted release checkout as the holds, never from candidate content.
+  let allowances = {};
+  let allowanceDigest = null;
+  let allowanceRaw = null;
+  try {
+    allowanceRaw = await read(resolve(root, ALLOWANCE_PATH));
+  } catch (e) {
+    if (!e || e.code !== 'ENOENT') throw e;
+  }
+  if (allowanceRaw) {
+    const {createHash} = await import('node:crypto');
+    allowanceDigest = createHash('sha256').update(allowanceRaw).digest('hex');
+    allowances = parseAllowancesFile(JSON.parse(allowanceRaw.toString('utf8')));
+  }
   async function api(path) {
     const res = await fetch(`https://api.github.com/repos/${CANONICAL_REPO}/${path}`, {
       headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`,
@@ -233,6 +422,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     fetchChecks: (sha) => fetchCheckRunsAll(api, sha),
     fetchHeadChecks, liveSha,
     targetSha, mode, dispatchActor: process.env.DISPATCH_ACTOR || null,
-    dispatchActorAssociation: null, holds, permissions});
+    dispatchActorAssociation: null, holds, permissions, allowances, allowanceDigest});
   console.log(JSON.stringify(verdict));
 }
