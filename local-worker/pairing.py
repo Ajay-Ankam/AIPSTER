@@ -377,27 +377,44 @@ def _worker_token(config, data_dir):
     return value or None
 
 
-def attached_ready_models(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
-    """Configured attach-mode models the RUNNING local worker reports ready.
+ATTACH_NODE_MAX_BYTES = 1_048_576
+
+
+def _is_str(value):
+    return isinstance(value, str) and bool(value)
+
+
+def attach_readiness(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
+    """(ready, reason) for configured attach models, from the RUNNING worker.
 
     Readiness comes from the worker's own authenticated loopback
     `GET /v1/node`, so the bit also proves the worker that would execute is
     up and has already applied its attach quarantine/identity checks. A model
     counts only when the node reports it available, resident and not
     simulated, and its runtime as attach, ready, without last_error and not
-    simulated. Any error, non-loopback listener, missing token, redirect or
-    unexpected shape yields an empty set. The token is never logged.
+    simulated. `ready` is a set of (runtime_id, model_id).
+
+    Never raises. Any error, non-loopback listener, missing token, redirect,
+    oversized body or unexpected shape yields an empty set with a fixed,
+    secret-free `reason` (no token, no response bytes) for the sender log.
     """
+    try:
+        return _attach_readiness(config, data_dir, timeout)
+    except Exception as exc:  # fail closed: a probe bug must not stop the sender
+        return set(), f"attach probe error ({type(exc).__name__})"
+
+
+def _attach_readiness(config, data_dir, timeout):
     node = getattr(config, "node", None)
     host = str(getattr(node, "host", "") or "")
     port = getattr(node, "port", None)
     if host in ("0.0.0.0", "::", ""):
         host = "127.0.0.1"
-    if host not in _LOOPBACK_HOSTS or not isinstance(port, int):
-        return set()
+    if host not in _LOOPBACK_HOSTS or not isinstance(port, int) or isinstance(port, bool):
+        return set(), "worker listener is not loopback; attach readiness not probed"
     token = _worker_token(config, data_dir)
     if not token:
-        return set()
+        return set(), "worker API token unavailable; attach readiness not probed"
     connection = None
     try:
         connection = http.client.HTTPConnection(host, port, timeout=timeout)
@@ -405,33 +422,61 @@ def attached_ready_models(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
             "Authorization": "Bearer " + token, "Accept": "application/json"})
         response = connection.getresponse()
         if response.status != 200:
-            return set()
-        report = json.loads(response.read(1_048_576).decode("utf-8"))
-    except Exception:
-        return set()
+            return set(), f"worker /v1/node returned HTTP {int(response.status)}"
+        raw = response.read(ATTACH_NODE_MAX_BYTES + 1)
+    except (OSError, http.client.HTTPException) as exc:
+        return set(), f"worker /v1/node unreachable ({type(exc).__name__})"
     finally:
         if connection is not None:
             connection.close()
+    if len(raw) > ATTACH_NODE_MAX_BYTES:
+        return set(), "worker /v1/node response too large"
+    try:
+        report = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return set(), "worker /v1/node response is not JSON"
     if not isinstance(report, dict):
-        return set()
-    configured = {r.id: r for r in getattr(config, "runtimes", []) or []
+        return set(), "worker /v1/node response is not an object"
+    runtimes, models = report.get("runtimes"), report.get("models")
+    if not isinstance(runtimes, list) or not isinstance(models, list):
+        return set(), "worker /v1/node response lacks runtimes/models lists"
+    configured = {r.id for r in getattr(config, "runtimes", []) or []
                   if getattr(r, "mode", "") == "attach" and getattr(r, "kind", "") != "mock"}
-    live_runtimes = {}
-    for runtime in report.get("runtimes") or []:
-        if (isinstance(runtime, dict) and runtime.get("id") in configured
-                and runtime.get("mode") == "attach" and runtime.get("state") == "ready"
+    reported, live = set(), set()
+    for runtime in runtimes:
+        if not isinstance(runtime, dict) or not _is_str(runtime.get("id")):
+            continue
+        rid = runtime["id"]
+        if rid not in configured:
+            continue
+        reported.add(rid)
+        if (runtime.get("mode") == "attach" and runtime.get("state") in ("ready", "generating")
                 and runtime.get("simulated") is False and not runtime.get("last_error")):
-            live_runtimes[runtime["id"]] = runtime
+            live.add(rid)
+    if not reported:
+        return set(), "no configured attach runtime in worker report"
+    if not live:
+        return set(), "attach runtime not ready (state/error/simulated)"
     ready = set()
-    for model in report.get("models") or []:
-        if (isinstance(model, dict) and model.get("runtime") in live_runtimes
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        rid, mid = model.get("runtime"), model.get("id")
+        if (_is_str(rid) and _is_str(mid) and rid in live
                 and model.get("available") is True and model.get("resident") is True
-                and model.get("simulated") is False and model.get("id")):
-            ready.add((model["runtime"], model["id"]))
-    return ready
+                and model.get("simulated") is False):
+            ready.add((rid, mid))
+    if not ready:
+        return set(), "attach runtime ready but no model resident/available"
+    return ready, "attach model ready"
 
 
-def decide_usable(config_path=None, data_dir=None):
+def attached_ready_models(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
+    """Set of (runtime_id, model_id) the running worker reports ready. Never raises."""
+    return attach_readiness(config, data_dir, timeout)[0]
+
+
+def decide_usable(config_path=None, data_dir=None, diagnostics=None):
     """Heartbeat usable-bit policy. False unless real capacity is verified.
 
     Mock/simulated engines always report usable=false: the worker is
@@ -441,33 +486,47 @@ def decide_usable(config_path=None, data_dir=None):
     running local worker's authenticated `/v1/node` reports that exact
     configured model resident and its runtime ready (needs `data_dir` or the
     token env var). Anything uncertain — missing config, missing worker
-    install, load failure, worker down — is false. Reachability is reported
-    by the beat itself.
+    install, load failure, worker down, malformed report — is false.
+    Reachability is reported by the beat itself.
+
+    Never raises. When `diagnostics` is a list, one fixed secret-free reason
+    for the decision is appended to it.
     """
+    try:
+        usable, reason = _decide_usable(config_path, data_dir)
+    except Exception as exc:  # fail closed; the sender must keep beating
+        usable, reason = False, f"usable policy error ({type(exc).__name__})"
+    if isinstance(diagnostics, list):
+        diagnostics.append(reason)
+    return usable
+
+
+def _decide_usable(config_path, data_dir):
     if not config_path:
-        return False
+        return False, "no worker config"
     try:
         from dendrite.config import load_config
         from dendrite.hardware import file_identity
     except ImportError:
-        return False
+        return False, "worker package unavailable"
     try:
         config = load_config(Path(config_path))
     except Exception:
-        return False
+        return False, "worker config failed to load"
     runtimes = {r.id: r for r in getattr(config, "runtimes", []) or []}
     if not runtimes or all(getattr(r, "kind", "") == "mock" for r in runtimes.values()):
-        return False
+        return False, "mock/simulated runtime only"
     attached = None  # probed lazily, at most once per decision
+    reason = "no configured real model is ready"
     for model in getattr(config, "models", []) or []:
         runtime = runtimes.get(getattr(model, "runtime", None))
         if runtime is None or getattr(runtime, "kind", "") == "mock":
             continue
         if getattr(runtime, "mode", "") == "attach":
             if attached is None:
-                attached = attached_ready_models(config, data_dir)
+                attached, reason = attach_readiness(config, data_dir)
             if (runtime.id, getattr(model, "id", None)) in attached:
-                return True
+                return True, f"attach model ready: {runtime.id}/{model.id}"
             continue
         path = getattr(model, "path", None)
         executable = getattr(runtime, "executable", None)
@@ -476,8 +535,8 @@ def decide_usable(config_path=None, data_dir=None):
         except Exception:
             cached = False
         if cached and executable and shutil.which(str(executable)):
-            return True
-    return False
+            return True, f"managed model on disk: {runtime.id}/{model.id}"
+    return False, reason
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -1186,7 +1245,8 @@ def cmd_heartbeat(args, loop):
             first_beat = False
             # Recomputed per beat (Codex P2): installed/removed models and
             # engines change readiness, and a stale true would misreport ready.
-            usable = decide_usable(args.config, data_dir)
+            usable_why = []
+            usable = decide_usable(args.config, data_dir, usable_why)
             try:
                 result = send_heartbeat(meta["api_base"], meta["resource_id"],
                                         meta["heartbeat_key"], usable)
@@ -1243,8 +1303,10 @@ def cmd_heartbeat(args, loop):
             failures = 0
             write_status(data_dir, {"at": time.time(), "ok": True, "usable": usable,
                                     "heartbeatAt": result.get("heartbeatAt"),
+                                    "usable_reason": (usable_why or ["unknown"])[0],
                                     "note": "reachability only; not inference-ready"}, meta)
-            print(f"heartbeat ok: usable={usable} at={result.get('heartbeatAt')}")
+            print(f"heartbeat ok: usable={usable} at={result.get('heartbeatAt')} "
+                  f"({(usable_why or ['unknown'])[0]})")
             # After the beat, never before: the report moves heartbeat_at
             # server-side, and the next beat is >= HEARTBEAT_MIN_INTERVAL_SEC
             # away, clear of the 25s window.
