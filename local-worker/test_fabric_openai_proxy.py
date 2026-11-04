@@ -77,6 +77,21 @@ class FixtureFabricHandler(BaseHTTPRequestHandler):
 
     def _reply(self, payload):
         mode = FixtureFabricHandler.mode
+        if self.command == "GET" and mode == "status":
+            # Owner-scoped status origin: only the owning key sees the op.
+            if self.headers.get("Authorization") != "Bearer owner-key":
+                self._send(404, {"error": {"message": "not found", "type": "invalid_request_error",
+                                           "code": "not_found"}})
+                return
+            key = self.path[len("/v1/operations/"):] if self.path.startswith("/v1/operations/") else ""
+            if key == "pending-key-00000001":
+                self._send(409, {"error": {"message": "still running", "type": "invalid_request_error",
+                                           "code": "operation_in_progress"},
+                                 "op_id": "op-1", "automatic_retry": False})
+                return
+            self._send(404, {"error": {"message": "not found", "type": "invalid_request_error",
+                                       "code": "not_found"}})
+            return
         if mode == "hang":
             time.sleep(5)
             self._send(200, {"object": "list", "data": []})
@@ -242,7 +257,30 @@ class ProxyCase(unittest.TestCase):
         self.assertNotIn(CALLER_KEY, logged)
         self.assertNotIn("/v1/", logged.replace("fabric-openai-proxy: status=", ""))
         for line in logged.strip().splitlines():
-            self.assertRegex(line, r"^fabric-openai-proxy: status=\d+ route=(models|chat|other) corr=\d+$")
+            self.assertRegex(line, r"^fabric-openai-proxy: status=\d+ route=(models|chat|status|other) corr=\d+$")
+
+    def test_status_relay_preserves_scoping_and_typed_pending(self):
+        FixtureFabricHandler.mode = "status"
+        status, text = raw_request(self.port, "GET", "/v1/operations/pending-key-00000001",
+                                   headers={"Authorization": "Bearer owner-key"})
+        out = json.loads(text)
+        self.assertEqual(status, 409)
+        self.assertEqual(out["error"]["code"], "operation_in_progress")
+        self.assertEqual(out["op_id"], "op-1")
+        # A foreign key is scoped out server-side; the relay preserves the 404.
+        status, text = raw_request(self.port, "GET", "/v1/operations/pending-key-00000001",
+                                   headers={"Authorization": "Bearer other-key"})
+        self.assertEqual(status, 404)
+        # A malformed key is refused locally before any forward.
+        n = len(FixtureFabricHandler.seen)
+        status, out = raw_request(self.port, "GET", "/v1/operations/bad!",
+                                  headers={"Authorization": "Bearer owner-key"})
+        self.assertEqual(status, 400)
+        self.assertEqual(len(FixtureFabricHandler.seen), n)
+        # Unauthenticated status reads are refused with no forward.
+        status, _ = raw_request(self.port, "GET", "/v1/operations/pending-key-00000001")
+        self.assertEqual(status, 401)
+        self.assertEqual(len(FixtureFabricHandler.seen), n)
 
     # -- defect 4: honest upstream mapping, uncertainty, bounds ----------------
     def test_upstream_401_preserved_with_status_not_rewritten_to_503(self):

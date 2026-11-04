@@ -78,6 +78,7 @@ function setup() {
         runtime_id: env.task.placement.runtime_id, model_id: env.task.model_id,
         runtime_instance: env.binding.runtime_instance, model_fingerprint: env.binding.model_fingerprint,
         simulated: false, content: `${SYNTHETIC} for ${lease.job_id}`, elapsed_ms: 1, usage: {}, cache: {},
+        finish_reason: 'stop',
       };
       const done = await store.completeJob({ job_id: lease.job_id, lease_id: lease.lease_id,
         resource_id: rid, status: 'succeeded', result });
@@ -159,6 +160,46 @@ test('real store: wrong owner sees no candidates and dispatches nothing', async 
   assert.equal(out.http, 409);
   assert.equal(out.body.error.code, 'no_eligible_worker');
   assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM dispatch_admissions').get().n, 0);
+  noNetwork();
+});
+
+test('real store: finish evidence is gated at completion through the real worker path', async () => {
+  // A dispatched (not yet completed) job is leased, then completed twice:
+  // tool_calls evidence is refused (invalid_result) while stop evidence is
+  // accepted — finish-reason transport proven through the real store.
+  let t = T0;
+  const sqlite = new DatabaseSync(':memory:');
+  applyMigrations(sqlite);
+  seed(sqlite, T0);
+  const db = createD1Shim(sqlite);
+  const store = createD1DispatchStore(db, { now: () => t, env: { INFERENCE_OWNER_DAILY_TOKENS: '10000' } });
+  const route = createFabricOpenAIRoute({
+    needAuthz: () => null, actor: { kind: 'session', user: { id: 'u_alice' } }, db, env: {},
+    getStore: async () => store, clock: () => t,
+    sleep: async (ms) => { t += ms; }, generateKey: () => 'd1-op-00000009',
+    maxWaitMs: 60000, pollIntervalMs: 60000,
+  });
+  const pending = await route.handleChat({ body: chatBody(), idempotencyKey: 'd1-op-g0000001' });
+  assert.equal(pending.http, 409); // worker idle: job queued, budget spent waiting
+  // Lease strictly before the request deadline (the route clock already sits
+  // on it after the budget wait); completion at the deadline is still timely.
+  const lease = await store.leaseNextJob({ resource_id: 'res-A', now: T0 + 1000 });
+  assert.ok(lease && lease.job_id);
+  const env = lease.envelope;
+  const base = { request_id: lease.job_id, node_id: env.task.placement.node_id,
+    runtime_id: env.task.placement.runtime_id, model_id: env.task.model_id,
+    runtime_instance: env.binding.runtime_instance, model_fingerprint: env.binding.model_fingerprint,
+    simulated: false, content: `${SYNTHETIC} gated`, elapsed_ms: 1, usage: {}, cache: {} };
+  const bad = await store.completeJob({ job_id: lease.job_id, lease_id: lease.lease_id,
+    resource_id: 'res-A', status: 'succeeded', result: { ...base, finish_reason: 'tool_calls' } });
+  assert.equal(bad.accepted, false);
+  assert.equal(bad.reason, 'invalid_result');
+  const good = await store.completeJob({ job_id: lease.job_id, lease_id: lease.lease_id,
+    resource_id: 'res-A', status: 'succeeded', result: { ...base, finish_reason: 'length' } });
+  assert.equal(good.accepted, true);
+  const status = await route.handleStatus({ idempotencyKey: 'd1-op-g0000001' });
+  assert.equal(status.http, 200, JSON.stringify(status));
+  assert.equal(status.body.choices[0].finish_reason, 'length');
   noNetwork();
 });
 

@@ -72,8 +72,13 @@ function createFixtureStore(state, { jobFor = null, dispatchFault = null } = {})
     async readJob({ job_id } = {}) {
       const rec = jobs[job_id];
       if (!rec) throw new Error('fixture store: unknown job');
-      if (jobFor) return jobFor(job_id, rec.envelope, rec);
-      return succeededJob(job_id, rec.envelope);
+      const job = jobFor ? jobFor(job_id, rec.envelope, rec) : succeededJob(job_id, rec.envelope);
+      // The fake transport mirrors a finish-reporting worker; legacy shapes
+      // are covered by dedicated cases that strip the key explicitly.
+      if (job && job.status === 'succeeded' && job.result && job.result.finish_reason === undefined) {
+        job.result = { ...job.result, finish_reason: 'stop' };
+      }
+      return job;
     },
   });
 }
@@ -213,6 +218,39 @@ test('same-payload retry reconciles without new admissions', async () => {
   assert.equal(second.body.provenance.job_id, 'job-r-0001');
   assert.equal(store.admissionsIssued, issued);
   assert.equal(Object.keys(store.jobs).length, 1);
+  noNetwork();
+});
+
+test('expired deadline with a different prompt keeps conflict, never the prior completion', async () => {
+  // Exact R3 probe: first 200, advance past the deadline, replay the key
+  // with a different prompt. Payload binding is digest-checked before any
+  // reconcile, so the prior completion cannot escape under the new prompt.
+  const { route, store, advance } = setup();
+  const first = await route.handleChat({ body: chatBody(), idempotencyKey: 'probe-expire-0001' });
+  assert.equal(first.http, 200);
+  const issued = store.admissionsIssued;
+  advance(61000);
+  const second = await route.handleChat(
+    { body: chatBody({ messages: [{ role: 'user', content: 'Different request with same key' }] }),
+      idempotencyKey: 'probe-expire-0001' });
+  assert.equal(second.http, 409);
+  assert.equal(second.body.error.code, 'idempotency_conflict');
+  assert.equal(second.body.object === 'chat.completion', false);
+  assert.equal(store.admissionsIssued, issued);
+  noNetwork();
+});
+
+test('expired deadline with the same prompt reconciles read-only to the completion', async () => {
+  const { route, store, advance } = setup();
+  const first = await route.handleChat({ body: chatBody(), idempotencyKey: 'probe-expire-0002' });
+  assert.equal(first.http, 200);
+  const issued = store.admissionsIssued;
+  advance(61000);
+  const second = await route.handleChat({ body: chatBody(), idempotencyKey: 'probe-expire-0002' });
+  assert.equal(second.http, 200, JSON.stringify(second));
+  assert.equal(second.body.object, 'chat.completion');
+  assert.equal(second.body.provenance.job_id, 'job-r-0001');
+  assert.equal(store.admissionsIssued, issued);
   noNetwork();
 });
 

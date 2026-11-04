@@ -20,14 +20,19 @@ packaging, icons, or controllers.
   no ambient credential, no redirects, bounded logs, honest errors, caller
   `Idempotency-Key` forwarded end to end).
 - `local-worker/model_readiness.py` — worker report helper (typed per-runtime
-  model evidence from the loopback upstream list). Stdlib only.
-- Tests: `website/tests/fabric-openai067.test.mjs` (34),
+  model evidence shaping; network- and credential-free). Stdlib only.
+- Tests: `website/tests/fabric-openai067.test.mjs` (36),
   `website/tests/model-readiness067.test.mjs` (13),
-  `website/tests/fabric-openai-route067.test.mjs` (19),
-  `website/tests/fabric-openai-d1-integration067.test.mjs` (6, REAL
+  `website/tests/fabric-openai-route067.test.mjs` (21),
+  `website/tests/fabric-openai-d1-integration067.test.mjs` (7, REAL
   disposable D1 store + real route + real loader + labeled synthetic worker),
-  `local-worker/test_fabric_openai_proxy.py` (16),
-  `local-worker/test_model_readiness.py` (6) — all green.
+  `local-worker/test_fabric_openai_proxy.py` (17),
+  `local-worker/test_model_readiness.py` (4),
+  `local-worker/test_inference_worker.py` finish delta (3 new + mirror) — all green.
+- Narrow owned deltas (R3): `local-worker/inference_worker.py` +
+  `website/src/inference/dispatch-store.mjs` (finish-reason propagation
+  only; see runner section). `worker.js`, `pairing.py`,
+  `worker-transport.mjs` NOT touched.
 
 ## Call site 1: pairing.py — attach worker-origin model IDs (WEB066 applies)
 
@@ -108,13 +113,37 @@ if (inferenceEnabled(env) && method === 'GET') {
 }
 ```
 
-## Execution runner: no owned change needed (precise citation)
+## Execution runner: narrow owned delta + one identified follow-up
 
-`local-worker/inference_worker.py:861-869` already refuses a model the
-upstream does not list (`MODEL_UNAVAILABLE`) before any completion call, and
-`models()` (same file) proxies the upstream `/v1/models` with loopback
-guards. The advertisement gate (never admit/place unreported models) is the
-new server `model-readiness.mjs` layer; the execution gate already exists.
+This lane owns the narrow finish-reason delta in
+`local-worker/inference_worker.py` (applied: `complete()` returns validated
+upstream `finish_reason` from `FINISH_REASONS = {stop, length,
+content_filter}`; anything else fails the job with `FINISH_UNSUPPORTED`;
+`_handle` posts the key only when evidenced) and in
+`website/src/inference/dispatch-store.mjs` (applied: `SUCCEEDED_KEYS` gains
+`finish_reason` with the same allowlist; legacy results without the key stay
+acceptable at the store layer). Model gating needed no change:
+`inference_worker.py:861-869` already refuses unlisted models
+(`MODEL_UNAVAILABLE`) pre-completion.
+
+Follow-up NOT applied (different owner): the HTTP intake validator
+`website/src/inference/worker-transport.mjs::validSucceededResult` still
+rejects unknown keys, so an HTTP-posted `finish_reason` is refused at intake
+(fail-closed, safe) until its owner applies this exact patch:
+
+```js
+const allowed = new Set(['request_id', 'node_id', 'runtime_id', 'model_id', 'runtime_instance',
+  'model_fingerprint', 'simulated', 'content', 'elapsed_ms', 'usage', 'cache', 'truncated', 'finish_reason']);
+...
+if (result.finish_reason !== undefined
+  && (typeof result.finish_reason !== 'string'
+    || !['stop', 'length', 'content_filter'].includes(result.finish_reason))) return false;
+```
+
+Until then, finish evidence travels store-direct paths only; HTTP-posted
+results keep the legacy shape and surface as `finish_unavailable` (never an
+invented stop). The python mirror in `test_inference_worker.py` was updated
+as a directly affected test.
 
 ## Authority and guardrails the insertion keeps
 

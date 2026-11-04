@@ -126,6 +126,14 @@ GANGLION_TIMEOUT = "GANGLION_TIMEOUT"
 GANGLION_INVALID_RESPONSE = "GANGLION_INVALID_RESPONSE"
 EMPTY_CONTENT = "EMPTY_CONTENT"
 DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
+FINISH_UNSUPPORTED = "FINISH_UNSUPPORTED"
+
+# Upstream finish reasons this worker repeats into L2 results. stop/length
+# are terminal evidence; content_filter is a terminal refusal of the content.
+# Anything else (notably tool_calls) is refused as a per-job failure until
+# tool execution is actually supported: inventing a stop would be a false
+# claim, and surfacing tool calls would bypass execution authority.
+FINISH_REASONS = frozenset({"stop", "length", "content_filter"})
 
 
 class EnvelopeRejected(Exception):
@@ -459,6 +467,10 @@ class GanglionClient:
         A 404 on /v1/completions means the route does not exist (nothing was
         executed), so the documented single-message chat fallback is used
         once. Any other failure is final.
+
+        Returns content, usage and the upstream's terminal finish evidence.
+        finish_reason is None when the upstream reports none (legacy
+        upstreams); anything outside FINISH_REASONS is refused, never mapped.
         """
         body = {"model": model_id, "prompt": prompt, "max_tokens": max_tokens,
                 "temperature": 0, "stream": False}
@@ -472,17 +484,22 @@ class GanglionClient:
             raise GanglionError(GANGLION_HTTP_ERROR, f"HTTP {status}")
         choices = response.get("choices")
         text = None
+        finish_reason = None
         if isinstance(choices, list) and choices and isinstance(choices[0], dict):
             choice = choices[0]
             text = choice.get("text")
             if text is None and isinstance(choice.get("message"), dict):
                 text = choice["message"].get("content")
+            finish_reason = choice.get("finish_reason")
         if not isinstance(text, str):
             raise GanglionError(GANGLION_INVALID_RESPONSE, "no completion text")
         if not text.strip():
             raise GanglionError(EMPTY_CONTENT)
+        if finish_reason is not None and finish_reason not in FINISH_REASONS:
+            raise GanglionError(FINISH_UNSUPPORTED, f"finish {finish_reason!r}")
         usage = response.get("usage")
-        return {"content": text, "usage": usage if isinstance(usage, dict) else {}}
+        return {"content": text, "usage": usage if isinstance(usage, dict) else {},
+                "finish_reason": finish_reason}
 
 
 class StartedLedger:
@@ -893,6 +910,9 @@ class JobRunner:
         elapsed_ms = int(round((self.clock() - started) * 1000))
         # Exactly L2's succeeded key set. runtime_instance and
         # model_fingerprint are echoed from the binding, never invented.
+        # finish_reason travels only when the upstream evidenced it; legacy
+        # upstreams post the legacy shape, which the server treats as
+        # finish-unavailable rather than inventing a stop.
         result = {
             "request_id": job_id,
             "node_id": lease["node_id"],
@@ -906,6 +926,8 @@ class JobRunner:
             "usage": completed["usage"],
             "cache": {},
         }
+        if completed["finish_reason"] is not None:
+            result["finish_reason"] = completed["finish_reason"]
         return self._post(meta, job_id, lease_id, "succeeded", result)
 
     def _post_failure(self, meta, job_id, lease_id, reason, detail,

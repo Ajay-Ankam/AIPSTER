@@ -157,6 +157,44 @@ adapter 34/34, readiness 13/13, route 19/19, D1 integration 6/6; proxy
 native packaging/icons/controllers untouched; no DDL applied, no grants,
 keys, credentials, installs, pushes, or production changes.
 
+## 12. R3 focused corrections (on b3344eb; status: PENDING independent result)
+
+Prior sections preserved verbatim. This lane additionally owns the narrow
+finish-reason propagation delta in exactly two files (no other lane owns
+them): `local-worker/inference_worker.py` (validated finish return +
+conditional post + `FINISH_UNSUPPORTED` failure) and
+`website/src/inference/dispatch-store.mjs` (`SUCCEEDED_KEYS` + allowlist
+validation), plus directly affected tests (`test_inference_worker.py`
+mirror/key-sets/finish cases; adapter/route/D1 finish cases). The
+`worker-transport.mjs` intake patch is identified above in the contract but
+NOT applied (different owner; fail-closed until applied).
+
+1. Expired-deadline binding — the route recomputes the exact request digest
+   (`digestJson` over a field-mirrored binding preview) and compares it with
+   the recorded operation BEFORE any submit or reconcile. Changed payload
+   after expiry keeps 409 `IDEMPOTENCY_CONFLICT` with zero admissions (exact
+   R3 probe); same payload reconciles read-only. Regressions added.
+2. Proxy status relay — authenticated `GET /v1/operations/<key>` with strict
+   key/path checks, same no-redirect/no-secret-log rules; owner scoping and
+   typed pending/error bodies (including `op_id`/`automatic_retry`
+   correlation) relayed unchanged. Callers reconcile through their advertised
+   base URL.
+3. Collector removal — `model_readiness.collect_upstream_models` (unused by
+   the pairing integration, bearer-taking) is deleted; the helper is now
+   network- and credential-free (AST-guarded test). Report shaping kept.
+4. Finish honesty — no `finish_reason: 'unknown'` anywhere: validated
+   stop/length/content_filter repeat into the OpenAI response; legacy results
+   without evidence are 503 `finish_unavailable`; anything else is rejected.
+   Bounded fixtures prove the transport through the real store (tool_calls
+   refused at `completeJob`, `length` accepted and surfaced). Legacy worker
+   results stay store-acceptable (backwards compatible).
+5. Subset explicitness — the route is a restricted single-user-message,
+   non-streaming text-completion subset, NOT qualified coding-agent,
+   tool-calling, or multiturn support (stated in the adapter header, the
+   contract, and here). Owner-only auto placement preserved; no
+   direct-runtime substitution. The six HTTP probe completions remain labeled
+   synthetic-worker completions, not real generation.
+
 Files owned this turn: `website/src/inference/fabric-openai.mjs`,
 `website/src/inference/model-readiness.mjs`,
 `website/src/inference/fabric-openai-route.mjs`,

@@ -13,11 +13,14 @@ const binding = { node_id: 'node-fixture', runtime_id: 'llama-server', model_id:
   runtime_instance: 'instance-fixture', model_fingerprint: 'fingerprint-fixture' };
 const expected = { id: 'job-fixture-0001', node_id: binding.node_id,
   runtime_id: binding.runtime_id, model_id: binding.model_id };
-const goodJob = (usage = { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 }) => ({
-  ...expected, status: 'succeeded', result: { request_id: expected.id,
+const goodJob = (usage = { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 }, finish = 'stop') => {
+  const result = { request_id: expected.id,
     node_id: expected.node_id, runtime_id: expected.runtime_id, model_id: expected.model_id,
     runtime_instance: binding.runtime_instance, model_fingerprint: binding.model_fingerprint,
-    simulated: false, content: 'ok', elapsed_ms: 3, usage, cache: {} } });
+    simulated: false, content: 'ok', elapsed_ms: 3, usage, cache: {} };
+  if (finish !== null) result.finish_reason = finish;
+  return { ...expected, status: 'succeeded', result };
+};
 
 test('valid single user message validates with bounded defaults (no inference)', () => {
   const out = validateChatCompletionRequest({ messages: [msg('user', 'hi')] });
@@ -128,7 +131,7 @@ test('verified settled job maps to chat.completion with honest finish and usage'
   assert.equal(body.object, 'chat.completion');
   assert.equal(body.choices[0].message.role, 'assistant');
   assert.equal(body.choices[0].message.content, 'ok');
-  assert.equal(body.choices[0].finish_reason, 'unknown');
+  assert.equal(body.choices[0].finish_reason, 'stop');
   assert.deepEqual(body.usage, { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 });
   assert.deepEqual(body.provenance, { path: 'fabric', job_id: expected.id, node_id: binding.node_id,
     runtime_id: binding.runtime_id, model_id: binding.model_id,
@@ -138,7 +141,8 @@ test('verified settled job maps to chat.completion with honest finish and usage'
 });
 
 for (const change of [{ node_id: 'wrong-node' }, { model_id: 'wrong-model' }, { simulated: true },
-  { content: ' ' }, { runtime_instance: 'wrong-instance' }, { model_fingerprint: 'wrong-fingerprint' }]) {
+  { content: ' ' }, { runtime_instance: 'wrong-instance' }, { model_fingerprint: 'wrong-fingerprint' },
+  { finish_reason: 'tool_calls' }]) {
   test('rejects foreign or malformed result ' + Object.keys(change)[0], () => {
     const job = goodJob(); Object.assign(job.result, change);
     if (change.node_id || change.model_id) job[Object.keys(change)[0]] = Object.values(change)[0];
@@ -147,6 +151,13 @@ for (const change of [{ node_id: 'wrong-node' }, { model_id: 'wrong-model' }, { 
     assert.equal(mapped.error.body.error.code, 'result_rejected');
   });
 }
+
+test('legacy result without finish evidence is refused as unavailable, never invented', () => {
+  const mapped = mapSettledJobToCompletion(goodJob(undefined, null), binding);
+  assert.equal(mapped.ok, false);
+  assert.equal(mapped.error.http, 503);
+  assert.equal(mapped.error.body.error.code, 'finish_unavailable');
+});
 
 test('settled non-success finishes map to typed errors, never completions', () => {
   const failed = mapDispatchResult({ status: 'settled', op_id: 'op-1', job_id: expected.id,

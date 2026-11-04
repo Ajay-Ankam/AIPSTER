@@ -1,36 +1,18 @@
 """FABRIC067: tests for the worker model-readiness report helper (stdlib only).
 
-Synthetic local HTTP only for the integeration-free collection parse; no
-model is contacted and no generation runs.
+Pure shaping tests: the helper performs no network calls and takes no
+credentials, so the R1 redirect class cannot reappear here. No model is
+contacted and no generation runs.
 """
 
-import json
 import sys
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import model_readiness as mr  # noqa: E402
-
-
-class ModelsHandler(BaseHTTPRequestHandler):
-    payload = {"object": "list", "data": [{"id": "qwen3-synth"}, {"id": "other-synth"}]}
-
-    def log_message(self, fmt, *args):
-        pass
-
-    def do_GET(self):  # noqa: N802
-        assert self.path == "/v1/models", self.path
-        data = json.dumps(ModelsHandler.payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
 
 
 class HelperCase(unittest.TestCase):
@@ -53,27 +35,18 @@ class HelperCase(unittest.TestCase):
         ev = mr.build_model_evidence(["b", "a", "b"], "ganglion", now_ms=1)
         self.assertEqual([m["model_id"] for m in ev["models"]], ["b", "a"])
 
-    def test_upstream_base_gate_never_dials(self):
-        for bad in ("http://192.168.1.9:8124", "http://user@127.0.0.1:8124",
-                    "ftp://127.0.0.1/x", "", "http://127.0.0.1:8124/?x=1"):
-            with self.assertRaises(mr.ReadinessError, msg=bad):
-                mr.check_upstream_base(bad)
-        self.assertTrue(mr.check_upstream_base("http://127.0.0.1:8124").endswith(":8124"))
-
-    def test_collects_listed_ids_from_fixture_upstream(self):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), ModelsHandler)
-        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
-        thread.start()
-        try:
-            ids = mr.collect_upstream_models("http://127.0.0.1:%d" % server.server_port, timeout=5)
-        finally:
-            server.shutdown()
-            server.server_close()
-        self.assertEqual(ids, ["qwen3-synth", "other-synth"])
-
-    def test_collection_failure_is_never_readiness(self):
-        with self.assertRaises(mr.ReadinessError):
-            mr.collect_upstream_models("http://127.0.0.1:9", timeout=2)
+    def test_module_has_no_network_or_credential_surface(self):
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(mr))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        self.assertTrue(imported.isdisjoint({"urllib", "socket", "http", "ssl"}))
+        self.assertNotIn("collect_upstream_models", dir(mr))
 
     def test_runtime_entry_helper_never_maps_foreign_names(self):
         self.assertEqual(mr.runtime_models_entry("llama-server", ["m"]), {"models": ["m"]})

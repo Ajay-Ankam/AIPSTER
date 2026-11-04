@@ -9,11 +9,12 @@
 // coordinator; every outcome maps through this module.
 //
 // Initial-route compatibility (explicit, not silent): this route accepts
-// EXACTLY ONE user text message. Multi-message and multi-role conversations
-// are refused with `limited_compatibility`: the underlying EIF task contract
-// carries a single prompt string, and wrapping roles in caller-visible XML
-// is not role-preserving chat. Tool calling and coding-agent use are NOT
-// claimed; they are a separate qualification.
+// EXACTLY ONE user text message with no tools and no streaming. It is a
+// restricted text-completion subset, NOT qualified coding-agent,
+// tool-calling, or multiturn support; those are separate qualifications and
+// are refused honestly here. The underlying EIF task contract carries a
+// single prompt string, and wrapping roles in caller-visible XML is not
+// role-preserving chat, so anything wider is refused, never squeezed.
 //
 // A requested logical model (or 'auto') only constrains selection; the
 // central fabric chooses the worker. Unknown, unready, or absent workers
@@ -42,6 +43,12 @@ export const OPENAI_DEFAULT_MAX_TOKENS = 64;
 // Bounds shared with the dispatch store result normalizer so the HTTP
 // validator and the durable store accept exactly the same completions.
 export const OPENAI_CONTENT_MAX = 65536;
+
+// Upstream terminal finish evidence the OpenAI response may repeat. Anything
+// else is refused; absence is refused as unavailable, never invented.
+// 'unknown' is deliberately not a member: it is not a supported OpenAI
+// finish-reason value and would be a fabricated claim.
+export const FINISH_REASONS = Object.freeze(['stop', 'length', 'content_filter']);
 
 // Mirrors the coordinator's key/reference shapes so generated keys reconcile.
 export const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
@@ -209,16 +216,15 @@ export function coerceUsage(usage) {
   return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total };
 }
 
-function chatCompletion({ jobId, model, content, usage, provenance, created }) {
+function chatCompletion({ jobId, model, content, usage, finishReason, provenance, created }) {
   return {
     id: `chatcmpl-${jobId}`,
     object: 'chat.completion',
     created: Number.isSafeInteger(created) ? created : Math.floor(Date.now() / 1000),
     model,
-    // The EIF result carries no stop/length evidence: 'unknown' is the only
-    // honest finish_reason. Usage is null when the worker reported no real
-    // counts (unknown is not zero).
-    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'unknown' }],
+    // finishReason is validated upstream stop/length/content_filter evidence.
+    // Usage is null when the worker reported no real counts (unknown is not zero).
+    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: finishReason }],
     usage: coerceUsage(usage),
     // Proof of the fabric path: the chosen machine correlated with job/output.
     provenance: {
@@ -259,8 +265,19 @@ export function mapSettledJobToCompletion(job, binding, { created } = {}) {
     return { ok: false, error: openAIError(502, 'result_rejected',
       'The worker result failed instance/fingerprint binding validation.', 'server_error') };
   }
+  // Finish evidence is refused honestly when unavailable: legacy results that
+  // predate it yield no completion until the worker reports real evidence.
+  const finishReason = job.result.finish_reason;
+  if (finishReason === undefined) {
+    return { ok: false, error: openAIError(503, 'finish_unavailable',
+      'The worker result carries no finish evidence; no completion is surfaced until the worker reports stop/length evidence.', 'server_error') };
+  }
+  if (typeof finishReason !== 'string' || !FINISH_REASONS.includes(finishReason)) {
+    return { ok: false, error: openAIError(502, 'result_rejected',
+      'The worker result carries unsupported finish evidence.', 'server_error') };
+  }
   return { ok: true, value: chatCompletion({ jobId: expected.id, model: expected.model_id,
-    content: decoded.content, usage: job.result.usage,
+    content: decoded.content, usage: job.result.usage, finishReason,
     provenance: { node_id: expected.node_id, runtime_id: expected.runtime_id, model_id: expected.model_id,
       runtime_instance: binding.runtime_instance, model_fingerprint: binding.model_fingerprint }, created }) };
 }

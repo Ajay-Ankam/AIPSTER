@@ -24,8 +24,9 @@ Deliberate local-caller contract (all enforced, all tested):
     keys that look like identity material are refused (400).
   * ``POST`` requires ``Content-Type: application/json`` (415 otherwise).
   * The fabric origin is fixed at startup: https, or loopback http unless
-    --allow-non-loopback-fabric is given. Only the two fixed fabric paths
-    /v1/models and /v1/chat/completions are forwarded (no SSRF).
+    --allow-non-loopback-fabric is given. Only the fixed fabric paths
+    /v1/models, /v1/chat/completions and /v1/operations/<key> (strict key
+    shape) are forwarded (no SSRF).
   * Redirects are never followed: any 3xx from the fabric becomes a 502 and
     no credential leaves the configured origin. A no-proxy opener is used so
     proxy environment variables cannot route user secrets elsewhere.
@@ -57,6 +58,7 @@ from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHand
 FABRIC_INTERFACE = "aipster-fabric-openai-proxy/1"
 FABRIC_MODELS_PATH = "/v1/models"
 FABRIC_CHAT_PATH = "/v1/chat/completions"
+FABRIC_STATUS_PREFIX = "/v1/operations/"
 FABRIC_ORIGIN_ENV = "AIPSTER_FABRIC_ORIGIN"
 
 MODEL_MAX = 256
@@ -375,15 +377,46 @@ class FabricOpenAIProxyHandler(BaseHTTPRequestHandler):
             return
         self._send_json(502, openai_error(502, "fabric_bad_response", "The fabric entrypoint returned an unreadable error."), route)
 
+    def _status_key(self):
+        """Strict /v1/operations/<key> split: (route, key) or (route, None).
+
+        Anything under the prefix with a malformed key is 400; anything else
+        unknown is 404. The key travels in the path only; query identity
+        material is refused by the shared guard.
+        """
+        path = urlparse(self.path).path
+        if path == FABRIC_MODELS_PATH:
+            return "models", None
+        if path == FABRIC_STATUS_PREFIX:
+            return "status", None
+        if path.startswith(FABRIC_STATUS_PREFIX):
+            key = path[len(FABRIC_STATUS_PREFIX):]
+            if re.fullmatch(IDEMPOTENCY_KEY_RE_TEXT, key):
+                return "status", key
+            return "status", None
+        return "other", None
+
     def do_GET(self):  # noqa: N802 - stdlib handler name
-        route = "models" if urlparse(self.path).path == FABRIC_MODELS_PATH else "other"
+        route, status_key = self._status_key()
         bearer = self._guard(route)
         if bearer is None:
             return
-        if route != "models":
-            self._send_json(404, openai_error(404, "not_found", "Unknown proxy route; only /v1/models and /v1/chat/completions exist."), route)
+        if route == "models":
+            self._relay(bearer, FABRIC_MODELS_PATH, None, route)
             return
-        self._relay(bearer, FABRIC_MODELS_PATH, None, route)
+        if route == "status" and status_key is not None:
+            # Bounded authenticated status relay: the caller reconciles its
+            # own pending outcomes through its advertised base URL. Owner
+            # scoping is enforced server-side; the relay preserves whatever
+            # typed pending/error status the fabric returns, unchanged.
+            self._relay(bearer, FABRIC_STATUS_PREFIX + status_key, None, route)
+            return
+        if route == "status":
+            self._send_json(400, openai_error(400, "invalid_request",
+                                             "A valid operation key is required in the path."), route)
+            return
+        self._send_json(404, openai_error(404, "not_found", "Unknown proxy route."), route)
+        return
 
     def do_POST(self):  # noqa: N802 - stdlib handler name
         route = "chat" if urlparse(self.path).path == FABRIC_CHAT_PATH else "other"
@@ -391,7 +424,7 @@ class FabricOpenAIProxyHandler(BaseHTTPRequestHandler):
         if bearer is None:
             return
         if route != "chat":
-            self._send_json(404, openai_error(404, "not_found", "Unknown proxy route; only /v1/models and /v1/chat/completions exist."), route)
+            self._send_json(404, openai_error(404, "not_found", "Unknown proxy route."), route)
             return
         if self.headers.get_content_type() != "application/json":
             self._send_json(415, openai_error(415, "unsupported_media_type", "POST requires Content-Type: application/json."), route)
@@ -426,7 +459,12 @@ class FabricOpenAIProxyHandler(BaseHTTPRequestHandler):
 
 
 def _bounded_upstream_error(data):
-    """Preserve a bounded typed upstream error, else None."""
+    """Preserve a bounded typed upstream error, else None.
+
+    Correlation fields travel with the error so callers can reconcile: op_id
+    and job_id when they are short identifiers, automatic_retry when it is a
+    real boolean. Everything else is dropped.
+    """
     try:
         obj = json.loads(bytes(data).decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
@@ -440,6 +478,13 @@ def _bounded_upstream_error(data):
         return None
     out = {"error": {"message": message[:500], "code": code[:128],
                      "type": err.get("type") if isinstance(err.get("type"), str) else "server_error"}}
+    for key in ("op_id", "job_id"):
+        value = obj.get(key)
+        if isinstance(value, str) and value and len(value) <= 128 \
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", value):
+            out[key] = value
+    if isinstance(obj.get("automatic_retry"), bool):
+        out["automatic_retry"] = obj["automatic_retry"]
     return out
 
 

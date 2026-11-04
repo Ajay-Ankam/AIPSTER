@@ -100,7 +100,12 @@ const OWNER_GRANT_REVISION = 1;
 const FAR_FUTURE = '9999-12-31T23:59:59.999Z';
 
 const SUCCEEDED_KEYS = new Set(['request_id', 'node_id', 'runtime_id', 'model_id', 'runtime_instance',
-  'model_fingerprint', 'simulated', 'content', 'elapsed_ms', 'usage', 'cache', 'truncated']);
+  'model_fingerprint', 'simulated', 'content', 'elapsed_ms', 'usage', 'cache', 'truncated', 'finish_reason']);
+// Upstream terminal finish evidence the worker may repeat into L2 results.
+// Absent on legacy results (treated downstream as finish-unavailable, never
+// invented); anything else here is refused. tool_calls in particular must
+// never travel as a completion until tool execution is actually supported.
+const FINISH_REASONS = new Set(['stop', 'length', 'content_filter']);
 const FAILED_KEYS = new Set(['reason', 'detail', 'elapsed_ms', 'usage', 'cache']);
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -1324,6 +1329,10 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
         || result.model_fingerprint !== job.model_fingerprint) return { ok: false, reason: 'result_mismatch' };
       if (result.simulated !== false) return { ok: false, reason: 'simulated_result' };
       if (result.truncated !== undefined && result.truncated !== false) return { ok: false, reason: 'invalid_result' };
+      if (result.finish_reason !== undefined
+        && (typeof result.finish_reason !== 'string' || !FINISH_REASONS.has(result.finish_reason))) {
+        return { ok: false, reason: 'invalid_result' };
+      }
       // Same limit as the HTTP worker-result validator (worker-transport.mjs):
       // a real completion is far longer than the 256-char identifier default.
       if (!isStr(result.content, CONTENT_MAX) || !result.content.trim()) {

@@ -42,7 +42,8 @@ import {
   noEligibleWorker, mapDispatchResult, mapSettledJobToCompletion, openAIError,
   IDEMPOTENCY_KEY_RE,
 } from './fabric-openai.mjs';
-import { createDispatchCoordinator, MAX_DEADLINE_MS } from './dispatch-coordinator.mjs';
+import { createDispatchCoordinator, DISPATCH_COORDINATOR_INTERFACE, MAX_DEADLINE_MS } from './dispatch-coordinator.mjs';
+import { digestJson } from '../fabric/canonical.mjs';
 import { createWorkerTransport } from './worker-transport.mjs';
 import { qualifySnapshot, selectModelCandidate, listAdvertisedModels } from './model-readiness.mjs';
 import { getDispatchStore } from './dispatch-wiring.mjs';
@@ -102,6 +103,21 @@ function principalOf(actor) {
     return { principal_id: actor.user.id, tenant_id: actor.user.id, actor_kind: 'key', key_scope: actor.key.scope };
   }
   return null;
+}
+
+// Mirror of the coordinator's bindingOf (dispatch-coordinator.mjs): field for
+// field, so the route can recompute the exact request digest for a recorded
+// operation. Canonicalization sorts keys, so only values must match.
+function bindingPreview(admission, principal, deadlineAt) {
+  return {
+    admission_ref: admission.admission_ref, principal_id: principal.principal_id, tenant_id: principal.tenant_id,
+    grant_id: admission.grant_id, grant_revision: admission.grant_revision,
+    resource_id: admission.resource_id, incarnation: admission.incarnation,
+    node_id: admission.node_id, runtime_id: admission.runtime_id, runtime_instance: admission.runtime_instance,
+    model_id: admission.model_id, model_fingerprint: admission.model_fingerprint,
+    pools: admission.pools.map((p) => ({ pool_id: p.pool_id, amount: p.amount })),
+    deadline_at: deadlineAt,
+  };
 }
 
 export function createFabricOpenAIRoute({
@@ -283,17 +299,9 @@ export function createFabricOpenAIRoute({
       if (!resolved.ok) return resolved.error;
       const nowMs = clock();
       // Replay reuses the RECORDED deadline: a fresh deadline would change the
-      // request digest and turn every same-payload retry into a conflict. A
-      // recorded deadline that already passed reconciles read-only instead.
+      // request digest and turn every same-payload retry into a conflict.
       const storedDeadline = isObj(recorded.binding) && Number.isSafeInteger(recorded.binding.deadline_at)
         ? recorded.binding.deadline_at : NaN;
-      if (!(storedDeadline > nowMs)) {
-        const rec = await coordinator.reconcile(ctx, key);
-        if (isObj(rec) && rec.status === 'settled') {
-          return mapSettled({ store, principal, opKey, admissionRef: admission.admission_ref, out: rec });
-        }
-        return mapDispatchResult(rec);
-      }
       const deadline_at = Math.min(storedDeadline, admission.expires_at);
       let dispatchBody;
       try {
@@ -301,6 +309,28 @@ export function createFabricOpenAIRoute({
           { admission_ref: admission.admission_ref, idempotency_key: key, deadline_at, model_id: resolved.value });
       } catch {
         return { http: 400, body: openAIError(400, 'invalid_request', 'The dispatch request was malformed.', 'invalid_request_error').body };
+      }
+      // Payload binding holds even after the deadline: recompute the exact
+      // request digest and compare it with the recorded operation BEFORE any
+      // submit or reconcile. A changed payload keeps IDEMPOTENCY_CONFLICT
+      // with zero new admissions; only a digest-equal replay may reconcile.
+      let candidateDigest = null;
+      try {
+        candidateDigest = await digestJson({ v: DISPATCH_COORDINATOR_INTERFACE,
+          binding: bindingPreview(admission, principal, deadline_at), body: dispatchBody });
+      } catch {
+        candidateDigest = null;
+      }
+      if (typeof recorded.request_digest !== 'string' || candidateDigest !== recorded.request_digest) {
+        return mapDispatchResult({ status: 'rejected', code: 'IDEMPOTENCY_CONFLICT', http: 409, op_id: recorded.op_id });
+      }
+      if (!(storedDeadline > nowMs)) {
+        // Same payload, expired deadline: read-only reconcile, never resubmit.
+        const rec = await coordinator.reconcile(ctx, key);
+        if (isObj(rec) && rec.status === 'settled') {
+          return mapSettled({ store, principal, opKey, admissionRef: admission.admission_ref, out: rec });
+        }
+        return mapDispatchResult(rec);
       }
       const out = await coordinator.submit(ctx, dispatchBody);
       if (isObj(out) && out.status === 'settled') {
