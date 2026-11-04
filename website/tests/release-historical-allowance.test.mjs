@@ -44,7 +44,6 @@ const entry = (over = {}) => ({liveSha: LIVE, mainBase: BASE,
   {pr: 88, head: OLD88, merge: M88,
     repairedBy: [{pr: 98, head: R98}],
     reason: 'Old head had dark-CSS self-cycles and overflows; repaired in-range by PR 98.'}],
-  resolvedReviews: [],
   decision: 'Peter: historical release of the 8bcd4c7..target range only.',
   markerAuthor: 'synchronic1', ...over});
 const allowances = (over) => parseAllowancesFile({version: 1, allowances: {[ID]: entry(over)}});
@@ -322,7 +321,7 @@ test('F1: a later tip with its own evidence never activates the allowance', asyn
   const t = prTable({160: {head: UNREL, merge: MUNREL, reviews: [review(UNREL, evidenceBody(UNREL))],
     files: ['website/public/z.js']}});
   await assert.rejects(run(harness({table: t, order: [MUNREL, MALLOW, M104, M99, M98, M97, M88, M83]}),
-    {...A(), targetSha: MUNREL}), /allowance inactive: the target must be the merge of a PR in range that touched .*none merged as target/);
+    {...A(), targetSha: MUNREL}), /allowance inactive: target .* is not PR 150 merge/);
 });
 
 test('F1: the target must sit on the pinned mainBase and integrate the PR head', async () => {
@@ -357,83 +356,11 @@ test('marker: a DISMISSED owner marker never activates', async () => {
   await assert.rejects(run(harness({table: t}), A()), /allowance inactive: PR 150 lacks a maintainer review/);
 });
 
-test('RELEASE199: an earlier allowance-file toucher in range does not block activation by the target PR', async () => {
-  // PR 160 introduced the file earlier in the range; PR 150 (the target
-  // merge) carries the content named by the marker digest. PR 160 is still
-  // evaluated as an ordinary PR (its own evidence, acceptance, CI).
+test('two PRs touching the allowance file refuse', async () => {
   const t = prTable({160: {head: UNREL, merge: MUNREL, reviews: [review(UNREL, evidenceBody(UNREL))],
     files: [ALLOWANCE_PATH]}});
-  const ok = await run(harness({table: t, order: [MALLOW, MUNREL, M104, M99, M98, M97, M88, M83]}), A());
-  assert.equal(ok.ok, true);
-  assert(ok.prs.some((p) => p.number === 160 && p.evidence > 0));
-  // The target must itself be a toucher's merge: a non-touching target PR
-  // never activates, even with the earlier toucher present.
-  const nonToucher = prTable({150: {...prTable()[150], files: ['website/scripts/release-deploy-gate.mjs']},
-    160: {head: UNREL, merge: MUNREL, reviews: [review(UNREL, evidenceBody(UNREL))], files: [ALLOWANCE_PATH]}});
-  await assert.rejects(run(harness({table: nonToucher, order: [MALLOW, MUNREL, M104, M99, M98, M97, M88, M83]}), A()),
-    /the target must be the merge of a PR in range that touched .*touching PRs: 1, none merged as target/);
-});
-
-// RELEASE199: named native changes-requested resolution.
-const CR_ID = 5755949055;
-const crReview = (head, id = CR_ID) => review(head, 'Picker missing.', {id, state: 'CHANGES_REQUESTED'});
-const resolved = (over = {}) => ({pr: 83, reviewId: CR_ID, head: OLD83,
-  reason: 'Owner-approved dismissal; GitHub leaves merged-PR reviews unchanged.', ...over});
-const withResolved = (list = [resolved()]) => ({allowances: allowances({resolvedReviews: list}), allowanceDigest: DIGEST});
-
-test('RELEASE199: an active allowance resolves exactly the named native changes-requested review', async () => {
-  const blocked = prTable({83: {...prTable()[83], reviews: [crReview(OLD83)]}});
-  // Without the record the original refusal stands (already covered above).
-  await assert.rejects(run(harness({table: blocked}), A()), /PR 83 has unresolved changes-requested .*review 5755949055/);
-  const ok = await run(harness({table: blocked}), withResolved());
-  assert.equal(ok.ok, true);
-  assert(ok.historicalAllowances.some((u) => u.resolvedReview && u.resolvedReview.pr === 83
-    && u.resolvedReview.reviewId === CR_ID && u.resolvedReview.head === OLD83 && u.resolvedReview.by === 'synchronic1'));
-});
-
-test('RELEASE199: a different review id, head or PR is never resolved by the record', async () => {
-  const otherId = prTable({83: {...prTable()[83], reviews: [crReview(OLD83, CR_ID + 1)]}});
-  await assert.rejects(run(harness({table: otherId}), withResolved()), /PR 83 has unresolved changes-requested/);
-  await assert.rejects(run(harness({table: prTable({83: {...prTable()[83], reviews: [crReview(OLD83)]}})}),
-    withResolved([resolved({head: R97})])), /PR 83 has unresolved changes-requested/);
-  await assert.rejects(run(harness({table: prTable({83: {...prTable()[83], reviews: [crReview(OLD83)]}})}),
-    withResolved([resolved({pr: 88})])), /PR 83 has unresolved changes-requested/);
-  // A block on another PR with the same review id is not covered either.
-  const on97 = prTable({97: {...prTable()[97], reviews: [...prTable()[97].reviews, crReview(R97)]}});
-  await assert.rejects(run(harness({table: on97}), withResolved()), /PR 97 has unresolved changes-requested/);
-});
-
-test('RELEASE199: the record is inert unless the allowance is active (auto mode, missing marker)', async () => {
-  const blocked = prTable({83: {...prTable()[83], reviews: [crReview(OLD83)]}});
-  await assert.rejects(run(harness({table: blocked}), {...withResolved(), mode: 'auto'}),
-    /allowance inactive: allowances apply to manual dispatch only/);
-  const noMarker = prTable({83: {...prTable()[83], reviews: [crReview(OLD83)]},
-    150: {...prTable()[150], reviews: [review(ALLOW, evidenceBody(ALLOW))]}});
-  await assert.rejects(run(harness({table: noMarker}), withResolved()), /allowance inactive: PR 150 lacks a maintainer review/);
-});
-
-test('RELEASE199: a structured HOLD is never resolved by a resolvedReviews record', async () => {
-  const holdBody = evidenceBody(R97).replace('blocking: none', 'blocking: F1 open');
-  const held = prTable({97: {...prTable()[97], reviews: [review(R97, holdBody, {id: 777})]}});
-  // The HOLD refuses at evidence binding (PR 97 is not a superseded head)
-  // and would refuse as hold-block otherwise; a record never reaches it.
-  await assert.rejects(run(harness({table: held}), withResolved([resolved({pr: 97, reviewId: 777, head: R97})])),
-    /PR 97 head .*open blocking findings|PR 97 has unresolved hold-block/);
-});
-
-test('RELEASE199: parser rejects malformed resolvedReviews', () => {
-  const bad = (over) => assert.throws(() => allowances({resolvedReviews: [resolved(over)]}));
-  bad({head: 'abc'});
-  bad({reviewId: '5755949055'});
-  bad({pr: 0});
-  bad({reason: 'short'});
-  bad({extra: 1});
-  assert.throws(() => allowances({resolvedReviews: [resolved(), resolved()]}), /duplicates/);
-  assert.throws(() => allowances({resolvedReviews: 'x'}), /must be a list/);
-  // An entry allowing only a resolved review is a valid (non-empty) allowance.
-  const only = allowances({registryTouches: [], supersededHeads: [], resolvedReviews: [resolved()]});
-  assert.equal(only[ID].resolvedReviews.length, 1);
-  assert.throws(() => allowances({registryTouches: [], supersededHeads: [], resolvedReviews: []}), /allows nothing/);
+  await assert.rejects(run(harness({table: t, order: [MALLOW, MUNREL, M104, M99, M98, M97, M88, M83]}), A()),
+    /exactly one PR in range must introduce .*found 2/);
 });
 
 test('two allowance entries on one live SHA fail closed', async () => {

@@ -30,19 +30,12 @@ const SHA_RE = /^[a-f0-9]{40}$/;
 // explicit, auditable decision about named historical commits only — never
 // a wildcard, never evidence, never automatic. It applies only when ALL of:
 // manual mode; dispatch actor is the pinned owner; live equals the entry's
-// pinned liveSha (so it is inert once live moves past it); the release
-// target is the merge commit of a PR in the range that touched this file
-// (an earlier toucher in the same range is evaluated as an ordinary PR;
-// only the content at the target counts), its head blob equals the target
-// blob, and that PR carries a maintainer review at its head naming
+// pinned liveSha (so it is inert once live moves past it); exactly one PR
+// in the range touched this file, its head blob equals the target blob,
+// and that PR carries a maintainer review at its head naming
 // `RELEASE-HISTORICAL-ALLOWANCE <id> <sha256 of the file>` (the dispatch
-// shortcut never counts for this). Active holds, CI, producers, structured
-// HOLD reviews and integration proof are never relaxed by an allowance.
-// `resolvedReviews` (RELEASE199) is the one narrow exception for a NATIVE
-// maintainer CHANGES_REQUESTED review: GitHub accepts a dismissal request
-// on a merged pull request but leaves the state unchanged, so the owner's
-// recorded dismissal decision for exactly one named review object (pr,
-// review id, head) is honored only while the allowance is active.
+// shortcut never counts for this). Active holds, CI, producers, blocking
+// reviews and integration proof are never relaxed by an allowance.
 export const ALLOWANCE_PATH = '.github/release-historical-allowances.json';
 export const ALLOWANCE_MARKER = 'RELEASE-HISTORICAL-ALLOWANCE';
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -68,7 +61,7 @@ export function parseAllowancesFile(json) {
   for (const [id, e] of Object.entries(json.allowances || {})) {
     assert(ID_RE.test(id), `Allowance id ${id} is malformed`);
     exactKeys(e, ['liveSha', 'mainBase', 'notAfter', 'registryTouches', 'supersededHeads',
-      'resolvedReviews', 'decision', 'markerAuthor'], `Allowance ${id}`);
+      'decision', 'markerAuthor'], `Allowance ${id}`);
     assert(SHA_RE.test(e.liveSha || ''), `Allowance ${id} liveSha must be a full SHA`);
     // mainBase pins the exact main tip the allowance PR merges onto, so the
     // released range can never float to a later tip.
@@ -98,22 +91,7 @@ export function parseAllowancesFile(json) {
       assert(typeof s.reason === 'string' && s.reason.trim().length >= 20,
         `Allowance ${id} PR ${s.pr} needs a written reason`);
     }
-    // resolvedReviews: the owner's recorded dismissal decision for exactly
-    // named NATIVE changes-requested review objects (pr + review id + head).
-    // Never a wildcard, never a structured HOLD, never evidence.
-    assert(Array.isArray(e.resolvedReviews), `Allowance ${id} resolvedReviews must be a list`);
-    for (const v of e.resolvedReviews) {
-      exactKeys(v, ['pr', 'reviewId', 'head', 'reason'], `Allowance ${id} resolved review`);
-      assert(Number.isSafeInteger(v.pr) && v.pr > 0, `Allowance ${id} resolved review pr must be a number`);
-      assert(Number.isSafeInteger(v.reviewId) && v.reviewId > 0,
-        `Allowance ${id} resolved review id must be a number`);
-      assert(SHA_RE.test(v.head || ''), `Allowance ${id} resolved review head must be a full SHA`);
-      assert(typeof v.reason === 'string' && v.reason.trim().length >= 20,
-        `Allowance ${id} resolved review ${v.reviewId} needs a written reason`);
-    }
-    assert(new Set(e.resolvedReviews.map((v) => v.reviewId)).size === e.resolvedReviews.length,
-      `Allowance ${id} resolvedReviews has duplicates`);
-    assert(e.registryTouches.length || e.supersededHeads.length || e.resolvedReviews.length,
+    assert(e.registryTouches.length || e.supersededHeads.length,
       `Allowance ${id} allows nothing`);
     out[id] = e;
   }
@@ -133,14 +111,10 @@ export function activeAllowance({allowances, allowanceDigest, mode, dispatchActo
   if (mode !== 'manual') return why('allowances apply to manual dispatch only');
   if (dispatchActor !== PINNED_OWNER) return why('dispatch actor is not the pinned owner');
   if (!/^[a-f0-9]{64}$/.test(allowanceDigest || '')) return why('allowance file digest unavailable');
-  // The activating PR is the one whose merge IS the release target. An
-  // earlier toucher in the same range (e.g. the PR that first introduced
-  // the file) is evaluated as an ordinary PR; only the content at the
-  // target, named by digest in the marker, can activate anything.
-  const t = allowanceTouchers.find((x) => x.merge === targetSha);
-  if (!t) {
-    return why(`the target must be the merge of a PR in range that touched ${ALLOWANCE_PATH} (touching PRs: ${allowanceTouchers.length}, none merged as target ${targetSha})`);
+  if (allowanceTouchers.length !== 1) {
+    return why(`exactly one PR in range must introduce ${ALLOWANCE_PATH} (found ${allowanceTouchers.length})`);
   }
+  const [t] = allowanceTouchers;
   if (!(Number.isFinite(now) && now <= Date.parse(entry.notAfter))) {
     return why(`allowance ${id} expired at ${entry.notAfter} (or clock unavailable)`);
   }
@@ -205,20 +179,7 @@ export async function evaluateDeployGate({git, request, fetchChecks,
   // resolved after the whole range is evaluated and the allowance is proven
   // active. Any other evidence failure throws immediately, as before.
   const deferred = [];
-  // Native maintainer CHANGES_REQUESTED blocks named by an allowance's
-  // resolvedReviews are DEFERRED the same way: only an active allowance
-  // whose entry names exactly this (pr, review id, head) resolves them.
-  const deferredBlocks = [];
   const allowanceTouchers = [];
-  const resolvedEntry = (pr, blocked) => {
-    if (!blocked || blocked.via !== 'changes-requested') return null;
-    for (const [id, e] of Object.entries(allowances || {})) {
-      for (const v of e.resolvedReviews || []) {
-        if (v.pr === pr.number && v.head === pr.headSha && v.reviewId === blocked.reviewId) return {id, v};
-      }
-    }
-    return null;
-  };
   const supersededEntry = (pr, merge) => {
     for (const [id, e] of Object.entries(allowances || {})) {
       for (const s of e.supersededHeads) {
@@ -274,16 +235,8 @@ export async function evaluateDeployGate({git, request, fetchChecks,
       // CHANGES_REQUESTED or structured HOLD refuses this PR too.
       const state = resolveReviewState({reviews, headSha: pr.headSha,
         permissions});
-      if (state.blocked) {
-        const blockMessage = `PR ${pr.number} has unresolved ${state.blocked.via} by ${state.blocked.by} at head ${pr.headSha} (review ${state.blocked.reviewId})`;
-        const hit = resolvedEntry(pr, state.blocked);
-        // Only a native changes-requested object named exactly by an
-        // allowance defers; structured HOLDs and unverified standing
-        // refuse immediately, as before.
-        assert(hit, blockMessage);
-        deferredBlocks.push({number: pr.number, head: pr.headSha,
-          reviewId: state.blocked.reviewId, by: state.blocked.by, ...hit, blockMessage});
-      }
+      assert(!state.blocked,
+        `PR ${pr.number} has unresolved ${state.blocked?.via} by ${state.blocked?.by} at head ${pr.headSha} (review ${state.blocked?.reviewId})`);
       // Per-PR head CI: the installer workflow is PR-only, so installer
       // results exist only at the head — re-verify them here rather than
       // trusting target CI alone. Merged-main CI below covers site plus
@@ -334,8 +287,7 @@ export async function evaluateDeployGate({git, request, fetchChecks,
   const used = [];
   // Resolve at most one active allowance. Nothing below runs (and nothing
   // is relaxed) unless the range actually needs it.
-  const needsAllowance = deferred.length > 0 || deferredBlocks.length > 0
-    || changed.includes(HOLD_REGISTRY_PATH);
+  const needsAllowance = deferred.length > 0 || changed.includes(HOLD_REGISTRY_PATH);
   let active = null;
   let inactiveReason = '';
   if (needsAllowance) {
@@ -369,12 +321,6 @@ export async function evaluateDeployGate({git, request, fetchChecks,
     }
     used.push({allowance: d.id, supersededHead: {pr: d.number, head: d.head,
       repairedBy: d.s.repairedBy}});
-  }
-  for (const b of deferredBlocks) {
-    assert(active && active.id === b.id,
-      `${b.blockMessage}${inactiveReason || ' (allowance does not cover this review)'}`);
-    used.push({allowance: b.id, resolvedReview: {pr: b.number, head: b.head,
-      reviewId: b.reviewId, by: b.by}});
   }
   // Fresh trusted hold governs before any production step: any active
   // GLOBAL hold, or any active hold on an ancestor-or-self of the target
