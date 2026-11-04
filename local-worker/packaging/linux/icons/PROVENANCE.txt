@@ -1,0 +1,36 @@
+AIPSTER Worker Linux application icons — provenance
+
+Source (canonical AI logo):
+  website/public/favicon.svg
+  sha256: e0ea3b1f217bae7f856a84c150b91e1d2732551f25efb0285b0ba329a0c562af
+  geometry: 64x64 tile rx=14 fill #143b34, nested Ai letterform fill #F2B887
+  (nested svg x=6 y=13.5 width=52 height=37 viewBox 0 0 106 75)
+
+Renderer (one-time derivation, established tool only):
+  Chromium  (snap chromium-browser; --headless=new --disable-gpu
+  --hide-scrollbars --force-device-scale-factor=1
+  --default-background-color=00000000 --window-size=SxS
+  --screenshot=cr-S.png file:///.../website/public/favicon.svg),
+  per size S in 16 22 24 32 48 64 128 256, then
+  convert cr-S.png -strip hicolor/SxS/apps/aipster-worker.png
+  (ImageMagick 6.9.11-60, strip metadata only, no resampling).
+  Scalable: byte copy of favicon.svg -> hicolor/scalable/apps/aipster-worker.svg.
+
+Why Chromium, not convert-direct: ImageMagick 6 ignores the nested svg
+positioning (letters rendered at the top edge with a blank lower half);
+verified against reviewer oracle orig-chromium-128.png (0.6% edge-AA
+difference) and by viewing 48px and 16px outputs.
+
+Build uses these checked-in bytes verbatim (deterministic; no render at
+build time).
+
+Rendered outputs:
+4a2eaf4c93c94f31f53181a89e6228441fee87fc108cf5ebb0a444ded0edd3c6  128x128/apps/aipster-worker.png
+341cfedf83ef598cd5447529a3fa810fcc253ae13a44941d8ab297e13bfdddbf  16x16/apps/aipster-worker.png
+8815a3baf959b1876d227cdf7944c931e80727808c31b6bff4e1f4a397608d2f  22x22/apps/aipster-worker.png
+2db54e0e95014ad19cfd4f818ae79b1f28798872b12db9bc9fceacdc0a0b09ce  24x24/apps/aipster-worker.png
+e4fd7dbc788bb8796b87d8c2c7ba9a17e4aa7164c5e722b3fb57bd9346503080  256x256/apps/aipster-worker.png
+75424abf2212548f67c4ffb868e9fd6c6e1c29f3bb03fe8d2f3fc3c408d463c7  32x32/apps/aipster-worker.png
+4eddae3c2c0668d53767869455af529f680f6d8e71ca2fa8041af236daae3b50  48x48/apps/aipster-worker.png
+38105238c805fdd182e272e0dda07a5e14cf5d19b3305df642efb39730986b5b  64x64/apps/aipster-worker.png
+e0ea3b1f217bae7f856a84c150b91e1d2732551f25efb0285b0ba329a0c562af  scalable/apps/aipster-worker.svg

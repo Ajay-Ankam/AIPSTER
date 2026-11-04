@@ -197,6 +197,10 @@ def stage_deb_tree(deb_root, app_dir, version, depends):
     for size_dir in sorted((HERE / "icons/hicolor").iterdir()):
         target = deb_root / "usr/share/icons" / "hicolor" / size_dir.name / "apps"
         target.mkdir(parents=True)
+        if size_dir.name == "scalable":
+            # Canonical vector master (byte copy of the dashboard favicon).
+            shutil.copy2(size_dir / "apps/aipster-worker.svg", target)
+            continue
         shutil.copy2(size_dir / "apps/aipster-worker.png", target)
     doc = deb_root / "usr/share/doc/aipster-worker"
     doc.mkdir(parents=True)
@@ -462,8 +466,16 @@ def main():
 
     step(8, total, "assemble licenses and icons")
     for size_dir in sorted((HERE / "icons/hicolor").iterdir()):
+        if size_dir.name == "scalable":
+            if not (size_dir / "apps/aipster-worker.svg").is_file():
+                raise SystemExit(f"missing app icon: {size_dir}/apps/aipster-worker.svg")
+            continue
         if not (size_dir / "apps/aipster-worker.png").is_file():
             raise SystemExit(f"missing app icon: {size_dir}/apps/aipster-worker.png")
+    icons_dir = app_dir / "icons"
+    icons_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(HERE / "icons/hicolor/64x64/apps/aipster-worker.png",
+                 icons_dir / "aipster-worker.png")
     license_dir = app_dir / "licenses"
     (license_dir / "python").mkdir(parents=True)
     shutil.copy2(REPO / "LICENSE", license_dir / "AIPSTER-APACHE-LICENSE.txt")

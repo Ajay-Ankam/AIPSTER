@@ -467,14 +467,15 @@ class BackendLinuxTests(unittest.TestCase):
                 backend.refresh_current()
                 buttons = backend.widgets["action_buttons"]
                 self.assertIn("quit", buttons)
-                copy_button = buttons["copy_endpoint"]
-                expect_enabled = st_name in (state.STARTING, state.RUNNING) and bool(
-                    ctl.endpoint_label())
-                self.assertEqual(str(copy_button["state"]),
-                                 "normal" if expect_enabled else "disabled")
+                # No verified fabric endpoint: never shown, never copied.
+                # The local serving address must not appear as the endpoint.
+                self.assertEqual(backend.widgets["endpoint"].cget("text"), "")
+                self.assertEqual(str(buttons["copy_endpoint"]["state"]), "disabled")
+                self.assertEqual(backend.widgets["endpoint_note"].cget("text"),
+                                 backend_linux.ENDPOINT_UNAVAILABLE_NOTE)
+                state.check_honest(backend_linux.ENDPOINT_UNAVAILABLE_NOTE)
                 # Every shipped label stays inside the honesty gate.
-                for item in state.menu_model(st_name, ctl.endpoint_label(), ctl.detail,
-                                             ctl.pairing):
+                for item in state.menu_model(st_name, "", ctl.detail, ctl.pairing):
                     if item["kind"] == "text":
                         state.check_honest(item["label"])
             finally:
@@ -615,16 +616,67 @@ class DebTemplateTests(unittest.TestCase):
         self.assertEqual(entry["Icon"], "aipster-worker")
         self.assertEqual(entry["Terminal"], "false")
         self.assertTrue(entry["Name"])
+        # Exact WM_CLASS class string observed via xprop: Tk capitalizes
+        # className="aipster-worker" to "Aipster-worker".
+        self.assertEqual(entry["StartupWMClass"], "Aipster-worker")
 
     def test_icons_cover_hicolor_sizes(self):
+        import struct
         for size in ("16x16", "22x22", "24x24", "32x32", "48x48", "64x64",
                      "128x128", "256x256"):
             icon = LINUX / "icons/hicolor" / size / "apps/aipster-worker.png"
             self.assertTrue(icon.is_file(), icon)
-            # PNG magic + IHDR present (stdlib-rendered, committed).
-            header = icon.read_bytes()[:33]
-            self.assertTrue(header.startswith(b"\x89PNG\r\n\x1a\n"), icon)
-            self.assertIn(b"IHDR", header, icon)
+            # PNG magic + IHDR dimensions match the directory size.
+            data = icon.read_bytes()
+            self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"), icon)
+            width, height = struct.unpack(">II", data[16:24])
+            expect = int(size.split("x")[0])
+            self.assertEqual((width, height), (expect, expect), icon)
+
+    def test_scalable_icon_matches_canonical_favicon(self):
+        staged = LINUX / "icons/hicolor/scalable/apps/aipster-worker.svg"
+        self.assertTrue(staged.is_file(), staged)
+        self.assertEqual(staged.read_bytes(),
+                         (ROOT.parent / "website/public/favicon.svg").read_bytes())
+
+    def test_icon_provenance_record(self):
+        text = (LINUX / "icons/PROVENANCE.txt").read_text(encoding="utf-8")
+        self.assertIn("favicon.svg", text)
+        self.assertIn("e0ea3b1f217bae7f856a84c150b91e1d2732551f25efb0285b0ba329a0c562af",
+                      text)
+        self.assertIn("Chromium", text)
+
+    def test_window_icon_uses_committed_app_icon(self):
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            self.skipTest("needs an isolated display (run under xvfb-run)")
+        icon = LINUX / "icons/hicolor/64x64/apps/aipster-worker.png"
+        with patch.object(backend_linux, "find_window_icon", return_value=icon):
+            backend = backend_linux.LinuxWindowBackend(lambda m: None)
+            try:
+                backend.attach(FakeController(Path("/tmp/does-not-matter")))
+                if backend.root is None:
+                    self.skipTest("display unavailable to tkinter")
+                self.assertIsNotNone(backend._icon_photo)
+                self.assertEqual((backend._icon_photo.width(),
+                                  backend._icon_photo.height()), (64, 64))
+                # WM_CLASS verified against the installed desktop entry
+                # (xprop: "aipster-worker", "Aipster-worker").
+                self.assertEqual(backend.root.winfo_class(), "Aipster-worker")
+            finally:
+                backend.detach()
+
+    def test_window_clipboard_roundtrip(self):
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            self.skipTest("needs an isolated display (run under xvfb-run)")
+        backend = backend_linux.LinuxWindowBackend(lambda m: None)
+        try:
+            backend.attach(FakeController(Path("/tmp/does-not-matter")))
+            if backend.root is None:
+                self.skipTest("display unavailable to tkinter")
+            self.assertTrue(backend.copy_text("probe-clipboard-123"))
+            self.assertEqual(backend.root.clipboard_get(), "probe-clipboard-123")
+        finally:
+            backend.detach()
 
     def test_spec_keeps_tkinter(self):
         text = (LINUX / "dendrite_linux.spec").read_text(encoding="utf-8")
@@ -660,6 +712,8 @@ class DebTemplateTests(unittest.TestCase):
             self.assertTrue((root / "usr/share/applications/aipster-worker.desktop").is_file())
             self.assertTrue((root / "usr/share/icons/hicolor/48x48/apps/"
                                    "aipster-worker.png").is_file())
+            self.assertTrue((root / "usr/share/icons/hicolor/scalable/apps/"
+                                   "aipster-worker.svg").is_file())
             self.assertTrue((root / "usr/share/doc/aipster-worker/copyright").is_file())
 
 

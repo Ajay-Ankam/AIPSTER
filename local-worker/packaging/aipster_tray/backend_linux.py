@@ -79,6 +79,45 @@ def copy_via_helper(text):
     return False
 
 
+# No verified public fabric endpoint ships in this tree (the fabric
+# OpenAI route/proxy is unmerged and production deployment is disabled;
+# the coordinator resolves the fabric source). Until a verified endpoint
+# lands, the desktop must show that explicitly and must never copy the
+# local serving address as if it were an endpoint.
+ENDPOINT_UNAVAILABLE_NOTE = (
+    "Fabric endpoint unavailable. No OpenAI-compatible fabric address "
+    "is configured yet.")
+
+
+def verified_share_endpoint():
+    """Shareable endpoint text, or '' when none is verified. Always '' here."""
+    return ""
+
+
+def find_window_icon():
+    """Absolute path of the app icon PNG for the window, or None.
+
+    Prefers the icon bundled beside the frozen exes, then the installed
+    hicolor theme paths. Never raises; missing icons are cosmetic.
+    """
+    candidates = []
+    try:
+        from .firstrun import bundle_dir
+        candidates.append(bundle_dir() / "icons" / "aipster-worker.png")
+    except Exception:  # noqa: BLE001 - cosmetic only
+        pass
+    for size in ("64x64", "48x48", "32x32", "256x256"):
+        candidates.append(Path("/usr/share/icons/hicolor") / size / "apps"
+                          / "aipster-worker.png")
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            pass
+    return None
+
+
 def send_notification(summary, body):
     """Best-effort desktop notification. Returns True if one was shown."""
     try:
@@ -199,6 +238,7 @@ class LinuxWindowBackend(LinuxBaseBackend):
         self.root = None
         self.widgets = {}
         self.note_text = ""
+        self._icon_photo = None
 
     # -- attach ---------------------------------------------------------
     def attach(self, controller):
@@ -214,14 +254,31 @@ class LinuxWindowBackend(LinuxBaseBackend):
                      "continuing windowless (CLI control only)")
             return
         try:
-            self.root = tk.Tk()
+            # className pins WM_CLASS so the taskbar groups the window under
+            # the installed desktop entry (StartupWMClass=aipster-worker).
+            self.root = tk.Tk(className="aipster-worker")
         except Exception as exc:  # noqa: BLE001 - no display, wrong $DISPLAY, ...
             self.log(f"backend=linux-window cannot open display: {exc}; "
                      "continuing windowless (CLI control only)")
             self.root = None
             return
+        try:
+            self.root.tk.call("tk", "appname", "aipster-worker")
+        except Exception as exc:  # noqa: BLE001 - cosmetic only
+            self.log(f"backend=linux-window appname failed: {exc}")
         self.root.title("AIPSTER Worker")
         self.root.resizable(True, False)
+        # Labels wrap at 420px, so never let the window shrink narrower.
+        self.root.minsize(440, 0)
+        icon_path = find_window_icon()
+        if icon_path is not None:
+            try:
+                photo = tk.PhotoImage(file=str(icon_path))
+                self.root.iconphoto(True, photo)
+                self._icon_photo = photo  # Tk holds pixels weakly; keep ours
+                self.log(f"backend=linux-window icon {icon_path}")
+            except Exception as exc:  # noqa: BLE001 - icon is cosmetic
+                self.log(f"backend=linux-window icon failed {icon_path}: {exc}")
         try:
             self._build()
         except Exception as exc:  # noqa: BLE001 - window must never break us
@@ -247,8 +304,11 @@ class LinuxWindowBackend(LinuxBaseBackend):
         detail.pack(fill="x", padx=12)
         pair_line = tk.Label(root, text="", anchor="w", justify="left", wraplength=420)
         pair_line.pack(fill="x", padx=12)
-        sender_line = tk.Label(root, text="", anchor="w", justify="left")
+        sender_line = tk.Label(root, text="", anchor="w", justify="left", wraplength=420)
         sender_line.pack(fill="x", padx=12)
+        endpoint_note = tk.Label(root, text="", anchor="w", justify="left",
+                                 wraplength=420)
+        endpoint_note.pack(fill="x", padx=12)
         note = tk.Label(root, text="", anchor="w", justify="left", wraplength=420,
                         fg="red")
         note.pack(fill="x", padx=12)
@@ -256,6 +316,7 @@ class LinuxWindowBackend(LinuxBaseBackend):
         buttons.pack(fill="x", padx=12, pady=12)
         self.widgets = {"header": header, "endpoint": endpoint, "detail": detail,
                         "pair_line": pair_line, "sender_line": sender_line,
+                        "endpoint_note": endpoint_note,
                         "note": note, "buttons": buttons, "action_buttons": {}}
 
     # -- visibility ------------------------------------------------------
@@ -305,14 +366,35 @@ class LinuxWindowBackend(LinuxBaseBackend):
         except Exception as exc:  # noqa: BLE001 - backend must never break us
             self.log(f"backend=linux-window render failed: {exc}")
 
+    def copy_text(self, text):
+        # Native Tk clipboard first: external helpers (xclip/xsel/wl-copy)
+        # are often absent on minimal desktops. The tray owns the selection
+        # while it runs, so no persistence helper is needed.
+        if self.root is not None:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(str(text))
+                self.events.append(("copy_text", str(text)))
+                self.log("backend=linux-window copy_text via Tk clipboard")
+                return True
+            except Exception as exc:  # noqa: BLE001 - fall back to helpers
+                self.log(f"backend=linux-window Tk clipboard failed: {exc}")
+        return super().copy_text(text)
+
     def _render(self, state, detail):
         import tkinter as tk
         ctl = self.controller
-        endpoint = ctl.endpoint_label() if ctl.loaded else ""
+        # Only a verified fabric endpoint may be shown or copied as "the
+        # endpoint". None is verified in this build, so the menu gets ""
+        # (endpoint line hidden, copy action disabled) plus an explicit
+        # note. The local serving address is never passed here.
+        endpoint = verified_share_endpoint()
         overlay = ctl.pairing or {"key": st.PAIR_UNPAIRED, "line": st.UNPAIRED_LINE,
                                   "sender": "Sender: stopped"}
         self.widgets["header"].config(text=f"AIPSTER Worker — {st.STATE_TEXT[state]}")
         self.widgets["endpoint"].config(text=endpoint)
+        self.widgets["endpoint_note"].config(
+            text=ENDPOINT_UNAVAILABLE_NOTE if not endpoint else "")
         shown_detail = detail if state in (st.PORT_BUSY, st.ERROR) else ""
         self.widgets["detail"].config(text=shown_detail)
         self.widgets["pair_line"].config(text=overlay.get("line", ""))
@@ -413,7 +495,10 @@ class LinuxIndicatorBackend(LinuxBaseBackend):
         if self.indicator is None or self.controller is None:
             return
         ctl = self.controller
-        endpoint = ctl.endpoint_label() if ctl.loaded else ""
+        # Same policy as the window: only a verified fabric endpoint may
+        # appear here. None is verified, so the menu gets "" (no endpoint
+        # line, copy disabled) — never the local serving address.
+        endpoint = verified_share_endpoint()
         overlay = ctl.pairing or {"key": st.PAIR_UNPAIRED, "line": st.UNPAIRED_LINE,
                                   "sender": "Sender: stopped"}
         try:
