@@ -259,6 +259,22 @@ class LinuxBaseBackend(Backend):
             return "", 0
         return host, port
 
+    def external_declared(self):
+        """True when the controller holds an external-management record.
+
+        Uses the Linux controller's ``external_record()`` (one bounded read
+        that refreshes it); any non-None value, valid or not, counts (the
+        controller fails closed the same way). Controllers without the
+        method (base/Windows) are never declared. Errors count as declared.
+        """
+        reader = getattr(self.controller, "external_record", None)
+        if not callable(reader):
+            return False
+        try:
+            return reader() is not None
+        except Exception:  # noqa: BLE001 - unknown record state: fail closed
+            return True
+
     def external_health(self, state):
         """True only when the port is busy AND its holder answers /healthz ok.
 
@@ -295,12 +311,19 @@ class LinuxBaseBackend(Backend):
         items = st.menu_model(state, "", detail, overlay)
         header, external_note, items = ext.present(state, detail, host, port,
                                                    healthy, items)
+        declared = self.external_declared()
+        if declared and not healthy:
+            # A persistent external-management record (Linux controller)
+            # refuses every start in any state; never show Start as usable.
+            header = ext.declared_header(state)
+            items = ext.disable_ownership(items)
         fabric_items = []
         for item in items:
             if item.get("kind") == "action" and item.get("id") == "copy_endpoint":
                 item = dict(item, enabled=bool(endpoint), label=COPY_FABRIC_LABEL)
             fabric_items.append(item)
-        self.external_key = ext.classify(state, healthy)
+        self.external_key = (ext.EXTERNAL_DECLARED if declared and not healthy
+                             else ext.classify(state, healthy))
         return {"header": header, "external_note": external_note,
                 "endpoint": endpoint, "overlay": overlay, "items": fabric_items,
                 "endpoint_note": FABRIC_CONFIGURED_NOTE if endpoint
@@ -342,8 +365,8 @@ class LinuxBaseBackend(Backend):
             self.copy_fabric()
         elif action == "settings":
             self.open_app_settings()
-        elif action in ("start", "stop") and \
-                getattr(self, "external_key", "") == ext.EXTERNAL_HEALTHY:
+        elif action in ("start", "stop") and getattr(self, "external_key", "") in (
+                ext.EXTERNAL_HEALTHY, ext.EXTERNAL_DECLARED):
             self.log(f"backend={self.name} {action} refused: externally managed worker")
             self.note_to_user(EXTERNAL_CONTROL_NOTE)
         else:

@@ -11,6 +11,7 @@ from . import state as st
 
 EXTERNAL_HEALTHY = "external_healthy"   # port held, /healthz ok
 EXTERNAL_UNHEALTHY = "external_unhealthy"  # port held, /healthz not ok
+EXTERNAL_DECLARED = "external_declared"  # persistent record; any state
 
 HEALTHY_HEADER = "AIPSTER Worker — Running outside this app (not managed here)"
 UNHEALTHY_HEADER = "AIPSTER Worker — Port busy"
@@ -21,6 +22,7 @@ HEALTHY_NOTE = ("A worker on this computer answers health checks on {origin}. "
 UNHEALTHY_NOTE = ("Port {port} is in use by a process that does not answer "
                   "AIPSTER health checks. This app will not stop or replace it.")
 CONTROL_UNAVAILABLE = "Managed outside this app"
+DECLARED_SUFFIX = " here (managed outside this app)"
 
 # Actions this app must not offer while another process owns the port.
 _OWNERSHIP_ACTIONS = ("start", "stop")
@@ -56,15 +58,29 @@ def present(state, detail, host, port, health_ok, items):
         # and never stops or replaces the holder; disabling it would trap the
         # user after a dead holder frees the port.
         return header, note, list(items)
+    return header, note, disable_ownership(items)
+
+
+def disable_ownership(items):
+    """Copy of items with start/stop disabled; never enables anything."""
     out = []
     for item in items:
         if item.get("kind") == "action" and item.get("id") in _OWNERSHIP_ACTIONS:
             item = dict(item, enabled=False, label=CONTROL_UNAVAILABLE)
         out.append(item)
-    return header, note, out
+    return out
+
+
+def declared_header(state):
+    """Header while an external-management record is declared.
+
+    Says only what this app knows: its own state here and that the worker is
+    managed elsewhere. No health, readiness or service claim.
+    """
+    return st.check_honest(f"AIPSTER Worker — {st.STATE_TEXT[state]}{DECLARED_SUFFIX}")
 
 
 for _t in (HEALTHY_HEADER, UNHEALTHY_HEADER, HEALTHY_NOTE, UNHEALTHY_NOTE,
-           CONTROL_UNAVAILABLE):
+           CONTROL_UNAVAILABLE, DECLARED_SUFFIX):
     st.check_honest(_t)
 del _t

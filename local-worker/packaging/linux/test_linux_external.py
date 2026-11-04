@@ -210,6 +210,58 @@ class BackendParityTests(unittest.TestCase):
             st.check_honest(text)
 
 
+class DeclaredRecordTests(unittest.TestCase):
+    """Persistent external-management record (Linux controller interface)."""
+
+    def make(self, data, state_name, record, healthy=False):
+        b = backend(bl.LinuxWindowBackend, data, state_name, healthy)
+        calls = []
+
+        def reader():
+            calls.append(1)
+            if isinstance(record, Exception):
+                raise record
+            return record
+        b.controller.external_record = reader
+        return b, calls
+
+    def test_declared_disables_start_in_every_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            for s in (st.STOPPED, st.ERROR, st.PORT_BUSY):
+                for record in ({"valid": True, "source": "observed", "origin": "x"},
+                               {"valid": False, "reason": "invalid"}, OSError("x")):
+                    b, calls = self.make(d, s, record)
+                    view = b.view_model(s, b.controller.detail)
+                    acts = {i["id"]: i for i in view["items"] if i["kind"] == "action"}
+                    self.assertFalse(acts["start"]["enabled"], (s, record))
+                    self.assertIn("managed outside this app", view["header"])
+                    st.check_honest(view["header"])
+                    self.assertTrue(calls)
+                    b.handle_action("start")
+                    self.assertEqual(b.controller.actions, [])
+                    self.assertEqual(b.notes[-1], bl.EXTERNAL_CONTROL_NOTE)
+                    b.handle_action("pair")  # pairing stays available
+                    self.assertEqual(b.controller.actions, ["pair"])
+
+    def test_declared_and_healthy_keeps_running_outside_header(self):
+        with tempfile.TemporaryDirectory() as d:
+            b, _ = self.make(d, st.PORT_BUSY, {"valid": True}, healthy=True)
+            view = b.view_model(st.PORT_BUSY, b.controller.detail)
+            self.assertEqual(view["header"], ext.HEALTHY_HEADER)
+
+    def test_no_record_or_no_interface_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as d:
+            b, _ = self.make(d, st.STOPPED, None)
+            acts = {i["id"]: i for i in b.view_model(st.STOPPED)["items"]
+                    if i["kind"] == "action"}
+            self.assertTrue(acts["start"]["enabled"])
+            plain = backend(bl.LinuxWindowBackend, d, st.STOPPED, False)
+            self.assertFalse(hasattr(plain.controller, "external_record"))
+            self.assertFalse(plain.external_declared())
+            plain.handle_action("start")
+            self.assertEqual(plain.controller.actions, ["start"])
+
+
 def fake_gi():
     """Minimal gi/Gtk stand-in recording widgets; no display, no GI typelibs."""
     created = {}
