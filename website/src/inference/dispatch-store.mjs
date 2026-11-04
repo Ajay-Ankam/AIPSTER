@@ -1372,8 +1372,21 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
           WHERE f.op_id = j.op_id AND f.generation = j.generation)
         AND EXISTS (SELECT 1 FROM dispatch_start_redemptions s
           WHERE s.op_id = j.op_id AND s.generation = j.generation)`;
+      // B1: while federation is paused, share-bound jobs are skipped and
+      // stay queued (F1). Exclude them from the bounded scan window itself,
+      // so paused share work queued ahead can never hide leasable jobs (for
+      // example the exporter's own) behind LEASE_SCAN_LIMIT. Only selection
+      // narrows: the per-candidate checks and the lease CAS are unchanged,
+      // and a malformed binding is still not excluded here (the loop skips
+      // it as before). Order and tie-breaks are unchanged.
+      const paused = federationOn() ? '' : `
+        AND NOT EXISTS (SELECT 1 FROM dispatch_operations p
+          WHERE p.op_id = j.op_id AND json_valid(p.binding_json)
+            AND substr(json_extract(p.binding_json, '$.grant_id'), 1, ?) = ?)`;
+      const pausedBinds = paused ? [FABRIC_GRANT_PREFIX.length, FABRIC_GRANT_PREFIX] : [];
       const candidates = await all(db, `SELECT j.job_id, j.op_id, j.generation FROM dispatch_jobs j
-        WHERE ${leasable} ORDER BY j.created_at, j.job_id LIMIT ${LEASE_SCAN_LIMIT}`, resource_id, t);
+        WHERE ${leasable}${paused} ORDER BY j.created_at, j.job_id LIMIT ${LEASE_SCAN_LIMIT}`,
+      resource_id, t, ...pausedBinds);
       for (const cand of candidates || []) {
         // Cross-owner (fabric) work is handed to the exporter's worker only
         // while the consent still holds at lease time: a job queued before a
