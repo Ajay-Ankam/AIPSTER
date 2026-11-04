@@ -199,9 +199,94 @@ class AttachUsableTests(unittest.TestCase):
         self.assertEqual(attached_ready_models(config, self.data), set())
         self.assertEqual(node.seen, [])
 
+    def test_malformed_types_never_raise(self):
+        # These five shapes raised TypeError in 71e4695 (non-iterable lists,
+        # unhashable ids), which would have killed the heartbeat sender.
+        bodies = {
+            "runtimes int": {"runtimes": 5, "models": []},
+            "models int": {"runtimes": [], "models": 7},
+            "runtimes bool": {"runtimes": True, "models": []},
+            "runtimes str": {"runtimes": "abc", "models": "x"},
+            "unhashable runtime id": {"runtimes": [{"id": ["x"]}], "models": []},
+            "unhashable model runtime": node_report(models=[{"runtime": [RUNTIME], "id": MODEL}]),
+            "unhashable model id": node_report(models=[{"runtime": RUNTIME, "id": {"a": 1},
+                                                        "available": True, "resident": True,
+                                                        "simulated": False}]),
+            "null": None,
+            "nested null": {"runtimes": [None], "models": [None]},
+            "empty object": {},
+            "empty lists": {"runtimes": [], "models": []},
+        }
+        for label, body in bodies.items():
+            with self.subTest(label):
+                node = self.node(body=json.dumps(body).encode())
+                config = write_config(self.data, node.port)
+                why = []
+                self.assertFalse(decide_usable(str(config), self.data, why), label)
+                self.assertEqual(len(why), 1)
+                self.assertNotIn("error (", why[0], f"{label}: handled, not caught late")
+                self.assertNotIn(TOKEN, why[0])
+
+    def test_empty_and_oversized_bodies_are_false(self):
+        for label, body, expect in [("empty", b"", "not JSON"),
+                                    ("bad utf8", b"\xff\xfe", "not JSON"),
+                                    ("oversized", b" " * (pairing.ATTACH_NODE_MAX_BYTES + 10),
+                                     "too large")]:
+            with self.subTest(label):
+                node = self.node(body=body)
+                config = write_config(self.data, node.port)
+                why = []
+                self.assertFalse(decide_usable(str(config), self.data, why))
+                self.assertIn(expect, why[0])
+
+    def test_reasons_are_specific(self):
+        node = self.node(body=node_report(runtime={"state": "starting"}))
+        config = write_config(self.data, node.port)
+        why = []
+        decide_usable(str(config), self.data, why)
+        self.assertEqual(why, ["attach runtime not ready (state/error/simulated)"])
+        node.body = node_report(model={"resident": False})
+        why.clear()
+        decide_usable(str(config), self.data, why)
+        self.assertEqual(why, ["attach runtime ready but no model resident/available"])
+        node.body = node_report()
+        why.clear()
+        self.assertTrue(decide_usable(str(config), self.data, why))
+        self.assertEqual(why, [f"attach model ready: {RUNTIME}/{MODEL}"])
+
+    def test_recovers_when_runtime_becomes_available(self):
+        # Worker down -> worker up with runtime starting -> ready -> down again.
+        down = self.node(body=node_report())
+        port = down.port
+        down.close()
+        self.nodes.remove(down)
+        config = write_config(self.data, port)
+        why = []
+        self.assertFalse(decide_usable(str(config), self.data, why))
+        self.assertIn("unreachable", why[0])
+        node = self.node(body=node_report(runtime={"state": "starting"}))
+        config = write_config(self.data, node.port)
+        self.assertFalse(decide_usable(str(config), self.data))
+        node.body = node_report()
+        self.assertTrue(decide_usable(str(config), self.data), "recovers without restart")
+        node.body = node_report(runtime={"state": "failed", "last_error": "upstream gone"})
+        self.assertFalse(decide_usable(str(config), self.data), "drops back immediately")
+
+    def test_internal_errors_fail_closed(self):
+        node = self.node(body=node_report())
+        config = write_config(self.data, node.port)
+        with patch.object(pairing, "_attach_readiness", side_effect=RuntimeError("boom")):
+            why = []
+            self.assertFalse(decide_usable(str(config), self.data, why))
+            self.assertEqual(why, ["attach probe error (RuntimeError)"])
+        with patch.object(pairing, "_decide_usable", side_effect=TypeError("x")):
+            why = []
+            self.assertFalse(decide_usable(str(config), self.data, why))
+            self.assertEqual(why, ["usable policy error (TypeError)"])
+
     def test_heartbeat_loop_passes_data_dir(self):
         source = (ROOT / "pairing.py").read_text(encoding="utf-8")
-        self.assertIn("usable = decide_usable(args.config, data_dir)", source)
+        self.assertIn("usable = decide_usable(args.config, data_dir, usable_why)", source)
 
 
 if __name__ == "__main__":
