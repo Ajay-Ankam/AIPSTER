@@ -68,7 +68,7 @@ Two Linux-only facts the reviewer must know:
 
 - `local-worker/packaging/linux/dist/aipster-worker_0.1.0-1_amd64.deb`
   (22,016,634 bytes)
-- `sha256 0927f6053e0b8614a99d9dc27ed12f602f34b161f9d0415d1f31b74aefb81`
+- `sha256 0927f6053e0b8614a99d9dc27ed12f602f34b1612f9d0415d1f31b74aefb81`
 - `manifest.json` + `SHA256SUMS` alongside; locks:
   `requirements.lock`, `build-requirements.lock`,
   `packaging/linux/installer-build.lock`; CPython 3.12.14 via uv,
@@ -140,12 +140,13 @@ a second sender there (the production heartbeat unit owns that lock).
 ## Incident log (closed)
 
 - `test_full_run_cycle_headless` failed once in a full-suite run
-  ("tray did not come up", thread reported the lock held on a fresh
-  temp dir) while an independent harness loaded the box. 2000/2000
-  fresh-file flock probes succeed; the same test passes focused (4×),
-  in-class, and in-combination runs. Conclusion: one-off
-  test-environment occurrence, not a product race. The test now fails
-  with lock/socket/thread facts if bring-up ever times out again.
+  ("tray did not come up"; the tray thread reported the lock held on
+  a fresh temp dir). Observed once; the same test passes in focused
+  reruns (standalone, in-class, and in-combination). The cause is not
+  established — a separate 2000-iteration fresh-file flock probe passed
+  2000/2000, which is noted as a data point, not proof of cause. The
+  test now reports lock/socket/thread facts if bring-up ever times out
+  again, so any recurrence is actionable.
 - Shared-dir `tray.lock` planted by an early creating probe: removed
   (0 bytes, unheld); probes are now non-creating (`r+b`).
 
