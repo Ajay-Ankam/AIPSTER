@@ -8,6 +8,7 @@
   },
   "scripts": {
     "check": "node scripts/check.mjs",
+    "diagrams": "node scripts/diagrams.mjs",
     "test": "node --test scripts/check.test.mjs tests/*.test.mjs",
     "build": "node scripts/build.mjs",
     "bundle": "node scripts/dry-run.mjs",

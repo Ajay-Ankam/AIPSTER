@@ -170,7 +170,11 @@ code{font-size:.9em}
 }
 @media (min-width:1100px){.app-card>.video-feature{grid-template-columns:minmax(0,11fr) minmax(0,13fr)}}
 
-.app-grid{display:grid;grid-template-columns:minmax(0,4.3fr) minmax(0,7.7fr);gap:var(--s7);align-items:center;padding:var(--s8) var(--s6) var(--s8) var(--s7)}
+.app-grid{display:grid;grid-template-columns:minmax(0,4.3fr) minmax(0,7.7fr);gap:var(--s7);align-items:center;padding:var(--s8) var(--s6) var(--s8) var(--s7);position:relative;isolation:isolate}
+/* Hero canvas: a static token dot grid; motion.js brightens it near the
+   pointer (inspired by React Bits DotGrid, reactbits.dev). */
+.app-grid::before,.app-grid::after{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(circle,var(--line-2) 1px,transparent 1.5px) 0 0/20px 20px;-webkit-mask-image:radial-gradient(ellipse 70% 80% at 72% 50%,var(--text),transparent);mask-image:radial-gradient(ellipse 70% 80% at 72% 50%,var(--text),transparent)}
+.app-grid::after{opacity:0;background-image:radial-gradient(circle,var(--copper) 1.25px,transparent 1.75px);-webkit-mask-image:radial-gradient(10rem circle at var(--mx,50%) var(--my,50%),var(--text),transparent);mask-image:radial-gradient(10rem circle at var(--mx,50%) var(--my,50%),var(--text),transparent)}
 .kicker{display:flex;align-items:center;gap:var(--s2);margin-bottom:var(--s5);font-size:var(--t-s);color:var(--muted)}
 .app-grid h1{font:650 clamp(2.75rem,1rem + 4.9vw,5rem)/.96 var(--font-display);letter-spacing:-.035em}
 .app-grid h1 em{font-style:normal;color:var(--copper)}
@@ -236,15 +240,6 @@ code{font-size:.9em}
 .section-title{font:650 clamp(1.75rem,1.1rem + 1.8vw,2.625rem)/1.08 var(--font-display);letter-spacing:-.028em}
 .section-summary{max-width:44rem;color:var(--muted)}
 
-/* How it would work: a true sequence, each step with its margin note. */
-.sequence{list-style:none;margin:0;padding:0;counter-reset:step}
-.step{position:relative;display:grid;grid-template-columns:2rem minmax(0,5fr) minmax(0,6fr);gap:var(--s3) var(--s5);align-items:start;padding-bottom:var(--s6);counter-increment:step}
-.step:last-child{padding-bottom:0}
-.step::before{content:counter(step);display:grid;place-items:center;width:2rem;height:2rem;border:1px solid var(--line-2);border-radius:var(--r2);background:var(--surface);font:600 var(--t-s)/1 var(--font-mono);color:var(--text)}
-.step:not(:last-child)::after{content:"";position:absolute;left:1rem;top:2.5rem;bottom:.5rem;border-left:1px solid var(--line-2)}
-.step-body h3{font:600 var(--t-xl)/1.3 var(--font-display);letter-spacing:-.012em}
-.step-body p{margin-top:var(--s1);color:var(--muted)}
-.step .note{margin-top:.125rem}
 
 /* Story: a small concept drawing of personal meshes. */
 .story-section{background:var(--sunken)}
@@ -252,28 +247,70 @@ code{font-size:.9em}
 .story-copy .section-summary{margin-top:var(--s4)}
 .story-text{margin-top:var(--s3);color:var(--muted)}
 .story-copy .note{margin-top:var(--s5)}
-.mesh-figure{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r3);overflow:hidden}
-.mesh{width:100%;height:auto;padding:var(--s4) var(--s4) var(--s2)}
-.mesh-dot{fill:var(--line-2)}
-.mesh-lanes path{fill:none;stroke:var(--control);stroke-width:1.5;stroke-dasharray:5 6}
-.mesh-links path{fill:none;stroke:var(--control);stroke-width:1.25;stroke-linecap:round}
-.mesh-rings circle{fill:var(--copper-soft);stroke:none}
-.mesh-nodes circle{fill:var(--surface);stroke:var(--text);stroke-width:1.5}
-.mesh-nodes .hub{fill:var(--text);stroke:none}
-.mesh-nodes .shared{fill:var(--copper);stroke:none}
-.mesh-labels text{font:500 14px var(--font-ui);fill:var(--muted)}
-.mesh-figure figcaption{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s5);padding:var(--s3) var(--s4);border-top:1px solid var(--line);font-size:var(--t-xs);color:var(--muted)}
 .fig-label{font:var(--t-xs)/1.4 var(--font-mono);color:var(--muted)}
-.mesh-figure .fig-label{color:var(--text)}
-.mesh-key{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s4)}
-.mesh-key>span{display:inline-flex;align-items:center;gap:var(--s2)}
-.mesh-key i{flex:none;display:inline-block}
-.key-node{width:.5625rem;height:.5625rem;border:1.5px solid var(--text);border-radius:50%}
-.key-shared{width:.625rem;height:.625rem;border-radius:50%;background:var(--copper);box-shadow:0 0 0 3px var(--copper-soft)}
-.key-lane{width:1.25rem;border-top:1.5px dashed var(--control)}
+
+/* Diagrams: one JSON source (diagrams/diagrams.json) rendered to inline SVG by
+   scripts/diagrams.mjs. Every stroke and fill is a token class. The figure is
+   a size container: it shows the wide layout when the text would still render
+   at 12px or more, else the narrow one. */
+.dg-figure{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r3);overflow:hidden;container:dg/inline-size}
+.dg-flow:not(:last-child){margin-bottom:var(--s7)}
+.dg-canvas{padding:var(--s4) 0;border-bottom:1px solid var(--line);background:radial-gradient(circle,var(--line-2) 1px,transparent 1.5px) 0 0/16px 16px,var(--raised)}
+.dg-svg{display:block;max-width:100%;height:auto;margin-inline:auto}
+.dg-wide{display:none}
+.dg-flow .dg-narrow{width:100%;max-width:26rem}
+.dg-mesh .dg-narrow{width:100%;max-width:24rem}
+@container dg (min-width:60rem){.dg-flow .dg-wide{display:block}.dg-flow .dg-narrow{display:none}}
+@container dg (min-width:30rem){.dg-mesh .dg-wide{display:block;width:100%;max-width:40rem}.dg-mesh .dg-narrow{display:none}}
+.dg-svg text{font-family:var(--font-ui);fill:var(--text)}
+.dg-label{font-weight:600}
+.dg-sublabel,.dg-statelabel{fill:var(--muted)}
+.dg-svg .dg-elabel{fill:var(--muted);paint-order:stroke;stroke:var(--raised);stroke-width:5px;stroke-linejoin:round}
+.dg-svg .dg-group{fill:var(--muted);font-weight:500}
+.dg-box{fill:var(--surface);stroke:var(--line-2);stroke-width:1}
+.dg-owner .dg-box{fill:var(--copper-soft);stroke:var(--copper)}
+.dg-s-optional .dg-box{stroke:var(--control);stroke-dasharray:4 3}
+.dg-mark{fill:none;stroke:var(--text);stroke-width:1.5}
+.dg-m-built{fill:var(--text);stroke:none}
+.dg-m-notlive,.dg-m-optional{stroke:var(--muted);stroke-dasharray:2.2 2}
+.dg-edge{fill:none;stroke:var(--control);stroke-width:1.5;stroke-linecap:round}
+.dg-k-heartbeat{stroke-dasharray:1.5 4}
+.dg-k-optional{stroke-dasharray:6 5}
+.dg-k-architectural{stroke-dasharray:5 6}
+.dg-arrow{fill:var(--control)}
+.dg-port{fill:var(--surface);stroke:var(--control);stroke-width:1.5}
+.dg-beam{fill:none;stroke:var(--copper);stroke-width:2.5;stroke-linecap:round;stroke-dasharray:.08 1;stroke-dashoffset:.08;opacity:0}
+.dg-mesh .dg-edge{stroke-width:1.25}
+.dg-mesh .dg-k-architectural{stroke-width:1.5}
+.dg-idle{opacity:.45}
+.dg-hub{fill:var(--text)}
+.dg-share{fill:var(--copper-soft);stroke:var(--copper);stroke-width:1.5}
+.dg-shape{stroke-width:1.5;fill:var(--surface)}
+.dg-shape.dg-st-online{fill:var(--online);stroke:var(--online)}
+.dg-st-stale{stroke:var(--stale)}
+.dg-fill.dg-st-stale{fill:var(--stale);stroke:none}
+.dg-st-offline{stroke:var(--offline)}
+.dg-st-unknown{stroke:var(--unknown);stroke-dasharray:2 2}
+.dg-halo{fill:var(--online);opacity:0}
+.dg-figure figcaption{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s5);padding:var(--s3) var(--s4);font-size:var(--t-xs);color:var(--muted)}
+.dg-figure .fig-label{color:var(--text)}
+.dg-note{flex-basis:100%;max-width:72ch}
+.dg-key,.mesh-key{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s4)}
+.dg-key>span,.mesh-key>span{display:inline-flex;align-items:center;gap:var(--s2)}
+.dg-key i,.mesh-key i{flex:none;display:inline-block}
+.mesh-states .st::before{width:.5625rem;height:.5625rem}
+.mesh-states .st-offline::before{width:.5rem;height:.5rem}
+.key-box{width:.875rem;height:.625rem;border:1px solid var(--copper);border-radius:2px;background:var(--copper-soft)}
+.key-line{width:1.25rem;border-top:1.5px solid var(--control)}
+.key-optional,.key-lane{width:1.25rem;border-top:1.5px dashed var(--control)}
+.key-beat{width:1.25rem;border-top:1.5px dotted var(--control)}
+.key-hub{width:.625rem;height:.625rem;border-radius:50%;background:var(--text)}
+.key-shared{width:.625rem;height:.625rem;border-radius:50%;background:var(--copper-soft);box-shadow:0 0 0 1.5px var(--copper)}
 
 /* What's in this build: the status matrix. */
 .matrix-key{list-style:none;margin:0 0 var(--s4);padding:0;display:flex;flex-wrap:wrap;gap:var(--s2) var(--s5);font-size:var(--t-s)}
+.matrix-key li{display:inline-flex;align-items:baseline;gap:var(--s2)}
+.tally{min-width:1.5ch;font:600 var(--t-s)/1.4 var(--font-mono);font-variant-numeric:tabular-nums slashed-zero;color:var(--text)}
 .matrix{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r3);overflow:hidden;font-size:var(--t-m);line-height:1.5}
 .matrix th,.matrix td{padding:var(--s3) var(--s4);text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
 .matrix tbody tr:last-child>*{border-bottom:0}
@@ -293,8 +330,8 @@ code{font-size:.9em}
 .principles h3{margin:var(--s4) 0 var(--s2);font:600 var(--t-xl)/1.3 var(--font-display);letter-spacing:-.012em}
 .principles article>p:last-child{max-width:36ch;font-size:var(--t-m);color:var(--muted)}
 
-/* Research figures, framed as Fig. 1 and Fig. 2. */
-.figs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s5);align-items:stretch}
+/* Research figure (Fig. 1): image beside its caption on wide screens. */
+.figs{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s5)}
 .diagram-figure{display:grid;grid-template-rows:auto 1fr;min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r3);overflow:hidden}
 .diagram-image-link{display:block;aspect-ratio:10/9;padding:var(--s4);background:#ffffff;border-bottom:1px solid var(--line)}
 .diagram-image-link img{width:100%;height:100%;object-fit:contain}
@@ -307,6 +344,11 @@ code{font-size:.9em}
 .figure-links a{display:inline-flex;align-items:center;min-height:1.5rem;color:var(--copper);text-decoration:none}
 .figure-links a:hover{text-decoration:underline}
 .figure-links span{margin-left:.25em}
+@media (min-width:900px){
+.model-figure{grid-template-columns:minmax(0,5fr) minmax(0,7fr);grid-template-rows:none}
+.model-figure .diagram-image-link{aspect-ratio:9/10;border-bottom:0;border-right:1px solid var(--line)}
+.model-figure figcaption{align-content:center;padding:var(--s5) var(--s6)}
+}
 
 /* Progress: one long log with pictures beside the terse changelog; no
    nested scroll regions. */
@@ -376,10 +418,7 @@ code{font-size:.9em}
 @media (max-width:899.98px){
 .section{padding-block:var(--s8)}
 .section-heading{grid-template-columns:minmax(0,1fr);gap:var(--s4);margin-bottom:var(--s6)}
-.step{grid-template-columns:2rem minmax(0,1fr)}
-.step .note{grid-column:2}
 .principles{grid-template-columns:minmax(0,1fr)}
-.figs{grid-template-columns:minmax(0,1fr)}
 .diagram-image-link{aspect-ratio:auto}
 .diagram-image-link img{height:auto}
 .progress-grid{grid-template-columns:minmax(0,1fr)}
@@ -413,7 +452,6 @@ html{scroll-padding-top:var(--s4)}
 .matrix tbody th,.matrix tbody td{width:auto;padding:0;border:0}
 .matrix td:nth-child(2),.matrix td:last-child{width:auto}
 .post{padding:var(--s4) var(--s4) var(--s5)}
-.mesh-labels text{font-size:20px}
 .nf-head{padding:var(--s5) var(--s4) var(--s4)}
 .nf-links a{padding:var(--s3) var(--s4)}
 }
@@ -432,13 +470,36 @@ html{scroll-behavior:smooth}
 .hero-console .lane::before{animation:draw var(--dur-3) var(--ease-out) 200ms both}
 .hero-console .lane+.stage+.lane::before{animation-delay:520ms}
 .hero-console .nodes{animation:reveal var(--dur-2) var(--ease-out) 840ms both}
-@supports (animation-timeline:view()){
-.mesh-figure{view-timeline:--mesh block}
-.mesh-links path{stroke-dasharray:1;animation:mesh-draw linear both;animation-timeline:--mesh;animation-range:entry 0% entry 90%}
-.mesh-nodes circle,.mesh-rings circle{animation:reveal linear both;animation-timeline:--mesh;animation-range:entry 0% entry 50%}
-.mesh-lanes path{animation:reveal linear both;animation-timeline:--mesh;animation-range:entry 60% entry 100%}
+/* Motion layer, reimplemented from scratch; inspired by React Bits
+   (reactbits.dev) ShinyText, DecryptedText, SpotlightCard, Magnet, DotGrid
+   and Beams. Content is final without it.
+   Every timed loop ends within 5 seconds (WCAG 2.2.2). */
+.fx-sheen{background:linear-gradient(100deg,var(--muted) 0 38%,var(--text) 50%,var(--muted) 62% 100%) 100% 0/300% 100% no-repeat;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 2.2s var(--ease-out) .4s 2 both}
+.fx-host{position:relative;-webkit-text-fill-color:transparent}
+.fx-overlay{position:absolute;inset:0;-webkit-text-fill-color:currentColor;white-space:nowrap;pointer-events:none}
+.dg-figure.is-in .dg-beam{animation:beam 1.4s var(--ease-out) 3 both}
+.dg-figure.is-in .dg-b2{animation-delay:.2s}
+.dg-figure.is-in .dg-b3{animation-delay:.4s}
+.dg-figure.is-in .dg-b4{animation-delay:.6s}
+.dg-figure.is-in :is(.dg-k-heartbeat,.dg-k-optional,.dg-k-architectural).dg-edge{animation:flow 1.5s linear 3}
+.dg-figure.is-in .dg-edge.dg-idle{animation:none}
+.dg-figure.is-in .dg-halo{transform-box:fill-box;transform-origin:center;animation:halo 1.4s var(--ease-out) .3s 3 both}
+@media (pointer:fine){
+.fx-spot.is-lit{background-image:radial-gradient(18rem circle at var(--mx) var(--my),color-mix(in srgb,var(--copper) 9%,transparent),transparent 70%)}
+.dg-figure.is-lit .dg-canvas{background:radial-gradient(18rem circle at var(--mx) var(--my),color-mix(in srgb,var(--copper) 9%,transparent),transparent 70%),radial-gradient(circle,var(--line-2) 1px,transparent 1.5px) 0 0/16px 16px,var(--raised)}
+.app-grid::after{transition:opacity var(--dur-2)}
+.app-grid.is-lit::after{opacity:.9}
+.js .fx-magnet{transform:translate(var(--tx,0px),var(--ty,0px));transition:transform var(--dur-3) var(--ease-out),background-color var(--dur-1),color var(--dur-1),border-color var(--dur-1),filter var(--dur-1)}
 }
+}
+@media (forced-colors:active){
+.fx-sheen{color:inherit;background:none;animation:none}
+.fx-host{-webkit-text-fill-color:currentColor}
+.fx-overlay{display:none}
 }
 @keyframes draw{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
 @keyframes reveal{from{opacity:0}to{opacity:1}}
-@keyframes mesh-draw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+@keyframes sheen{from{background-position:100% 0}to{background-position:0 0}}
+@keyframes beam{0%{stroke-dashoffset:.08;opacity:0}15%,85%{opacity:.9}100%{stroke-dashoffset:-1;opacity:0}}
+@keyframes flow{to{stroke-dashoffset:-22}}
+@keyframes halo{from{transform:scale(1);opacity:.45}to{transform:scale(2.6);opacity:0}}
