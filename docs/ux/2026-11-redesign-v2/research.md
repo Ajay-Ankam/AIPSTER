@@ -84,6 +84,8 @@ The Phase 2 rebuild keeps that test green and carries the same behaviour into th
 
 ## 5. The three directions
 
+Only the picked direction (B, `b-switchboard/`) and its screenshots ship in this PR. The A (`a-lab-notebook/`) and C (`c-mesh/`) prototypes are kept on Kainotomic's local research branch and are described here for the record.
+
 Each has `index.html` (landing hero plus one key section), `app.html` (`/app` overview with the seeded demo account's data, plus three labelled fixture rows taken from the site's tests to show density and reflow) and `styles.css`, whose token block opens the file. Screenshots are in `screenshots/<direction>-{landing,app}-{1440,1024,768,390}-{light,dark}.webp`, captured by `capture.mjs`, which also prints an overflow report.
 
 ### A. Lab notebook (editorial / technical)
