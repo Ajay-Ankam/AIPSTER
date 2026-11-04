@@ -944,6 +944,32 @@ def _fd_unlock(fd):
         pass
 
 
+@contextlib.contextmanager
+def sender_lock(data_dir):
+    """Cross-process sender exclusion (macOS/POSIX lane, 2026-11-01).
+
+    Held for a heartbeat-loop so a restarted controller cannot start a
+    second sender while an orphaned first sender still beats. OS-held
+    like pair_lock (flock/msvcrt, never existence-based): a dead
+    holder's lock is released by the OS. Fails fast with SENDER_RUNNING.
+    """
+    private_dir(data_dir)
+    lock = Path(data_dir) / "sender.lock"
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            _fd_lock_exclusive(fd)
+        except OSError as exc:
+            raise PairingError(None, "SENDER_RUNNING",
+                               f"another heartbeat sender is using {data_dir}") from exc
+        try:
+            yield
+        finally:
+            _fd_unlock(fd)
+    finally:
+        os.close(fd)
+
+
 def cmd_pair(args):
     try:
         data_dir = Path(args.data_dir) if args.data_dir else default_data_dir()

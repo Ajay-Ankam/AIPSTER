@@ -96,6 +96,9 @@ class PairingLifecycleTests(unittest.TestCase):
 
     @unittest.skipIf(os.name=="nt","POSIX directory read/search permissions")
     def test_posix_write_search_only_directory_cannot_claim_complete_cleanup(self):
+        # Merge 2026-11-03: main's verify-don't-repair private_dir (5d91c1f)
+        # supersedes the lane's repair expectation; the old name/expectation
+        # is correct on the merged tree.
         if os.geteuid()==0:self.skipTest("root bypasses POSIX read denial")
         meta=self.pair();manifest=self.data/"pairing.json";key=self.data/meta["key_file"]
         sentinel=self.data/"unmanaged.txt";sentinel.write_text("synthetic unrelated file")

@@ -44,9 +44,9 @@ Still unavailable, unqualified or owned elsewhere:
 | Placement | The runner enforces the `aipster-bound-cpu-internal/1` envelope's placement fields, but that binding is only as good as the issuing store; capability matching is still not authorization. |
 | CPU confinement | Zero GPU layers is configurable, but the public worker still has no `cpu_only` opt-in, `--device none`, `--no-kv-offload`, or exclusion of ambient `LLAMA_ARG_*` values. Ganglion's own device placement was not audited or changed here. |
 | Retry / settlement | The worker posts once and holds a local started-job ledger, but there is no connected server-side settlement or lease store in this tree, and no cross-process proof that a leased job cannot be handed out twice. |
-| Transport / tenant isolation | The optional legacy fabric bridge is included only to satisfy package imports. Local bearer checks do not establish AIPSTER tenant/grant authority. |
-| Result and revocation | The worker reports EIF-shaped results and stops on a revoked/expired key, but admitted-revision validation, grant revocation settlement and the content-release recheck belong to the coordinator lane. |
-| Runtime evidence | Public code has some attach quarantine/model identity checks already. Native CPU ISA, RAM/context fit and exact model digest qualification remain future work. |
+| Transport / tenant isolation | The optional legacy fabric bridge is included only to satisfy package imports. Local bearer checks do not establish AIPSTER tenant/grant authority. Patch 0002 (branch) additionally reviews the opt-in outbound Ganglion fabric bridge: authenticated node socket, exact resident-model binding, resident-only capacity advertisement, job-id result binding and rejection handling; it remains disabled in the supplied examples and is still **not the AIPSTER transport**, and the fabric execute frame carries no tenant, grant, runtime ID or deadline. |
+| Result and revocation | The worker reports EIF-shaped results and stops on a revoked/expired key, but admitted-revision validation, grant revocation settlement and the content-release recheck belong to the coordinator lane. Ganglion fabric results are one non-streamed frame; the worker binds it to the dispatch job ID but keeps no durable execution ledger across reconnects. |
+| Runtime evidence | Public code has some attach quarantine/model identity checks already. Native CPU ISA, RAM/context fit and exact model digest qualification remain future work. This branch does not assert all such protections are missing, nor claim private fixes were independently verified. |
 
 ## Live qualification still pending
 
@@ -69,3 +69,22 @@ Unknown fields are rejected by the strict public schemas. Do not remove placemen
 fields to make newer tasks pass, downgrade to unbound retries or enable jobs on the
 strength of these installation tests. Authentication, tenancy, budgets, placement
 and F1/F1P holds are unchanged. `/api/jobs` still returns `INFERENCE_DISABLED`.
+
+## Fabric contract limits confirmed by local patch 0002
+
+The reviewed node contract is the deployed Ganglion fabric v0.2.0 node socket:
+`GET /v1/nodes/connect?node_id=…` with a node-role token bound to that ID, one
+immediate and then periodic heartbeat, `execute` down the same socket, and exactly
+one terminal `result` frame. It has **no streaming, no cancel frame and no deadline
+field**. The fabric assigns a 180 s deadline at admission and discards a result
+that arrives at or after it; the worker can only enforce its own
+`request_timeout_seconds`. Disconnect is the only remote cancellation signal, so an
+in-flight attached request is quarantined as an uncertain outcome. These are
+contract gaps for the fabric owner, not fields this worker may invent.
+
+Resident-only is deliberate: the worker advertises only models that are already
+loaded and advertises no model switching. A fabric request for any other model is
+rejected with 409 before a load or switch; make it resident through the local API
+first. Chat (`messages`) is not advertised and a forced frame is rejected as an
+invalid request. A durable cross-reconnect execution ledger and AIPSTER admission/
+settlement remain absent.

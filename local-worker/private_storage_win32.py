@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes as w
 import os
+import time
 from pathlib import Path
 
 OWNER_SECURITY_INFORMATION = 0x1
@@ -18,6 +19,7 @@ DACL_SECURITY_INFORMATION = 0x4
 PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 SE_DACL_PROTECTED = 0x1000
 FILE_ALL_ACCESS = 0x001F01FF
+WRITE_SETTLE_SEC = 2  # re-assert our descriptor write until the re-read converges
 _API = None
 
 
@@ -149,8 +151,35 @@ def _assert_private(owner, descriptor, dacl, user, default_owner, directory):
         fail('foreign-or-incomplete-allow')
 
 
+def _transient_after_write(exc, user, default_owner):
+    """True only for a re-read our own rewrite can still converge.
+
+    Either the owner write is visible while DACL protection still lags
+    (inherited-acl with the user owner we wrote: a visibility lag, or an
+    inheritance-propagation wave from a concurrent parent rewrite that
+    landed after our write), or the re-read shows the fully pre-write
+    state (a distinct default owner still in place). Any other shape,
+    including a foreign owner, is not transient. Propagation only flows
+    parent-to-child and every level's writes are finite, so rewriting
+    until the strict re-read passes terminates; the bound fails closed.
+    """
+    reason = getattr(exc, "reason", None)
+    if reason == "inherited-acl":
+        return getattr(exc, "owner_sid", None) == user
+    if reason == "owner-mismatch":
+        return (default_owner not in ("unavailable", user)
+                and getattr(exc, "owner_sid", None) == default_owner)
+    return False
+
+
 def protect_path(path, *, directory=False, verify=False, new=False):
-    """Require user ownership; normalize default ownership only for proven new paths."""
+    """Require user ownership; normalize default ownership only for proven new paths.
+
+    The identical descriptor is rewritten until the strict re-read
+    passes, boundedly: the re-read can lag the write, and a concurrent
+    parent rewrite's inheritance propagation can revert this path after
+    our write landed. The read-only verify path never waits.
+    """
     path = Path(path)
     if path.is_symlink() or getattr(path, 'is_junction', lambda: False)():
         raise PrivateStorageError(0, 'linked-storage')
@@ -176,13 +205,22 @@ def protect_path(path, *, directory=False, verify=False, new=False):
         if not adv.GetSecurityDescriptorDacl(fresh, ctypes.byref(present), ctypes.byref(new_dacl), ctypes.byref(defaulted)) or not present:
             raise PrivateStorageError(ctypes.get_last_error(), 'descriptor-dacl', user, default_owner, owner)
         flags = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
+        owner_arg = None
         if owner != user:  # Proven new path with the process's default owner.
             flags |= OWNER_SECURITY_INFORMATION
-        code = adv.SetNamedSecurityInfoW(str(path), 1, flags, new_owner if owner != user else None, None, new_dacl, None)
-        if code:
-            raise PrivateStorageError(code, 'write-private-security', user, default_owner, owner)
+            owner_arg = new_owner
+        deadline = time.monotonic() + WRITE_SETTLE_SEC
+        while True:
+            code = adv.SetNamedSecurityInfoW(str(path), 1, flags, owner_arg, None, new_dacl, None)
+            if code:
+                raise PrivateStorageError(code, 'write-private-security', user, default_owner, owner)
+            try:
+                with _security(path) as (seen_owner, descriptor, dacl):
+                    _assert_private(seen_owner, descriptor, dacl, user, default_owner, directory)
+                return True
+            except PrivateStorageError as exc:
+                if not _transient_after_write(exc, user, default_owner) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
     finally:
         kernel.LocalFree(fresh)
-    with _security(path) as (owner, descriptor, dacl):
-        _assert_private(owner, descriptor, dacl, user, default_owner, directory)
-    return True
