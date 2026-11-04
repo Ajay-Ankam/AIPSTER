@@ -35,7 +35,8 @@ from aipster_tray.backend_headless import HeadlessBackend  # noqa: E402
 from aipster_tray.backend_linux import (LinuxWindowBackend, try_indicator,  # noqa: E402
                                         send_notification)
 from aipster_tray.controller import (HEALTH_TIMEOUT, TICK_SECONDS,  # noqa: E402
-                                     SECOND_LAUNCH_WAIT, Controller)
+                                     SECOND_LAUNCH_WAIT)
+from aipster_tray.linux_lifecycle import LinuxController  # noqa: E402
 from aipster_tray.firstrun import (build_info, data_dir, explicit_demo_ready,  # noqa: E402
                                    first_run_ready)
 
@@ -212,7 +213,9 @@ def main(argv=None):
         guard.release()
         return 2
 
-    controller = Controller(data, None, log_lines=console)
+    # LinuxController never spawns beside an externally managed worker
+    # (external-worker.json), even while a system service restarts.
+    controller = LinuxController(data, None, log_lines=console)
     _install_signal_handlers(controller)
     try:
         try:
