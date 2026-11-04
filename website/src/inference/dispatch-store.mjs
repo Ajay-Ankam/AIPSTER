@@ -425,7 +425,8 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
   async function fabricGrantView({ grant_id, principal_id, resource_id } = {}) {
     if (!isStr(grant_id) || !isStr(principal_id) || !isStr(resource_id)) return null;
     const g = await first(db, 'SELECT * FROM fabric_grants WHERE id = ?', grant_id);
-    if (!g || g.status !== 'enforced' || g.quarantine_reason) return null;
+    if (!g || g.status !== 'enforced'
+      || (g.quarantine_reason !== undefined && g.quarantine_reason !== null)) return null;
     const conn = await first(db, 'SELECT id, state FROM connections WHERE id = ?', g.connection_id);
     if (!conn || conn.state !== 'active') return null;
     const r = await first(db, 'SELECT id, owner_id, incarnation FROM resources WHERE id = ?', resource_id);
@@ -458,7 +459,8 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
     const rawActions = safeJson(g.actions, null);
     const models = safeJson(g.models, null);
     const ceilings = safeJson(g.ceilings, null);
-    if (!Array.isArray(rawActions) || !Array.isArray(models) || !ceilings || typeof ceilings !== 'object') return null;
+    if (!Array.isArray(rawActions) || !Array.isArray(models) || !ceilings || typeof ceilings !== 'object'
+      || Array.isArray(ceilings)) return null;
     // Action namespace seam: fabric commits the 'infer' verb (preview
     // terms; "Connection only carries inference"), while the dispatch gate
     // matches the fixed 'inference' action. Map the known verb; anything

@@ -126,6 +126,24 @@ test('stale incarnation and exporter drift withhold the view', async (t) => {
   assert.equal(await read(s, 'u_bob'), null, 'ownership drift authorizes nothing');
 });
 
+test('empty-string quarantine and array ceilings fail closed like the adapter', async (t) => {
+  // Parity with grant-execution-adapter: it rejects every non-nullish
+  // quarantine_reason and every non-object ceilings. The read path must
+  // not be looser (truthy check lets '' through; typeof [] is 'object').
+  const s = await setup();
+  t.after(() => s.t.sqlite.close());
+  assert.deepEqual((await read(s, 'u_bob')).ceilings, { maxTokens: 1000, maxRequests: 10 },
+    'precondition: the persisted object ceilings are accepted as committed');
+  await s.t.DB.prepare('UPDATE fabric_grants SET quarantine_reason = ? WHERE id = ?').bind('', s.grantId).run();
+  assert.equal(await read(s, 'u_bob'), null, 'empty-string quarantine is still quarantine');
+  await s.t.DB.prepare('UPDATE fabric_grants SET quarantine_reason = NULL WHERE id = ?').bind(s.grantId).run();
+  await s.t.DB.prepare('UPDATE fabric_grants SET ceilings = ? WHERE id = ?').bind('[1000]', s.grantId).run();
+  assert.equal(await read(s, 'u_bob'), null, 'array ceilings carry no quota limit and are refused');
+  // NULL ceilings are untestable here on purpose: the schema declares the
+  // column NOT NULL, so a null row cannot persist. The adapter-side null
+  // case stays covered by the pure unit suite.
+});
+
 test('owner-scoped deny withholds the view for its principal only', async (t) => {
   const s = await setup();
   t.after(() => s.t.sqlite.close());
