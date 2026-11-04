@@ -68,7 +68,7 @@ Two Linux-only facts the reviewer must know:
 
 - `local-worker/packaging/linux/dist/aipster-worker_0.1.0-1_amd64.deb`
   (22,016,634 bytes)
-- `sha256 0927f6053e0b8614a99d9dc27ed12f602f34b1612f9d0415d1f31b74aefb81`
+- `sha256 0927f6053e0b8614a99d9dc27ed12f602f34b1612f9d0415d1f31b74aefb1781`
 - `manifest.json` + `SHA256SUMS` alongside; locks:
   `requirements.lock`, `build-requirements.lock`,
   `packaging/linux/installer-build.lock`; CPython 3.12.14 via uv,
@@ -150,8 +150,11 @@ a second sender there (the production heartbeat unit owns that lock).
 - Shared-dir `tray.lock` planted by an early creating probe: removed
   (0 bytes, unheld); probes are now non-creating (`r+b`).
 
-## Verdict: READY for independent candidate execution
+## Verdict: READY-for-demo (reviewer runtime proof completed)
 
-No known blockers. Awaiting reviewer runtime proof from the extracted
-DEB (fresh window + start/stop), which this handoff does not claim to
-replace.
+Independent final review extracted this exact artifact (verified SHA256
+above) and confirmed packaged start/stop/restart, healthz, and clean
+quit — runtime proof from the extracted payload, not a package
+installation claim and not a rebuild of this evidence. No known
+blockers. The single intermittent bring-up timeout in the unit suite
+remains open as observed (cause not established; see incident log).
