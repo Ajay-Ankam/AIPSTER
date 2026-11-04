@@ -25,9 +25,9 @@ const INSTALLER_SUITE = 902;
 const siteCheck = (sha) => ({id: 9, name: 'Public site asset and build checks',
   head_sha: sha, status: 'completed', conclusion: 'success',
   app: {slug: 'github-actions'}, check_suite: {id: SITE_SUITE}});
-const SITE_RUNS = 'actions/workflows/.github/workflows/public-site-checks.yml/runs';
-const WORKER_RUNS = 'actions/workflows/.github/workflows/local-worker-checks.yml/runs';
-const INSTALLER_RUNS = 'actions/workflows/.github/workflows/worker-installer-build.yml/runs';
+const SITE_RUNS = 'actions/workflows/public-site-checks.yml/runs';
+const WORKER_RUNS = 'actions/workflows/local-worker-checks.yml/runs';
+const INSTALLER_RUNS = 'actions/workflows/worker-installer-build.yml/runs';
 // Suite ids the mocked workflow-runs API reports per head SHA.
 const suiteRunsFor = (entries) => (path) => {
   const m = path.match(/head_sha=([0-9a-f]{40})/);

@@ -167,15 +167,26 @@ export const INSTALLER_WORKFLOW_FILE = '.github/workflows/worker-installer-build
 // head_sha; unknown/failed listings fail closed). Reading this endpoint
 // needs the `actions: read` permission — recorded as an UNAPPLIED
 // approval-gated proposal; without it every producer check refuses.
+// The listing accepts a workflow ID or file NAME (documented route),
+// never a repository path: requesting '.github/workflows/...' yields
+// HTTP 404. The full expected file stays the producer identity for
+// binding and diagnostics; only the validated basename is requested.
+function workflowRouteName(workflowFile) {
+  const name = workflowFile.slice(workflowFile.lastIndexOf('/') + 1);
+  assert(name.length > 0 && !name.includes('/'),
+    `Producer workflow file has no file name: ${workflowFile}`);
+  return encodeURIComponent(name);
+}
 export async function fetchWorkflowSuiteIds(request, workflowFile, headSha) {
   assert(typeof request === 'function', 'A metadata requester is required');
   assert(typeof workflowFile === 'string' && workflowFile.length > 0,
     'A producer workflow file is required');
   assertSha(headSha, 'Suite head SHA');
+  const routeName = workflowRouteName(workflowFile);
   const ids = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
     const data = await request(
-      `actions/workflows/${workflowFile}/runs?head_sha=${headSha}&per_page=100&page=${page}`);
+      `actions/workflows/${routeName}/runs?head_sha=${headSha}&per_page=100&page=${page}`);
     assert(data && Array.isArray(data.workflow_runs),
       `Workflow runs listing returned no list: ${workflowFile}`);
     for (const run of data.workflow_runs) {
