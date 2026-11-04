@@ -112,6 +112,13 @@ class FixtureFabricHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"object":"list","data":["' + b"x" * (proxy.RESPONSE_MAX_BYTES + 100) + b'"]}')
             return
+        if self.command == "POST" and mode == "pending-post":
+            self._send(409, {"error": {"message": "still running", "type": "invalid_request_error",
+                                       "code": "operation_in_progress"},
+                             "op_id": "op-9", "job_id": "job-9",
+                             "status_route": "/v1/operations/op-9-key-00000001",
+                             "automatic_retry": False})
+            return
         if self.command == "GET":
             self._send(200, {"object": "list", "data": [{"id": "qwen3-fixture", "object": "model"}]})
         else:
@@ -281,6 +288,46 @@ class ProxyCase(unittest.TestCase):
         status, _ = raw_request(self.port, "GET", "/v1/operations/pending-key-00000001")
         self.assertEqual(status, 401)
         self.assertEqual(len(FixtureFabricHandler.seen), n)
+
+    # -- finding 1: status_route preservation ---------------------------------
+    def test_upstream_409_preserves_valid_status_route_end_to_end(self):
+        FixtureFabricHandler.mode = "pending-post"
+        status, out = self.chat({"model": "auto", "messages": [{"role": "user", "content": "Say ok"}],
+                                 "max_tokens": 8}, authed())
+        self.assertEqual(status, 409)
+        self.assertEqual(out["error"]["code"], "operation_in_progress")
+        self.assertEqual(out["op_id"], "op-9")
+        self.assertEqual(out["job_id"], "job-9")
+        self.assertEqual(out["status_route"], "/v1/operations/op-9-key-00000001")
+        self.assertIs(out["automatic_retry"], False)
+
+    def test_bounded_upstream_error_preserves_valid_status_route(self):
+        body = json.dumps({"error": {"code": "operation_in_progress", "message": "settling"},
+                           "op_id": "op-1", "job_id": "job-9",
+                           "status_route": "/v1/operations/11111111-2222-4333-8333-444444444444",
+                           "automatic_retry": False}).encode()
+        out = proxy._bounded_upstream_error(body)
+        self.assertEqual(out["status_route"], "/v1/operations/11111111-2222-4333-8333-444444444444")
+        self.assertIs(out["automatic_retry"], False)
+
+    def test_bounded_upstream_error_refuses_hostile_status_routes(self):
+        hostile = ["https://evil.example/v1/operations/abc12345",
+                   "//evil.example/v1/operations/abc12345",
+                   "/v1/operations/abc12345?key=x",
+                   "/v1/operations/abc12345#frag",
+                   "/v1/operations/../admin",
+                   "/v1/operations/%2e%2e/admin",
+                   "/v1/operations/",
+                   "/v1/operations/abc 12345",
+                   "/other/abc12345",
+                   12345,
+                   None]
+        for bad in hostile:
+            body = json.dumps({"error": {"code": "operation_in_progress", "message": "settling"},
+                               "status_route": bad}).encode()
+            out = proxy._bounded_upstream_error(body)
+            self.assertIsNotNone(out)
+            self.assertNotIn("status_route", out)
 
     # -- defect 4: honest upstream mapping, uncertainty, bounds ----------------
     def test_upstream_401_preserved_with_status_not_rewritten_to_503(self):

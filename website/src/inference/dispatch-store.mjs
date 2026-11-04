@@ -1399,6 +1399,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
     // coordinator authority
     resolveAdmission, readGrant, claimOperation, getOperation, acquireHold, admit, redeemStart,
     fenceStart, releaseHolds, recordDispatch, markUncertain, recordCancelIntent, recheckRelease, settle,
+    validateBinding,
     // issuer + bound-job transport primitives (L2)
     issueAdmission, enqueueJob, leaseNextJob, completeJob, readJob,
   };

@@ -458,12 +458,18 @@ class FabricOpenAIProxyHandler(BaseHTTPRequestHandler):
         self._relay(bearer, FABRIC_CHAT_PATH, payload, route, idempotency_key=idem)
 
 
+STATUS_ROUTE_RE_TEXT = re.escape(FABRIC_STATUS_PREFIX) + IDEMPOTENCY_KEY_RE_TEXT
+STATUS_ROUTE_RE = re.compile(STATUS_ROUTE_RE_TEXT + r"\Z")
+
+
 def _bounded_upstream_error(data):
     """Preserve a bounded typed upstream error, else None.
 
     Correlation fields travel with the error so callers can reconcile: op_id
     and job_id when they are short identifiers, automatic_retry when it is a
-    real boolean. Everything else is dropped.
+    real boolean, and a server-issued status_route only when it is a strictly
+    validated relative /v1/operations/<valid-key> (no origin, query,
+    fragment, traversal, or encoding surprises). Everything else is dropped.
     """
     try:
         obj = json.loads(bytes(data).decode("utf-8"))
@@ -483,6 +489,9 @@ def _bounded_upstream_error(data):
         if isinstance(value, str) and value and len(value) <= 128 \
                 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", value):
             out[key] = value
+    route = obj.get("status_route")
+    if isinstance(route, str) and STATUS_ROUTE_RE.fullmatch(route):
+        out["status_route"] = route
     if isinstance(obj.get("automatic_retry"), bool):
         out["automatic_retry"] = obj["automatic_retry"]
     return out

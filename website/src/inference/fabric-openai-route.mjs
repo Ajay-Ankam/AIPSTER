@@ -165,6 +165,29 @@ export function createFabricOpenAIRoute({
     return unavailable();
   }
 
+  // Rebuild server-issued admission identity from the durable recorded
+  // operation binding when the admission row was swept after expiry.
+  // Revalidated with the store's own binding contract (principal/tenant
+  // match, identity fields, pools); expires_at is conservatively the
+  // recorded op deadline, which never exceeded admission expiry. Never
+  // mints placement, budget, or spend — reconcile paths use it for digest
+  // and settled-result identity only.
+  function admissionFromRecordedBinding(store, principal, recorded) {
+    const binding = isObj(recorded) ? recorded.binding : null;
+    if (!store || typeof store.validateBinding !== 'function' || !isObj(binding)) return null;
+    try {
+      store.validateBinding(binding, principal.principal_id, principal.tenant_id);
+    } catch { return null; }
+    return {
+      admission_ref: binding.admission_ref, grant_id: binding.grant_id,
+      grant_revision: binding.grant_revision, resource_id: binding.resource_id,
+      incarnation: binding.incarnation, node_id: binding.node_id,
+      runtime_id: binding.runtime_id, runtime_instance: binding.runtime_instance,
+      model_id: binding.model_id, model_fingerprint: binding.model_fingerprint,
+      pools: binding.pools, expires_at: binding.deadline_at,
+    };
+  }
+
   // Surface a settled success ONLY after the coordinator's release decision
   // and a fresh recheck of CURRENT release authority. Withheld or revoked
   // content never escapes, on any path (initial, status, replay, conflict).
@@ -207,6 +230,11 @@ export function createFabricOpenAIRoute({
     } catch {
       return { http: 503, body: openAIError(503, 'result_unavailable',
         'The job settled but its row could not be re-read; no completion is surfaced.').body };
+    }
+    if (!isObj(admission) && isObj(op)) {
+      // Admission row swept after expiry: identity from the durable recorded
+      // operation binding (revalidated). Release recheck already passed above.
+      admission = admissionFromRecordedBinding(store, principal, op);
     }
     if (!isObj(job) || !isObj(admission)) {
       return { http: 503, body: openAIError(503, 'result_unavailable',
@@ -290,6 +318,13 @@ export function createFabricOpenAIRoute({
           tenant_id: principal.tenant_id }, admission_ref: storedRef }) : null;
       } catch {
         return uncertain('lookup', 'AUTHORITY_UNAVAILABLE');
+      }
+      if (!isObj(admission) && isObj(recorded)) {
+        // Admission row swept after expiry: rebuild server-issued identity
+        // from the durable recorded binding (revalidated). Digest, deadline,
+        // and reconcile logic below are unchanged, so a replay can only
+        // reconcile — never a new admission, spend, or job.
+        admission = admissionFromRecordedBinding(store, principal, recorded);
       }
       if (!isObj(admission)) {
         return { http: 403, body: openAIError(403, 'admission_not_available',
