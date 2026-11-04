@@ -1369,6 +1369,15 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
         try { binding = JSON.parse(op.binding_json); } catch { continue; }
         if (!isObj(binding)) continue;
         if (typeof binding.grant_id === 'string' && binding.grant_id.startsWith(FABRIC_GRANT_PREFIX)) {
+          // A switched-off federation flag is an operator pause, not lost
+          // consent: skip the job and leave it queued. New starts are
+          // already refused while off (fabricGrantLive reads null,
+          // liveAuthoritySql reads '0') and in-flight releases are
+          // withheld by fabricAuthorityProblem. Expiry, deadline,
+          // revocation and deny checks below still run the moment the
+          // flag is restored, so a revoke or expiry that lands while
+          // paused never revives into a lease.
+          if (!federationOn()) continue;
           const authority = {
             grant_id: binding.grant_id, grant_revision: binding.grant_revision, incarnation: binding.incarnation,
           };

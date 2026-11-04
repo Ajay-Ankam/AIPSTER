@@ -166,11 +166,69 @@ test('R3: turning federation off stops queued share work and withholds in-flight
   delete s.t.env.FEDERATION_ENABLED;
   const next = await s.t.call('/api/worker/jobs/next', { headers: B(s.hb) });
   assert.equal(next.status, 204, 'queued share work is not handed to the exporter worker');
+  // F1: the flag-off pause must not burn the queued job. It stays queued
+  // (never terminal) with the reservation untouched until the flag returns.
+  const q = await s.t.DB.prepare('SELECT status FROM dispatch_jobs WHERE job_id = ?').bind(j2.json.job_id).first();
+  assert.equal(q.status, 'queued', 'flag-off leaves the queued share job queued, not expired');
+  assert.equal(await count(s.t, "SELECT COUNT(*) AS n FROM dispatch_jobs WHERE status = 'expired'"), 0);
+  const spendPaused = await s.t.DB.prepare('SELECT used_tokens, used_jobs FROM fabric_grants WHERE id = ?').bind(s.grantId).first();
   const posted = await readJson(await s.t.call(`/api/worker/jobs/${l.json.job_id}/result`, { method: 'POST', headers: B(s.hb), body: succeeded(l.json) }));
   assert.equal(posted.status, 200, posted.text);
   const out = await readJson(await s.t.call('/api/jobs/bob-r3-leased-001', { headers: S(s.t, s.t.bob) }));
   assert.equal(out.json.status, 'settled');
   assert.equal(out.json.outcome?.content, undefined, 'federation off releases no share content');
+  // Restoring the flag resumes the paused job: it leases only because the
+  // grant is still authorized and the deadline still ahead, then releases.
+  s.t.env.FEDERATION_ENABLED = '1';
+  const resumed = await readJson(await s.t.call('/api/worker/jobs/next', { headers: B(s.hb) }));
+  assert.equal(resumed.status, 200, resumed.text);
+  assert.equal(resumed.json.job_id, j2.json.job_id, 'the paused job leases after restore');
+  const posted2 = await readJson(await s.t.call(`/api/worker/jobs/${resumed.json.job_id}/result`, { method: 'POST', headers: B(s.hb), body: succeeded(resumed.json) }));
+  assert.equal(posted2.status, 200, posted2.text);
+  const out2 = await readJson(await s.t.call('/api/jobs/bob-r3-queued-001', { headers: S(s.t, s.t.bob) }));
+  assert.equal(out2.json.status, 'settled');
+  assert.equal(out2.json.outcome.content, 'hello', 'restored federation releases the paused result');
+  const spendAfter = await s.t.DB.prepare('SELECT used_tokens, used_jobs FROM fabric_grants WHERE id = ?').bind(s.grantId).first();
+  assert.deepEqual(spendAfter, spendPaused, 'the pause itself charges nothing extra');
+});
+
+test('R3: a revoke or expiry during the flag-off pause never revives after restore', async () => {
+  for (const label of ['revoked', 'expired']) {
+    const s = await base();
+    const a = await admit(s.t, S(s.t, s.t.bob));
+    assert.equal(a.status, 201, a.text);
+    const key = `bob-r3-pause-${label}`;
+    const j = await submit(s.t, S(s.t, s.t.bob), a.json, key);
+    assert.equal(j.status, 202, j.text);
+    delete s.t.env.FEDERATION_ENABLED;
+    const next = await s.t.call('/api/worker/jobs/next', { headers: B(s.hb) });
+    assert.equal(next.status, 204, `${label}: paused share work is not handed out`);
+    const q = await s.t.DB.prepare('SELECT status FROM dispatch_jobs WHERE job_id = ?').bind(j.json.job_id).first();
+    assert.equal(q.status, 'queued', `${label}: still queued while paused`);
+    // Narrow authority while paused. The /v1/fabric control plane is itself
+    // flag-gated, so the fixture writes the same terminal grant state the
+    // route would (status row for revoke, window end for expiry).
+    if (label === 'revoked') {
+      await s.t.DB.prepare("UPDATE fabric_grants SET status = 'revoked' WHERE id = ?").bind(s.grantId).run();
+    } else {
+      await s.t.DB.prepare('UPDATE fabric_grants SET expiry = ? WHERE id = ?')
+        .bind(new Date(Date.now() - 1000).toISOString(), s.grantId).run();
+    }
+    const spendBefore = await s.t.DB.prepare('SELECT used_tokens, used_jobs FROM fabric_grants WHERE id = ?').bind(s.grantId).first();
+    s.t.env.FEDERATION_ENABLED = '1';
+    const after = await s.t.call('/api/worker/jobs/next', { headers: B(s.hb) });
+    assert.equal(after.status, 204, `${label}: stale authority never revives into a lease`);
+    assert.equal(await count(s.t, "SELECT COUNT(*) AS n FROM dispatch_jobs WHERE status = 'leased'"), 0);
+    const row = await s.t.DB.prepare('SELECT status, result_json FROM dispatch_jobs WHERE job_id = ?').bind(j.json.job_id).first();
+    assert.equal(row.status, 'expired', `${label}: the job is terminal, not uncertain`);
+    assert.equal(JSON.parse(row.result_json).reason, 'authority_lost');
+    const out = await readJson(await s.t.call(`/api/jobs/${key}`, { headers: S(s.t, s.t.bob) }));
+    assert.equal(out.json.status, 'settled', out.text);
+    assert.equal(out.json.outcome.finish, 'expired');
+    assert.equal(out.json.outcome.content, undefined, `${label}: nothing releases`);
+    const spendAfter = await s.t.DB.prepare('SELECT used_tokens, used_jobs FROM fabric_grants WHERE id = ?').bind(s.grantId).first();
+    assert.deepEqual(spendAfter, spendBefore, `${label}: the reservation stays as charged`);
+  }
 });
 
 // ---- R4 ---------------------------------------------------------------

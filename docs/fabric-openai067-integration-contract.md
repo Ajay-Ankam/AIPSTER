@@ -159,6 +159,21 @@ directly affected test.
   (`g_*`) are not bridged here.
 - Release is rechecked from current authority on every surfacing; revoked or
   refused releases withhold with reasons, never leak.
+- Flag-off pause (F1): switching `FEDERATION_ENABLED` off refuses new share
+  starts and withholds in-flight releases, but queued share jobs stay
+  `queued` — they are never expired solely because the flag is off. After
+  the flag is restored a paused job leases only if its grant is still
+  authorized and its deadline still ahead; a revoke or expiry that lands
+  while paused settles it terminal `expired` (`authority_lost`) with the
+  reservation charged, so stale authority never revives.
+- Pre-existing shares (F5): every `fabric_grants` row committed before the
+  explicit-route fix carries `route = 'fixture'` and cannot admit or
+  execute. Such shares need a new grant with explicit `route: 'internal'`
+  consent; there is no migration that flips old rows to live execution.
+- Tracked, not in this lane (F2/F3): per-request ceiling misses stop at the
+  first shared tuple without trying the next share, and discovery may list
+  a share that issuance then refuses on demo parity or spend headroom.
+  Both fail closed; no extra share is admitted.
 - No new keys minted/rotated/stored; no key values logged/returned.
 - No new DDL: reuse migrations 0022/0024/0025/0029 (node_capabilities +
   dispatch store). The owner verifies they are applied (read-only check).
