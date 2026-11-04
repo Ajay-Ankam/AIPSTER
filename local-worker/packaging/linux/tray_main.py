@@ -160,10 +160,41 @@ def main(argv=None):
     console = sys.stdout is not None
 
     if command in ("-h", "--help", "help"):
-        print("usage: aipster-tray [run] [--headless] | start | stop | restart | quit | status")
+        print("usage: aipster-tray [run] [--headless] | start | stop | restart | quit | status"
+              " | declare-external | clear-external")
         print("  run     start the tray (reuses a running instance for this data dir)")
         print("  status  print worker state (live when the tray runs, last-known otherwise)")
+        print("  declare-external  mark this data dir's worker as managed outside this")
+        print("                    app (e.g. a system service) before first launch: the")
+        print("                    app then never starts a worker or heartbeat sender")
+        print("  clear-external    undo declare-external (the app may manage the worker)")
         print(f"Data dir: $AIPSTER_WORKER_DATA or {data}.")
+        return 0
+
+    if command in ("declare-external", "clear-external"):
+        # Only writes/removes <data>/external-worker.json: never starts or
+        # stops anything, never touches config.toml, pairing or services. A
+        # running tray honors the change on its next start attempt.
+        from aipster_tray import linux_lifecycle as lc
+        from aipster_tray.firstrun import private_directory
+        path = lc.external_path(data)
+        try:
+            if command == "declare-external":
+                private_directory(data)
+                created = lc.record_external(data, source="operator")
+                record = lc.load_external(data)
+                if not created and not (record or {}).get("valid"):
+                    print(f"{path} exists but is not a valid private record "
+                          "(it still blocks starts); remove it with clear-external "
+                          "and declare again", file=sys.stderr)
+                    return 2
+                print(("declared: " if created else "already declared: ") + str(path))
+            else:
+                removed = lc.clear_external(data)
+                print(("cleared: " if removed else "nothing to clear: ") + str(path))
+        except OSError as exc:
+            print(f"aipster-tray: {command} failed: {exc}", file=sys.stderr)
+            return 2
         return 0
 
     if command == "status":

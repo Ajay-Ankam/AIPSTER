@@ -264,6 +264,57 @@ class LifecycleTests(unittest.TestCase):
         import tray_main
         self.assertIs(tray_main.LinuxController, lc.LinuxController)
 
+    def cli(self, *args):
+        import io
+        import tray_main
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, {"AIPSTER_WORKER_DATA": str(self.data)}), \
+                patch.object(sys, "stdout", out), patch.object(sys, "stderr", err):
+            rc = tray_main.main(list(args))
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_preseed_declare_before_first_launch_closes_restart_race(self):
+        rc, text = self.cli("declare-external")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("declared: ", text)
+        info = os.lstat(self.record())
+        self.assertTrue(stat.S_ISREG(info.st_mode))
+        self.assertEqual(info.st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.record().read_text())["source"], "operator")
+        self.assertFalse(list(self.data.glob(".external-worker-*")))
+        # First launch lands inside a service restart: port free, no health.
+        c = make(self.data)
+        self.assertFalse(c.start_worker(manual=False))
+        self.assertFalse(c.start_sender())
+        self.assertEqual((c.child.starts, c.sender.starts, self.env.health_calls), (0, 0, 0))
+        rc, text = self.cli("declare-external")  # idempotent, never rewrites
+        self.assertEqual((rc, "already declared: " in text), (0, True))
+
+    def test_preseed_rollback_and_untrusted_entries(self):
+        self.cli("declare-external")
+        rc, text = self.cli("clear-external")
+        self.assertEqual(rc, 0)
+        self.assertIn("cleared: ", text)
+        self.assertFalse(os.path.lexists(self.record()))
+        self.assertTrue(make(self.data).start_worker())  # control returns to the app
+        self.assertEqual(self.cli("clear-external")[0], 0)  # nothing to clear
+        self.record().mkdir()
+        self.assertEqual(self.cli("declare-external")[0], 2)  # invalid: reported
+        self.assertEqual(self.cli("clear-external")[0], 2)    # never rmtree
+        self.assertTrue(self.record().is_dir())
+        self.record().rmdir()
+        target = self.data / "target.json"
+        target.write_text("keep")
+        os.symlink(target, self.record())
+        self.assertEqual(self.cli("clear-external")[0], 0)  # removes the link only
+        self.assertEqual(target.read_text(), "keep")
+
+    def test_help_lists_preseed_commands(self):
+        rc, text = self.cli("--help")
+        self.assertEqual(rc, 0)
+        self.assertIn("declare-external", text)
+        self.assertIn("clear-external", text)
+
     def test_status_text_is_honest(self):
         for text in (lc.EXTERNAL_DETAIL, lc.INVALID_DETAIL):
             st.check_honest(text)

@@ -85,18 +85,27 @@ def load_external(data):
             "origin": str(value.get("origin", ""))}
 
 
-def record_external(data, host, port):
-    """Atomically create a private (0600) record. Never replaces an existing one."""
+def record_external(data, host=None, port=None, source="observed"):
+    """Atomically create a private (0600) record. Never replaces an existing one.
+
+    ``source`` is "observed" (this app saw a healthy holder it did not start)
+    or "operator" (declared before first launch: ``aipster-tray
+    declare-external``), which closes the first-launch/restart race.
+    """
+    if source not in ("observed", "operator"):
+        raise ValueError("source must be 'observed' or 'operator'")
     directory = Path(data)
     path = external_path(directory)
     if os.path.lexists(path):
         return False
-    payload = {"version": 1, "source": "observed",
-               "origin": st.http_origin(host, port),
-               "observed_at": datetime.datetime.now(datetime.timezone.utc)
-               .strftime("%Y-%m-%dT%H:%M:%SZ"),
-               "note": "A worker this app did not start answered health checks on "
-                       "this port. Delete this file to let the app manage the worker."}
+    now = (datetime.datetime.now(datetime.timezone.utc)
+           .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    payload = {"version": 1, "source": source, "recorded_at": now,
+               "note": "This app will not start a worker or heartbeat sender while "
+                       "this file exists. Delete it (or run aipster-tray "
+                       "clear-external) to let the app manage the worker."}
+    if host is not None and port is not None:
+        payload["origin"] = st.http_origin(host, port)
     temporary = None
     try:
         fd, temporary = tempfile.mkstemp(prefix=".external-worker-", dir=str(directory))
@@ -117,6 +126,23 @@ def record_external(data, host, port):
                 os.unlink(temporary)
             except OSError:
                 pass
+
+
+def clear_external(data):
+    """Remove the record (rollback). Returns True if one was removed.
+
+    Removes only a regular file or a symlink entry itself (never its target);
+    refuses directories and anything else, which stay fail-closed.
+    """
+    path = external_path(data)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+        raise OSError(f"refusing to remove {path}: not a regular file")
+    os.unlink(path)
+    return True
 
 
 class LinuxController(Controller):
