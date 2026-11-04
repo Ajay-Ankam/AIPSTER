@@ -959,6 +959,18 @@ class InferenceWorkerTests(unittest.TestCase):
         self.assertNotIn("content", body["result"])
         self.assertNotIn("finish_reason", body["result"])
 
+    def test_non_string_finish_is_a_typed_failure_not_a_crash(self):
+        self.ganglion.completion_body = {
+            "object": "text_completion",
+            "choices": [{"index": 0, "text": "hello", "finish_reason": {"stop": True}}]}
+        self.api.leases = [lease()]
+        code, _, err = self.run_quiet(self.runner(), max_cycles=1)
+        self.assertEqual(code, pairing.EXIT_OK, err)
+        body = self.api.results[0]["body"]
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["result"]["reason"], "FINISH_UNSUPPORTED")
+        self.assertNotIn("finish_reason", body["result"])
+
     def test_missing_finish_posts_the_legacy_shape(self):
         self.ganglion.completion_body = {
             "object": "text_completion",

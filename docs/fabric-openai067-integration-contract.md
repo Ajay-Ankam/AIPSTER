@@ -31,8 +31,10 @@ packaging, icons, or controllers.
   `local-worker/test_inference_worker.py` finish delta (3 new + mirror) — all green.
 - Narrow owned deltas (R3): `local-worker/inference_worker.py` +
   `website/src/inference/dispatch-store.mjs` (finish-reason propagation
-  only; see runner section). `worker.js`, `pairing.py`,
-  `worker-transport.mjs` NOT touched.
+  only; see runner section). `worker.js`, `pairing.py` NOT touched.
+- R3 follow-up, sole owner: `website/src/inference/worker-transport.mjs`
+  finish_reason allowlist ONLY (the exact intake patch below); `worker.js`
+  route wiring unchanged.
 
 ## Call site 1: pairing.py — attach worker-origin model IDs (WEB066 applies)
 
@@ -126,24 +128,18 @@ acceptable at the store layer). Model gating needed no change:
 `inference_worker.py:861-869` already refuses unlisted models
 (`MODEL_UNAVAILABLE`) pre-completion.
 
-Follow-up NOT applied (different owner): the HTTP intake validator
-`website/src/inference/worker-transport.mjs::validSucceededResult` still
-rejects unknown keys, so an HTTP-posted `finish_reason` is refused at intake
-(fail-closed, safe) until its owner applies this exact patch:
-
-```js
-const allowed = new Set(['request_id', 'node_id', 'runtime_id', 'model_id', 'runtime_instance',
-  'model_fingerprint', 'simulated', 'content', 'elapsed_ms', 'usage', 'cache', 'truncated', 'finish_reason']);
-...
-if (result.finish_reason !== undefined
-  && (typeof result.finish_reason !== 'string'
-    || !['stop', 'length', 'content_filter'].includes(result.finish_reason))) return false;
-```
-
-Until then, finish evidence travels store-direct paths only; HTTP-posted
-results keep the legacy shape and surface as `finish_unavailable` (never an
-invented stop). The python mirror in `test_inference_worker.py` was updated
-as a directly affected test.
+Follow-up APPLIED (sole owner for this patch): the HTTP intake validator
+`website/src/inference/worker-transport.mjs::validSucceededResult` now
+permits optional stop/length/content_filter and refuses anything else,
+exactly matching the store normalizer and runner. HTTP-posted finish
+evidence therefore travels intake → store → OpenAI response with no gap;
+legacy results without the key stay acceptable everywhere and surface as
+`finish_unavailable` (never an invented stop). Proven by
+`website/tests/worker-result-finish067.test.mjs` against the real exported
+validator (worker.js itself cannot load in this lane — better-auth absent —
+so this is the real intake boundary; the route wiring is unchanged owner
+code). The python mirror in `test_inference_worker.py` was updated as a
+directly affected test.
 
 ## Authority and guardrails the insertion keeps
 

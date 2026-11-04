@@ -195,6 +195,20 @@ NOT applied (different owner; fail-closed until applied).
    direct-runtime substitution. The six HTTP probe completions remain labeled
    synthetic-worker completions, not real generation.
 
+## 13. R3 follow-up: intake allowlist + type guard (status: PENDING independent result)
+
+Sole owner of `website/src/inference/worker-transport.mjs` for the
+finish_reason allowlist ONLY, plus corresponding tests. The intake validator
+now matches store/runner exactly (optional stop/length/content_filter;
+legacy accepted; all else refused), proven by
+`website/tests/worker-result-finish067.test.mjs` (8/8) against the real
+exported validator — worker.js cannot load in this lane, so this is the real
+intake boundary and the route wiring stays unchanged owner code. Robustness
+correction in the same delta: `GanglionClient.complete` type-guards the
+untrusted finish value, so a dict/list becomes typed `FINISH_UNSUPPORTED`
+instead of a `TypeError` (regression added; targeted worker finish tests
+green). No other files touched; prior sections preserved verbatim.
+
 Files owned this turn: `website/src/inference/fabric-openai.mjs`,
 `website/src/inference/model-readiness.mjs`,
 `website/src/inference/fabric-openai-route.mjs`,

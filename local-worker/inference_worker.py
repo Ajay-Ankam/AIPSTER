@@ -495,7 +495,10 @@ class GanglionClient:
             raise GanglionError(GANGLION_INVALID_RESPONSE, "no completion text")
         if not text.strip():
             raise GanglionError(EMPTY_CONTENT)
-        if finish_reason is not None and finish_reason not in FINISH_REASONS:
+        # Type-guarded: untrusted JSON may carry a dict/list here, which must
+        # be a typed terminal failure, never an unhandled TypeError.
+        if finish_reason is not None and (
+                not isinstance(finish_reason, str) or finish_reason not in FINISH_REASONS):
             raise GanglionError(FINISH_UNSUPPORTED, f"finish {finish_reason!r}")
         usage = response.get("usage")
         return {"content": text, "usage": usage if isinstance(usage, dict) else {},
