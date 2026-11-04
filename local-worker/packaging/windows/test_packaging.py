@@ -1218,4 +1218,154 @@ class ExplicitMockDemoTests(unittest.TestCase):
                     sys.modules[name] = module
 
 
+class FakeUser32:
+    """Recording icon loader; never touches the shell or desktop."""
+
+    def __init__(self, file_result=None, fallback_result=4321, fail=False):
+        self.file_calls = []
+        self.fallback_calls = 0
+        self.destroyed = []
+        self.file_result = file_result
+        self.fallback_result = fallback_result
+        self.fail = fail
+
+    def LoadImageW(self, inst, name, typ, cx, cy, flags):
+        if self.fail:
+            raise OSError("synthetic shell failure")
+        self.file_calls.append(str(name))
+        return self.file_result
+
+    def LoadIconW(self, inst, name):
+        if self.fail:
+            raise OSError("synthetic shell failure")
+        self.fallback_calls += 1
+        return self.fallback_result
+
+    def DestroyIcon(self, handle):
+        self.destroyed.append(handle)
+        return True
+
+
+class IconLoadTests(unittest.TestCase):
+    """Headless icon-load coverage (G1) + missing/corrupt fallback (G2).
+
+    No desktop, no shell, no icons drawn: file loads go through a
+    recording fake, except one test proving the real fallback end to end.
+    """
+
+    def make_backend(self, icons_dir):
+        logs = []
+        return backend_win32.Win32Backend(logs.append, icons_dir), logs
+
+    def test_state_icon_map_is_complete(self):
+        st = backend_win32.st
+        self.assertEqual(set(st.STATE_ICON), set(st.STATES))
+        self.assertEqual(st.STATE_ICON[st.STOPPED], "tray-off.ico")
+        self.assertEqual(st.STATE_ICON[st.STARTING], "tray-off.ico")
+        self.assertEqual(st.STATE_ICON[st.RUNNING], "tray-ok.ico")
+        self.assertEqual(st.STATE_ICON[st.PORT_BUSY], "tray-warn.ico")
+        self.assertEqual(st.STATE_ICON[st.ERROR], "tray-warn.ico")
+
+    def test_missing_file_uses_fallback_exactly_once(self):
+        with tempfile.TemporaryDirectory(prefix="aipster-icons-") as temp:
+            backend, logs = self.make_backend(Path(temp) / "icons")
+            fake = FakeUser32(file_result=None, fallback_result=4321)
+            with patch.object(backend_win32, "_user32", return_value=fake):
+                backend._load_icon("tray-off.ico")  # nothing raises
+            self.assertEqual(len(fake.file_calls), 1)
+            self.assertEqual(fake.fallback_calls, 1)
+            self.assertEqual(backend.hicon, 4321)
+            self.assertTrue(backend.shared_icon)
+            self.assertEqual(backend.icon_file, "tray-off.ico")
+            self.assertTrue(any("fallback icon" in line for line in logs))
+            with patch.object(backend_win32, "_user32", return_value=fake):
+                backend._free_icon()
+            self.assertEqual(fake.destroyed, [])  # shared: never destroyed
+            self.assertIsNone(backend.hicon)
+
+    def test_missing_icons_dir_uses_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="aipster-icons-") as temp:
+            missing = Path(temp) / "no-such-icons-dir"
+            self.assertFalse(missing.exists())
+            backend, logs = self.make_backend(missing)
+            fake = FakeUser32(file_result=None, fallback_result=4321)
+            with patch.object(backend_win32, "_user32", return_value=fake):
+                backend._load_icon("tray-ok.ico")  # nothing raises
+            self.assertEqual(backend.hicon, 4321)
+            self.assertTrue(backend.shared_icon)
+            self.assertEqual(backend.icon_file, "tray-ok.ico")
+
+    def test_corrupt_file_uses_real_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="aipster-icons-") as temp:
+            icons = Path(temp) / "icons"
+            icons.mkdir()
+            (icons / "tray-warn.ico").write_bytes(b"not an icon, just garbage" * 4)
+            backend, logs = self.make_backend(icons)
+            backend._load_icon("tray-warn.ico")  # real Win32 calls, no desktop
+            try:
+                self.assertIsNotNone(backend.hicon)
+                self.assertTrue(backend.shared_icon)
+                self.assertEqual(backend.icon_file, "tray-warn.ico")
+                self.assertTrue(any("missing or corrupt" in line for line in logs))
+            finally:
+                backend._free_icon()  # must not destroy the shared stock icon
+            self.assertIsNone(backend.hicon)
+
+    def test_total_shell_failure_degrades_without_crash(self):
+        with tempfile.TemporaryDirectory(prefix="aipster-icons-") as temp:
+            backend, logs = self.make_backend(Path(temp))
+            fake = FakeUser32(fail=True)
+            with patch.object(backend_win32, "_user32", return_value=fake):
+                backend._load_icon("tray-off.ico")  # nothing raises
+            self.assertIsNone(backend.hicon)
+            self.assertEqual(backend.icon_file, "")
+            self.assertGreaterEqual(len(logs), 2)  # file failure + fallback failure
+
+    def test_private_icon_destroyed_on_replace(self):
+        with tempfile.TemporaryDirectory(prefix="aipster-icons-") as temp:
+            backend, logs = self.make_backend(Path(temp))
+            fake = FakeUser32(file_result=1111)
+            with patch.object(backend_win32, "_user32", return_value=fake):
+                backend._load_icon("a.ico")
+                fake.file_result = 2222
+                backend._load_icon("b.ico")
+            self.assertEqual(fake.destroyed, [1111])
+            self.assertEqual(backend.hicon, 2222)
+            self.assertFalse(backend.shared_icon)
+
+    def test_shared_icon_not_destroyed_on_replace(self):
+        with tempfile.TemporaryDirectory(prefix="aipster-icons-") as temp:
+            backend, logs = self.make_backend(Path(temp))
+            fake = FakeUser32(file_result=None, fallback_result=4321)
+            with patch.object(backend_win32, "_user32", return_value=fake):
+                backend._load_icon("tray-off.ico")
+                fake.file_result = 2222
+                backend._load_icon("tray-off.ico")
+            self.assertEqual(fake.destroyed, [])
+            self.assertEqual(backend.hicon, 2222)
+            self.assertFalse(backend.shared_icon)
+
+    def test_bundle_dir_frozen_vs_dev(self):
+        with tempfile.TemporaryDirectory(prefix="aipster-bundle-") as temp:
+            exe = Path(temp) / "aipster-tray.exe"
+            exe.write_bytes(b"fake")
+            with patch.object(sys, "frozen", True, create=True), \
+                    patch.object(sys, "executable", str(exe)):
+                # bundle_dir() resolves sys.executable, which canonicalizes an
+                # 8.3 short temp path (RUNNER~1 -> runneradmin) on CI runners.
+                # Compare resolved forms so the assertion tests the parent
+                # directory, not the name spelling of TMP.
+                self.assertEqual(first.bundle_dir(), Path(temp).resolve())
+            with patch.object(sys, "frozen", False, create=True):
+                dev = first.bundle_dir()
+            self.assertEqual(dev.name, "windows")
+            self.assertTrue((dev / "icons").is_dir())
+
+    def test_dev_icons_cover_state_assets(self):
+        with patch.object(sys, "frozen", False, create=True):
+            icons = first.bundle_dir() / "icons"
+        for state_name, asset in backend_win32.st.STATE_ICON.items():
+            self.assertTrue((icons / asset).is_file(), f"{state_name} -> {asset}")
+
+
 if __name__ == '__main__': unittest.main(verbosity=2)
