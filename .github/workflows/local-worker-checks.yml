@@ -52,5 +52,5 @@ jobs:
         working-directory: local-worker
       - run: ./.venv/Scripts/python.exe test_installation.py
         working-directory: local-worker
-      - run: ./.venv/Scripts/python.exe -m unittest test_model_identity test_pairing test_pairing_security test_pairing_windows_storage test_pairing_lifecycle test_pairing_e2e test_sender_lock test_source_update test_capability_report test_macos_lifecycle test_private_dir_settle test_runtime_setup_plan -v
+      - run: ./.venv/Scripts/python.exe -m unittest test_model_identity test_pairing test_pairing_security test_pairing_windows_storage test_pairing_lifecycle test_pairing_e2e test_sender_lock test_source_update test_capability_report test_macos_lifecycle test_private_dir_settle test_runtime_setup_plan test_fabric_openai_proxy test_model_readiness test_inference_worker test_attach_usable test_attach_usable_contract test_fabric_site068_report -v
         working-directory: local-worker
