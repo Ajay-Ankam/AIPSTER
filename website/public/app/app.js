@@ -589,29 +589,41 @@ function workerCommands(os) {
   ];
 }
 
-// Manual-install block for the Connect panel: workerCommands plus the real
-// config creation the daemon requires (no config.toml is shipped and
-// install.py does not generate one; load_config reads the path directly).
-// The generated packet carries the same steps with approval gates; the
-// panel states them inline so a fresh manual install does not stop at
-// serve with a missing-file error. workerCommands itself is unchanged.
-function manualInstallCommands(os) {
+// Manual-install blocks for the Connect panel, split at an explicit human
+// edit boundary. Block 1 installs and creates the config without
+// overwriting an existing one; the operator then edits config.toml and
+// records identity by hand; block 2 plans and serves, gated on the
+// planner's success. No config.toml is shipped and install.py does not
+// generate one; load_config reads the path directly. No angle-bracket
+// placeholders appear on executable lines (they are parse errors in both
+// PowerShell and POSIX shells). workerCommands itself is unchanged.
+function manualSetupCommands(os) {
   const meta = OS_META[os] || OS_META.windows;
   const lines = workerCommands(os);
-  const py = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
-  const copy = meta.posix ? 'cp configs/cpu.toml config.toml' : 'copy configs\\cpu.toml config.toml';
+  const copy = meta.posix
+    ? '[ -e config.toml ] || cp configs/cpu.toml config.toml'
+    : 'if (-not (Test-Path config.toml)) { Copy-Item configs\\cpu.toml config.toml }';
   const setup = [
-    '# Before serve: create your own config (none is shipped):',
+    '# Create your own config only if you do not have one (never overwrites):',
     copy,
-    '# Edit config.toml yourself: absolute [[models]] path to your operator-provided GGUF file',
-    '# (+ absolute executable path if the engine is not on PATH). Nothing downloads a model or engine.',
-    '# Record identity (require cached_on_disk true), then run the planner (exit 2 means setup-required actions remain):',
-    py + ' model_identity.py <your-model.gguf>',
-    py + ' runtime_setup.py --config config.toml'
+    '# STOP: edit config.toml yourself before continuing (absolute model path,',
+    '# absolute engine executable if not on PATH). Nothing is downloaded.'
   ];
   const serveIdx = lines.findIndex((l) => / serve --config /.test(l));
   if (serveIdx < 0) return lines;
-  return [...lines.slice(0, serveIdx), ...setup, lines[serveIdx]];
+  return [...lines.slice(0, serveIdx), ...setup];
+}
+function manualServeCommands(os) {
+  const meta = OS_META[os] || OS_META.windows;
+  const py = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
+  const exe = meta.posix ? meta.venvBin + '/dendrite' : meta.venvBin + '\\dendrite.exe';
+  const plan = py + ' runtime_setup.py --config config.toml';
+  const serve = exe + ' serve --config config.toml';
+  const gate = meta.posix ? `${plan} && ${serve}` : `${plan}; if ($LASTEXITCODE -eq 0) { ${serve} }`;
+  return [
+    '# Identity + plan (planner exit 2 lists setup-required actions; fix and re-run):',
+    gate
+  ];
 }
 
 function workerPairingCommands(os) {
@@ -1026,7 +1038,9 @@ function paintConnectCard() {
     : (stage === 'awaiting' || authorizing)
       ? '<p><span class="pill warn">Pairing</span></p>'
       : '<p><span class="pill warn">Setup needed</span></p>';
-  const commands = unpickedTarget ? '' : manualInstallCommands(connect.os).map(esc).join('\n');
+  const setupBlock = unpickedTarget ? '' : manualSetupCommands(connect.os).map(esc).join('\n');
+  const serveBlock = unpickedTarget ? '' : manualServeCommands(connect.os).map(esc).join('\n');
+  const setupPy = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
   const pairingCommands = workerPairingCommands(connect.os);
   const packagedPairPara = usable
     ? `<p>Packaged install? Open the AIPSTER Worker tray menu and choose Pair this computer (or run <code>aipster-worker pair</code> in a terminal), then type the code above when asked. The tray starts the sender for you while serving; update by reinstalling from a newer reviewed pin AIPSTER publishes (uninstall preserves pairing).</p>`
@@ -1034,7 +1048,9 @@ function paintConnectCard() {
   const advanced = unpickedTarget ? '' : `<details><summary>Advanced: manual install, source and troubleshooting</summary>
 <h3>Manual install (${esc(meta.label)})</h3>
 <p>Prerequisites: Git, <code>uv 0.12.12</code> and Python 3.12.14 (<code>uv python install 3.12.14</code>). Use these pairing-capable commands in ${esc(meta.shell)}. The linked <a href="${esc(L.tested)}">standalone tested installation</a> is background reference at the same pinned revision. The sparse checkout contains the worker and its root <code>LICENSE</code> only:</p>
-<pre tabindex="0" aria-label="${esc(meta.label)} install commands"><code>${commands}</code></pre>
+<pre tabindex="0" aria-label="${esc(meta.label)} install commands, part 1 of 2"><code>${setupBlock}</code></pre>
+<p class="muted"><strong>STOP — edit <code>config.toml</code> before continuing.</strong> Edit it yourself with the absolute model path (and absolute engine executable if not on PATH); nothing is downloaded. Record identity with <code>${esc(setupPy)} model_identity.py</code> using that absolute GGUF path (require <code>cached_on_disk</code> true). Then run the second block below.</p>
+<pre tabindex="0" aria-label="${esc(meta.label)} install commands, part 2 of 2"><code>${serveBlock}</code></pre>
 <p class="muted"><code>serve</code> refuses to start without <code>DENDRITE_API_TOKEN</code> (32+ characters), even on loopback. This is a <strong>worker-local</strong> token that you generate on this machine. It is not an AIPSTER API key or heartbeat key. Never reuse it, and never paste it into AIPSTER, a URL or a shared config. Local requests other than <code>/healthz</code> need <code>Authorization: Bearer</code> with that token (see the <a href="${esc(L.quickstart)}">quickstart</a>).</p>
 <p class="muted">The default setup is a real worker: reuse a resident loopback engine where one exists (attach mode or the <code>serve-jobs</code> upstream) before building one. Otherwise a native engine (llama-server, built separately or on PATH) and a GGUF model you obtain yourself are separate prerequisites. The mock config returns simulated output only and is explicit opt-in. See <a href="${esc(L.engine)}">engine preparation</a>.</p>
 <h3>Platforms and source</h3>

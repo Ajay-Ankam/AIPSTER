@@ -263,12 +263,18 @@ test('OS is suggested but correctable; wrong OS changes instructions honestly', 
   const linuxHtml = mac.el('connect-card').innerHTML;
   assert.ok(textOf(linuxHtml).includes('Installer for Linux: not available'));
   assert.ok(textOf(linuxHtml).includes('macOS / Linux: not qualified'));
-  const linuxPre = nodesOf(linuxHtml.slice(linuxHtml.indexOf('<pre'), linuxHtml.indexOf('</pre>'))).filter((n) => n.nodeName === '#text').map((n) => n.value).join('');
+  const linuxPres = [...linuxHtml.matchAll(/<pre[\s\S]*?<\/pre>/g)].map((m) =>
+    nodesOf(m[0]).filter((n) => n.nodeName === '#text').map((n) => n.value).join(''));
+  assert.equal(linuxPres.length, 2, 'Linux manual install is split at the human edit boundary');
+  const linuxPre = linuxPres.join('\n');
   assert.ok(linuxPre.includes('.venv/bin/python test_installation.py'), 'Advanced follows the picked OS');
   assert.ok(linuxPre.includes('git sparse-checkout set --no-cone /local-worker/ /LICENSE'));
-  assert.ok(linuxPre.includes('cp configs/cpu.toml config.toml'), 'manual install creates the config before serve');
-  assert.ok(linuxPre.indexOf('cp configs/cpu.toml config.toml') < linuxPre.indexOf('.venv/bin/dendrite serve --config config.toml'), 'config creation precedes serve');
-  assert.ok(linuxPre.includes('.venv/bin/python runtime_setup.py --config config.toml'), 'manual install plans before serve');
+  assert.ok(linuxPre.includes('[ -e config.toml ] || cp configs/cpu.toml config.toml'), 'manual install never overwrites an existing config');
+  assert.ok(linuxPre.indexOf('cp configs/cpu.toml config.toml') < linuxPre.indexOf('.venv/bin/python runtime_setup.py'), 'config creation precedes planning');
+  assert.ok(linuxPre.includes('.venv/bin/python runtime_setup.py --config config.toml && .venv/bin/dendrite serve --config config.toml'), 'serve is gated on planner success');
+  for (const l of linuxPre.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    if (!l.startsWith('#')) assert.ok(!/[<>]/.test(l), 'no executable placeholder: ' + l);
+  }
   await mac.press('gen-setup');
   assert.equal(mac.captured.length, 2, 'Linux prompt copies too');
   assert.ok(mac.captured[1].includes('.venv/bin/python test_installation.py'));
@@ -626,8 +632,10 @@ test('Advanced keeps the pinned manual commands, warnings and platform labels', 
     assert.ok(text.includes(phrase), `missing: ${phrase}`);
   }
   assert.ok(!text.includes('tray menu') && !text.includes('aipster-worker pair'), 'no packaged pairing copy while no installer is usable');
-  const commands = nodesOf(html.slice(html.indexOf('<pre'), html.indexOf('</pre>'))).filter((n) => n.nodeName === '#text').map((n) => n.value).join('');
-  const lines = commands.split('\n').map((s) => s.trim()).filter(Boolean);
+  const pres = [...html.matchAll(/<pre[\s\S]*?<\/pre>/g)].map((m) =>
+    nodesOf(m[0]).filter((n) => n.nodeName === '#text').map((n) => n.value).join(''));
+  assert.equal(pres.length, 2, 'manual install is split at the human edit boundary');
+  const lines = pres.join('\n').split('\n').map((s) => s.trim()).filter(Boolean);
   assert.deepEqual(lines, [
     'git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git',
     'cd AIPSTER',
@@ -638,16 +646,17 @@ test('Advanced keeps the pinned manual commands, warnings and platform labels', 
     'uv run --no-project --python 3.12.14 python install.py',
     '.\\.venv\\Scripts\\python.exe test_installation.py',
     '$env:DENDRITE_API_TOKEN = .\\.venv\\Scripts\\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"',
-    '# Before serve: create your own config (none is shipped):',
-    'copy configs\\cpu.toml config.toml',
-    '# Edit config.toml yourself: absolute [[models]] path to your operator-provided GGUF file',
-    '# (+ absolute executable path if the engine is not on PATH). Nothing downloads a model or engine.',
-    '# Record identity (require cached_on_disk true), then run the planner (exit 2 means setup-required actions remain):',
-    '.\\.venv\\Scripts\\python.exe model_identity.py <your-model.gguf>',
-    '.\\.venv\\Scripts\\python.exe runtime_setup.py --config config.toml',
-    '.\\.venv\\Scripts\\dendrite.exe serve --config config.toml'
+    '# Create your own config only if you do not have one (never overwrites):',
+    'if (-not (Test-Path config.toml)) { Copy-Item configs\\cpu.toml config.toml }',
+    '# STOP: edit config.toml yourself before continuing (absolute model path,',
+    '# absolute engine executable if not on PATH). Nothing is downloaded.',
+    '# Identity + plan (planner exit 2 lists setup-required actions; fix and re-run):',
+    '.\\.venv\\Scripts\\python.exe runtime_setup.py --config config.toml; if ($LASTEXITCODE -eq 0) { .\\.venv\\Scripts\\dendrite.exe serve --config config.toml }'
   ]);
-  assert.ok(!/aip_|AIPSTER_(?:API_)?KEY|X-Aipster|\/api\//.test(commands), 'no AIPSTER credential or endpoint in worker commands');
+  for (const l of lines) {
+    if (!l.startsWith('#')) assert.ok(!/[<>]/.test(l), 'no executable placeholder: ' + l);
+  }
+  assert.ok(!/aip_|AIPSTER_(?:API_)?KEY|X-Aipster|\/api\//.test(lines.join('\n')), 'no AIPSTER credential or endpoint in worker commands');
 });
 
 test('standalone README is background; authoritative pairing commands preserve the worker-only checkout and license', async () => {
