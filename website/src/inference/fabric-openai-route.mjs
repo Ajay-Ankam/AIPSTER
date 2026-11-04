@@ -175,9 +175,13 @@ export function createFabricOpenAIRoute({
   function admissionFromRecordedBinding(store, principal, recorded) {
     const binding = isObj(recorded) ? recorded.binding : null;
     if (!store || typeof store.validateBinding !== 'function' || !isObj(binding)) return null;
+    // The store contract returns strict boolean: false (not a throw) on any
+    // rejection, so the return must be required true — not merely no-throw.
+    let valid = false;
     try {
-      store.validateBinding(binding, principal.principal_id, principal.tenant_id);
+      valid = store.validateBinding(binding, principal.principal_id, principal.tenant_id);
     } catch { return null; }
+    if (valid !== true) return null;
     return {
       admission_ref: binding.admission_ref, grant_id: binding.grant_id,
       grant_revision: binding.grant_revision, resource_id: binding.resource_id,

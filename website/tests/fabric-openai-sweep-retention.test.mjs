@@ -87,7 +87,7 @@ test('settled op survives the admission sweep: GET 200 + same POST replay 200, n
   const replay = await route.handleChat({ body: BODY, idempotencyKey: 'f2-op-sweep01a' });
   assert.equal(replay.http, 200);
   assert.equal(replay.body.choices[0].message.content, 'synthetic ok');
-  assert.deepEqual(h.counts(), before, 'GET + replay create no admission, job, or spend');
+  assert.deepEqual(h.counts(), before, 'GET + replay create no admission or job');
 });
 
 test('revoked authority stays denied after the sweep', async () => {
@@ -155,6 +155,36 @@ test('pending op survives the sweep: uncertain with correlation, replay dispatch
   assert.equal(replay.http, 503);
   assert.equal(replay.body.error.code, 'outcome_uncertain');
   assert.equal(h.counts().jobs, jobsAfterSweep, 'replay dispatches no new job');
+});
+
+test('validator refusal blocks swept-admission fallback on status and replay', async () => {
+  const h = setup();
+  const route = h.makeRoute({ kind: 'session', user: { id: 'u_alice' } });
+  assert.equal((await route.handleChat({ body: BODY, idempotencyKey: 'f2-op-tamper01a' })).http, 200);
+  h.setT(T0 + 11 * 60 * 1000);
+  h.refreshLiveness();
+  assert.equal((await route.handleChat({ body: BODY, idempotencyKey: 'f2-op-tamper02b' })).http, 200);
+  const opKey = JSON.stringify(['u_alice', 'f2-op-tamper01a']);
+  const readBinding = () => JSON.parse(h.sqlite.prepare('SELECT binding_json AS b FROM dispatch_operations WHERE op_key = ?').get(opKey).b);
+  const writeBinding = (b) => h.sqlite.prepare('UPDATE dispatch_operations SET binding_json = ? WHERE op_key = ?').run(JSON.stringify(b), opKey);
+  // Variant A: wrong principal/tenant — the store validator returns false.
+  writeBinding({ ...readBinding(), principal_id: 'u_bob', tenant_id: 'u_bob' });
+  const before = h.counts();
+  const status = await route.handleStatus({ idempotencyKey: 'f2-op-tamper01a' });
+  assert.equal(status.http, 503, 'tampered binding yields no completion');
+  assert.ok(!JSON.stringify(status.body || {}).includes('synthetic ok'));
+  const replay = await route.handleChat({ body: BODY, idempotencyKey: 'f2-op-tamper01a' });
+  assert.equal(replay.http, 403);
+  assert.equal(replay.body.error.code, 'admission_not_available');
+  assert.deepEqual(h.counts(), before, 'refused replay creates no admission or job');
+  // Variant B: malformed binding (identity field missing).
+  const malformed = readBinding();
+  delete malformed.model_id;
+  writeBinding(malformed);
+  assert.equal((await route.handleStatus({ idempotencyKey: 'f2-op-tamper01a' })).http, 503);
+  const replay2 = await route.handleChat({ body: BODY, idempotencyKey: 'f2-op-tamper01a' });
+  assert.equal(replay2.http, 403);
+  assert.equal(replay2.body.error.code, 'admission_not_available');
 });
 
 test('teardown restores fetch', () => {
