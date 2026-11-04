@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 from urllib.parse import urlsplit, urlunsplit
 
@@ -74,7 +75,12 @@ def validate_fabric_url(raw, control_url=""):
             chost, cport, cloopback, _ = _authority(control)
             effective = port or (443 if parts.scheme == "https" else 80)
             ceffective = cport or (443 if control.scheme == "https" else 80)
-            same_host = host == chost or (loopback and cloopback)
+            try:
+                # A wildcard bind (0.0.0.0 / ::) also serves on loopback.
+                cwildcard = ipaddress.ip_address(chost).is_unspecified
+            except ValueError:
+                cwildcard = False
+            same_host = host == chost or (loopback and (cloopback or cwildcard))
             if same_host and effective == ceffective:
                 raise SettingsError("This is the worker control address. Supply the fabric address instead.")
         except SettingsError:
@@ -93,12 +99,27 @@ def load_settings(data_dir):
     """Return validated settings; absent file is the unconfigured state."""
     path = Path(data_dir) / SETTINGS_FILE
     try:
-        with path.open("rb") as stream:
-            content = stream.read(MAX_SETTINGS_BYTES + 1)
+        # Same posture as the other private stores: no links, own regular file.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         return _result()
     except OSError as exc:
         raise SettingsError("Unable to read app settings.") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or (
+                hasattr(os, "getuid") and info.st_uid != os.getuid()):
+            raise SettingsError("App settings are invalid. Open Settings to replace them.")
+        with os.fdopen(fd, "rb") as stream:
+            fd = None
+            content = stream.read(MAX_SETTINGS_BYTES + 1)
+    except SettingsError:
+        raise
+    except OSError as exc:
+        raise SettingsError("Unable to read app settings.") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
     if len(content) > MAX_SETTINGS_BYTES:
         raise SettingsError("App settings file is too large.")
     try:

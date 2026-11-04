@@ -39,4 +39,24 @@ class AppSettingsTests(unittest.TestCase):
             for raw in ('{bad',json.dumps({"fabric_base_url":"https://example/v1","fabric_confirmed":False}), '[]'):
                 path.write_text(raw)
                 with self.assertRaises(SettingsError): load_settings(d)
+    def test_wildcard_control_bind_rejected_on_loopback(self):
+        for fabric, control in (("http://127.0.0.1:8090/v1", "http://0.0.0.0:8090"),
+                                ("http://localhost:8090", "http://0.0.0.0:8090"),
+                                ("http://[::1]:8090/v1", "http://[::]:8090")):
+            with self.subTest(fabric=fabric), self.assertRaises(SettingsError):
+                validate_fabric_url(fabric, control)
+        self.assertEqual(validate_fabric_url("http://127.0.0.1:8089", "http://0.0.0.0:8090"),
+                         "http://127.0.0.1:8089/v1")
+    def test_symlinked_settings_refused_and_replaced_not_followed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            target=root/"elsewhere.json"
+            raw=json.dumps({"fabric_base_url":"https://other.example/v1","fabric_confirmed":True})
+            target.write_text(raw)
+            os.symlink(target, root/"app-settings.json")
+            with self.assertRaises(SettingsError): load_settings(d)
+            save_settings(d,"https://fabric.example",True)
+            self.assertFalse((root/"app-settings.json").is_symlink())
+            self.assertEqual(target.read_text(), raw)
+            self.assertEqual(load_settings(d)["fabric_base_url"],"https://fabric.example/v1")
 if __name__ == "__main__": unittest.main()
