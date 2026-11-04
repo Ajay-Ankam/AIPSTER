@@ -4,8 +4,9 @@
 
 - Base: `0de5103b078a223546ab422ef16a73436ea39cdb` (upstream `main`)
 - Branch: `muse/ubuntu-desktop-20261104` (sole writer; isolated checkout)
-- Candidate code commit: `9e3be3037fc5eca0dbc2639ccd803ee066e98f10`
-  (this handoff ships in a follow-up commit on the same branch)
+- Candidate code commit: `55919ede842113abea8fd5272c3aeb51ab1dbad4`
+  (probe-vs-acquire race fix; this handoff ships in a follow-up commit
+  on the same branch; supersedes `9e3be30`)
 
 ## Scope delivered
 
@@ -29,7 +30,7 @@ a probe-created `tray.lock` in the shared dir was removed again.
 - `local-worker/packaging/linux/` — `launcher.py` (`aipster-worker`:
   run/inspect/tray/pair/sender/delivery-check/runtime-plan/autostart),
   `tray_main.py` + `tray_entry.py` (`aipster-tray`), `dendrite_linux.spec`,
-  `build.py`, `qualify.py`, `test_linux_packaging.py` (42 tests),
+  `build.py`, `qualify.py`, `test_linux_packaging.py` (44 tests),
   `default.toml`, `desktop/aipster-worker.desktop`, `icons/hicolor/…`
   (stdlib-rendered PNGs), `deb/{control,postinst,prerm,postrm,copyright,
   README.Debian}`, `installer-build.{in,lock}` (hash-pinned PyInstaller).
@@ -67,8 +68,8 @@ Two Linux-only facts the reviewer must know:
 ## Reproducible artifact
 
 - `local-worker/packaging/linux/dist/aipster-worker_0.1.0-1_amd64.deb`
-  (22,016,634 bytes)
-- `sha256 0927f6053e0b8614a99d9dc27ed12f602f34b1612f9d0415d1f31b74aefb1781`
+  (22,018,310 bytes)
+- `sha256 d8a4e5cc46e1bf966b1d0f09ae39ae80b1949c68a6bbae49ed0271f6b2de2830`
 - `manifest.json` + `SHA256SUMS` alongside; locks:
   `requirements.lock`, `build-requirements.lock`,
   `packaging/linux/installer-build.lock`; CPython 3.12.14 via uv,
@@ -79,14 +80,14 @@ Two Linux-only facts the reviewer must know:
 
 ## Evidence
 
-- Unit suite `packaging/linux/test_linux_packaging.py`: **42 tests OK**
+- Unit suite `packaging/linux/test_linux_packaging.py`: **44 tests OK**
   (system python run; 3 skipped: 2 Tk tests need a display, 1 needs the
   worker dependency closure). Of the 42, the bring-up cycle test was
   later run focused with the build venv: OK.
 - Tk backend tests under isolated Xvfb (`xvfb-run`, not the user
   desktop): **7/7 OK**, all 5 states rendered, buttons drive
   start/quit, honesty gate over every label.
-- Build step 4 (build venv, hash-locked installs): **42 tests OK
+- Build step 4 (build venv, hash-locked installs): **44 tests OK
   (skipped=2, the display tests)**.
 - Build step 7 (frozen, scrubbed env): `--help`, mock `inspect`
   (simulated), tray `--help`/`status`, sender `--once` NOT_PAIRED,
@@ -137,16 +138,28 @@ data dir and replace `port = 8090` before `run`. Never point
 `AIPSTER_WORKER_DATA` at `~/.local/share/aipster-worker` and never start
 a second sender there (the production heartbeat unit owns that lock).
 
-## Incident log (closed)
+## Incident log (root cause found and fixed)
 
 - `test_full_run_cycle_headless` failed once in a full-suite run
   ("tray did not come up"; the tray thread reported the lock held on
-  a fresh temp dir). Observed once; the same test passes in focused
-  reruns (standalone, in-class, and in-combination). The cause is not
-  established — a separate 2000-iteration fresh-file flock probe passed
-  2000/2000, which is noted as a data point, not proof of cause. The
-  test now reports lock/socket/thread facts if bring-up ever times out
-  again, so any recurrence is actionable.
+  a fresh temp dir). Root cause, demonstrated deterministically: the
+  main thread's `running()` liveness probe takes `LOCK_EX` for
+  microseconds, and `SingleInstance.acquire()` treated any contention
+  as a live owner — an acquire landing exactly in a probe window waited
+  10s for a server that never comes. A barrier test pinning a 100ms
+  exclusive hold failed on the old code (acquire → False, no server)
+  and the mechanism matches the observed signature exactly.
+- Fix (`aipster_tray/ipc_linux.py`): `acquire()` retries contention for
+  a bounded 0.5s window (20ms sleeps); transient probe holds clear in
+  far less, a genuine owner holds for the tray's lifetime. Mutual
+  exclusion is unchanged — success still requires actually holding the
+  lock, and a held lock still reports False. New maintained tests:
+  `test_acquire_tolerates_transient_exclusive_hold` (red before, green
+  after) and `test_acquire_still_reports_live_owner` (bounded False).
+  Verified: IPC class 8/8, incident test focused green, 15/15 repeated
+  bring-up cycles green, rebuild suite 44 tests OK, frozen Xvfb window
+  smoke OK. The bring-up timeout now also reports lock/socket/thread
+  facts if it ever recurs.
 - Shared-dir `tray.lock` planted by an early creating probe: removed
   (0 bytes, unheld); probes are now non-creating (`r+b`).
 
