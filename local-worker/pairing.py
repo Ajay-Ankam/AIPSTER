@@ -356,15 +356,93 @@ def probe_hardware(config_path=None):
     return snapshot
 
 
-def decide_usable(config_path=None):
+ATTACH_PROBE_TIMEOUT_SEC = 3.0
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _worker_token(config, data_dir):
+    """The local worker's API token: its env var first, then the data dir file.
+
+    Same precedence as the Windows launcher. Read only; never generated here.
+    """
+    name = getattr(getattr(config, "node", None), "token_env", None)
+    if name and os.environ.get(name):
+        return os.environ[name]
+    if not data_dir:
+        return None
+    try:
+        value = (Path(data_dir) / "api-token.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def attached_ready_models(config, data_dir, timeout=ATTACH_PROBE_TIMEOUT_SEC):
+    """Configured attach-mode models the RUNNING local worker reports ready.
+
+    Readiness comes from the worker's own authenticated loopback
+    `GET /v1/node`, so the bit also proves the worker that would execute is
+    up and has already applied its attach quarantine/identity checks. A model
+    counts only when the node reports it available, resident and not
+    simulated, and its runtime as attach, ready, without last_error and not
+    simulated. Any error, non-loopback listener, missing token, redirect or
+    unexpected shape yields an empty set. The token is never logged.
+    """
+    node = getattr(config, "node", None)
+    host = str(getattr(node, "host", "") or "")
+    port = getattr(node, "port", None)
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    if host not in _LOOPBACK_HOSTS or not isinstance(port, int):
+        return set()
+    token = _worker_token(config, data_dir)
+    if not token:
+        return set()
+    connection = None
+    try:
+        connection = http.client.HTTPConnection(host, port, timeout=timeout)
+        connection.request("GET", "/v1/node", headers={
+            "Authorization": "Bearer " + token, "Accept": "application/json"})
+        response = connection.getresponse()
+        if response.status != 200:
+            return set()
+        report = json.loads(response.read(1_048_576).decode("utf-8"))
+    except Exception:
+        return set()
+    finally:
+        if connection is not None:
+            connection.close()
+    if not isinstance(report, dict):
+        return set()
+    configured = {r.id: r for r in getattr(config, "runtimes", []) or []
+                  if getattr(r, "mode", "") == "attach" and getattr(r, "kind", "") != "mock"}
+    live_runtimes = {}
+    for runtime in report.get("runtimes") or []:
+        if (isinstance(runtime, dict) and runtime.get("id") in configured
+                and runtime.get("mode") == "attach" and runtime.get("state") == "ready"
+                and runtime.get("simulated") is False and not runtime.get("last_error")):
+            live_runtimes[runtime["id"]] = runtime
+    ready = set()
+    for model in report.get("models") or []:
+        if (isinstance(model, dict) and model.get("runtime") in live_runtimes
+                and model.get("available") is True and model.get("resident") is True
+                and model.get("simulated") is False and model.get("id")):
+            ready.add((model["runtime"], model["id"]))
+    return ready
+
+
+def decide_usable(config_path=None, data_dir=None):
     """Heartbeat usable-bit policy. False unless real capacity is verified.
 
     Mock/simulated engines always report usable=false: the worker is
     reachable but explicitly not acceptable for inference. A real engine
-    reports true only when a configured non-mock runtime has a usable model
-    (attached and ready, or GGUF magic on disk plus its executable on PATH).
-    Anything uncertain — missing config, missing worker install, load
-    failure — is false. Reachability is reported by the beat itself.
+    reports true only when a configured non-mock runtime has a usable model:
+    managed, GGUF magic on disk plus its executable on PATH; attach, the
+    running local worker's authenticated `/v1/node` reports that exact
+    configured model resident and its runtime ready (needs `data_dir` or the
+    token env var). Anything uncertain — missing config, missing worker
+    install, load failure, worker down — is false. Reachability is reported
+    by the beat itself.
     """
     if not config_path:
         return False
@@ -380,12 +458,17 @@ def decide_usable(config_path=None):
     runtimes = {r.id: r for r in getattr(config, "runtimes", []) or []}
     if not runtimes or all(getattr(r, "kind", "") == "mock" for r in runtimes.values()):
         return False
+    attached = None  # probed lazily, at most once per decision
     for model in getattr(config, "models", []) or []:
         runtime = runtimes.get(getattr(model, "runtime", None))
         if runtime is None or getattr(runtime, "kind", "") == "mock":
             continue
         if getattr(runtime, "mode", "") == "attach":
-            continue  # attach readiness needs a live daemon probe; stay false
+            if attached is None:
+                attached = attached_ready_models(config, data_dir)
+            if (runtime.id, getattr(model, "id", None)) in attached:
+                return True
+            continue
         path = getattr(model, "path", None)
         executable = getattr(runtime, "executable", None)
         try:
@@ -1103,7 +1186,7 @@ def cmd_heartbeat(args, loop):
             first_beat = False
             # Recomputed per beat (Codex P2): installed/removed models and
             # engines change readiness, and a stale true would misreport ready.
-            usable = decide_usable(args.config)
+            usable = decide_usable(args.config, data_dir)
             try:
                 result = send_heartbeat(meta["api_base"], meta["resource_id"],
                                         meta["heartbeat_key"], usable)
