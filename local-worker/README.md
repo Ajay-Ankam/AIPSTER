@@ -404,6 +404,35 @@ managed model. `serve` starts the daemon; an explicit load/execute request would
 start real inference, outside this PR's verification. Do not infer CPU confinement
 from `gpu_layers=0`: the public worker lacks the newer device/KV/environment controls.
 
+## Linux notes (unqualified adaptation)
+
+x64 only, in bash (or another POSIX shell) inside a fresh directory. These
+commands mirror the generated setup prompt's Linux variants; Windows x64
+remains the only tested installation, and this section is an unqualified
+adaptation. The uv 0.12.12 and Python 3.12.14 pins are deliberate, not
+latest: on any pin mismatch, stop and report instead of adapting silently.
+
+```bash
+git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
+cd AIPSTER
+git sparse-checkout set --no-cone /local-worker/ /LICENSE
+git fetch origin 3fa309cb08461ea046ee23e801404911c1f3bcc2
+git checkout --detach 3fa309cb08461ea046ee23e801404911c1f3bcc2
+cd local-worker
+uv run --no-project --python 3.12.14 python install.py
+.venv/bin/python test_installation.py
+export DENDRITE_API_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+.venv/bin/dendrite serve --config configs/mock.toml
+```
+
+Mock expectations: health ok, node identity present, execution output marked
+`simulated: true` with `usable: false`. A running worker, a completed
+pairing, a green heartbeat, and a reachable dashboard status prove
+reachability only — never GPU readiness and never fabric dispatch; dispatch
+stays disabled. Pairing and uninstall follow the generated prompt's steps
+(private no-echo code entry, one sender, heartbeat loop for reachability,
+`unpair` plus key revocation to disconnect, remove only `.venv`/`.state`).
+
 ## Stop, uninstall and troubleshoot
 
 Stop the foreground server with Ctrl+C and verify the port is closed. Managed
@@ -426,6 +455,9 @@ startup task, global Python package or cloud configuration.
 | Model unavailable | Check real GGUF path/magic and engine PATH; daemon health alone is insufficient. |
 | Runtime binary not found | Set the actual compiled executable path; no automatic native download occurs. |
 | TLS/index failure | Check access to public PyPI; installer deliberately ignores private indexes/proxies. |
+| `uv: command not found` in a new terminal | Open a fresh login shell so the installer's PATH change applies, then `uv --version` must report 0.12.12. |
+| `permission denied` creating `.venv` | Use a directory you own; do not run the install with sudo. |
+| ARM64 (`aarch64`) | Stop: these steps cover x64 only; no qualified instructions exist. |
 
 ## Provenance and updates
 

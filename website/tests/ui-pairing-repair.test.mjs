@@ -140,6 +140,18 @@ test('UI repair: pairing checkout uses the published reviewed source pin and qua
   assert.match(t.context.agentSetupPacket('windows', { id: 'p_direct01', code: 'SYNTHETIC-DIRECT-CODE', expiresAt: '2100-01-01T00:00:00Z', account: 'Direct Owner' }), /Use the pinned commands below for pairing/);
 });
 
+test('UI repair: Linux packet states unqualified adaptation, deliberate pins, and mock-only meaning', async () => {
+  const t = await ui();
+  const packet = t.context.agentSetupPacket('linux', { id: 'p_linux01', code: 'SYNTHETIC-LINUX-CODE', expiresAt: '2100-01-01T00:00:00Z', account: 'Linux Owner' });
+  for (const phrase of ['unqualified adaptation', 'deliberate, not latest', 'simulated=true, usable=false',
+    'NOT GPU readiness', 'NOT fabric dispatch', 'no real-execution claim',
+    '.venv/bin/python', '.venv/bin/dendrite', 'preflight (Step 1)']) {
+    assert.ok(packet.includes(phrase), 'Linux packet states: ' + phrase);
+  }
+  assert.ok(!packet.includes('.exe') && !packet.includes('%LOCALAPPDATA%') && !packet.includes('$env:'), 'Linux packet carries no Windows paths');
+  assert.ok(packet.includes('3fa309cb08461ea046ee23e801404911c1f3bcc2'), 'Linux packet keeps the pinned worker');
+});
+
 test('UI repair: dismiss and navigation erase shown codes and invalidate pending mint work', async () => {
   const t = await ui({deferred:true});
   await t.press('pair'); await t.press('pair-done');

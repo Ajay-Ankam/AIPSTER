@@ -567,6 +567,25 @@ function agentSetupPacket(os, setup) {
   const tested = os === 'windows'
     ? 'Windows x64 is the only tested platform (mock check only).'
     : 'Only Windows x64 is tested; macOS and Linux steps are untested adaptation, so verify each step before continuing.';
+  // Linux-only early statements: unqualified adaptation, deliberate pins,
+  // mock-only meaning, and the fixed sequence. All commands below are the
+  // Linux variants; shell profile or PATH differences are reported, never
+  // worked around silently.
+  const linuxReadFirst = os === 'linux'
+    ? ['- Linux x64 notes (unqualified adaptation of the tested Windows x64 mock check):',
+      '- Source revision 3fa309c and the uv 0.12.12 / Python 3.12.14 pins below are',
+      '  deliberate, not latest. A newer installed uv or CLI is not a silent',
+      '  workaround: on any pin mismatch, stop and report instead of adapting.',
+      '- Mock setup, pairing, heartbeat, and a green dashboard status prove',
+      '  reachability only. Expected mock fields: simulated=true, usable=false. A',
+      '  green connection is NOT GPU readiness and NOT fabric dispatch; it makes',
+      '  no real-execution claim.',
+      '- Follow the sequence in order: preflight (Step 1) -> isolated install',
+      '  (Steps 2-3) -> self-test (Step 3) -> pair (Step 6) -> heartbeat/status',
+      '  (Step 6) -> readiness interpretation (reachable means reachable only).',
+      '- Background reading after install: local-worker/README.md "Linux notes" and',
+      '  CHANGELOG.md in a current checkout (not in the pinned snapshot below).']
+    : [];
   const dataDir = meta.posix ? '~/.local/share/aipster-worker/pairing.json' : '%LOCALAPPDATA%\\AIPSTER-Worker\\pairing.json';
   const account = String(setup.account ?? '').replace(/[\r\n\t]+/g, ' ').slice(0, 120);
   const expiresAt = String(setup.expiresAt ?? '').replace(/[\r\n\t]+/g, ' ');
@@ -582,6 +601,7 @@ function agentSetupPacket(os, setup) {
     '- Inspect this machine first, then explain every change BEFORE making it and',
     '  wait for my approval. Do not change system Python, install global packages,',
     '  add services or startup tasks, or expose anything to a network.',
+    ...linuxReadFirst,
     '',
     'TEMPORARY PAIRING CODE - single use, expires ' + expiresAt + ':',
     '- This code registers THIS computer to my account (' + account + '). It is short-lived',
