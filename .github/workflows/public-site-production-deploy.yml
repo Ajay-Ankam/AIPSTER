@@ -168,6 +168,22 @@ jobs:
           HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           WORKER_APPLICABLE: ${{ steps.worker.outputs.applicable }}
           GH_TOKEN: ${{ github.token }}
+      # Release gate over EVERY included PR (not just the newest merge):
+      # binds each merge to its PR's exact-head review evidence, proves
+      # integration via second-parent, enforces the trusted holds file and
+      # merged-main CI at the target. Fails closed; a failed step stops the
+      # job before deploy. Reads the holds file from this trusted release
+      # checkout, never candidate-controlled content.
+      - name: Enforce release gate over included PRs
+        if: steps.migration.outputs.hold != 'true'
+        working-directory: ${{ github.workspace }}
+        run: node website/scripts/release-deploy-gate.mjs
+        env:
+          LIVE_SHA: ${{ steps.live.outputs.live_sha }}
+          TARGET_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_MODE: ${{ steps.release.outputs.mode }}
+          DISPATCH_ACTOR: ${{ github.triggering_actor }}
+          GH_TOKEN: ${{ github.token }}
       - run: npx wrangler deploy --config wrangler.jsonc
         if: steps.migration.outputs.hold != 'true' && steps.live.outputs.already != 'true'
         env:

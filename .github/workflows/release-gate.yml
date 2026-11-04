@@ -1,0 +1,78 @@
+# Merge-eligibility gate for release-relevant PRs (advisory until installed).
+#
+# Trust architecture: ONLY `pull_request_target` appears here because it
+# runs the base workflow version — a PR cannot alter these steps. There
+# are deliberately NO pull_request_review triggers in this file: review
+# runs execute PR-controlled YAML, so any required check sharing this
+# file's job names would be forgeable by rename-back, and no rename can
+# fix that. Review/CI freshness between pushes is covered by (1) target
+# re-runs at every head change, (2) the scheduled trusted evaluator in
+# release-gate-publish.yml (still a PROPOSAL until activated), and (3) the
+# deploy-time gate on main, which re-evaluates review state at release and
+# therefore catches post-merge dismissal. Residual liveness gap (a review
+# submitted after the last target run stays unevaluated until the next
+# wake-up) is documented, not claimed away. No path filter: README and all
+# other PRs get a verdict, so no PR waits forever on a required check.
+# Until the branch ruleset is installed by the controller, a red gate is
+# advisory and does not block GitHub UI merges. Token is read-only; no
+# fork code, artifacts, or caches are ever executed. This file requests no
+# status-write permission.
+name: Release gate
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+jobs:
+  # Advisory ONLY: runs ONLY from the trusted base workflow version, but
+  # this native job must NEVER be a required check. Enforcement reads
+  # the aipster-release-gate/head commit status. No PR-controlled event
+  # is defined here.
+  release-gate-advisory:
+    name: release-gate-advisory
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 verified 2026-10-26
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          ref: ${{ github.base_ref }} # TRUSTED BASE CODE ONLY — never the PR head
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6, same pin as public-site checks
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Evaluate merge eligibility from GitHub metadata
+        run: |
+          node --input-type=module -e "
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs/promises';
+          import {parseHoldsFile, runGateEvaluation} from './website/scripts/release-gate.mjs';
+          const repo = process.env.GITHUB_REPOSITORY;
+          assert.equal(repo, 'synchronic1/AIPSTER');
+          async function api(path) {
+            const res = await fetch('https://api.github.com/repos/' + repo + '/' + path, {headers: {
+              Authorization: 'Bearer ' + process.env.GH_TOKEN, Accept: 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28'}, signal: AbortSignal.timeout(15000), redirect: 'error'});
+            assert(res.ok, 'Metadata API returned HTTP ' + res.status + ' for ' + path);
+            return res.json();
+          }
+          try {
+            const holds = parseHoldsFile(JSON.parse(
+              await fs.readFile('.github/release-holds.json', 'utf8')));
+            const {verdict} = await runGateEvaluation(
+              {request: api, n: process.env.PR_NUMBER, holds});
+            await fs.appendFile(process.env.GITHUB_STEP_SUMMARY,
+              '## RELEASE GATE — eligible\n\n' + JSON.stringify(verdict) + '\n');
+            console.log(JSON.stringify(verdict));
+          } catch (err) {
+            await fs.appendFile(process.env.GITHUB_STEP_SUMMARY,
+              '## RELEASE GATE — NOT eligible\n\n' + String(err && err.message || err) + '\n');
+            console.error('GATE REFUSAL: ' + (err && err.message || err));
+            process.exit(1);
+          }"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}

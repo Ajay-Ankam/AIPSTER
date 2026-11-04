@@ -1,0 +1,89 @@
+# PROPOSAL — NOT ACTIVE. Trusted exact-head status publisher (draft).
+#
+# This file is checked in as a design artifact for controller approval and
+# MUST NOT be taken as enforcement until ALL of these happen with explicit
+# action-time confirmation: (1) the `statuses: write` job permission below
+# is approved (it is currently COMMENTED OUT, so this workflow cannot
+# publish anything even if run); (2) the activation flag
+# `vars.RELEASE_GATE_PUBLISH_ACTIVE` is set to 'true' (unset by default,
+# so every run below exits early with a published-nothing notice);
+# (3) the branch ruleset requires the DISTINCT context
+# `aipster-release-gate/head` (never a native job name — job names prove
+# nothing about authenticity or head binding).
+#
+# Design when activated: trusted-base/default evaluator. `schedule` and
+# `pull_request_target` both run the default-branch/base version, so every
+# run executes trusted code only. Each run re-reads repository, PR, head,
+# reviews, checks, and holds fresh from GitHub (events are wake-ups, never
+# authority), evaluates with runGateEvaluation, re-checks the head for
+# staleness, and publishes exactly one of pending/error/failure/success
+# under the distinct context. Untrusted code, artifacts, and caches never
+# execute in this job, with or without write permission. No App, webhook,
+# token, or service is created here.
+#
+# Residual gaps stated plainly (not claimed away): schedule ticks lag head
+# changes by up to the interval; a review submitted after the last wake-up
+# stays unevaluated until the next one; if the published exact-head
+# context does not attach to the PR head on first live run (canary),
+# enforcement deadlocks and the architecture must change before ruleset
+# install. Native job names are advisory only and never required.
+name: Release gate publisher (PROPOSAL — inactive)
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+  # PROPOSED ONLY — DO NOT UNCOMMENT without action-time confirmation:
+  # statuses: write
+jobs:
+  publish-head-status:
+    name: publish-head-status
+    if: vars.RELEASE_GATE_PUBLISH_ACTIVE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 verified 2026-10-26
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          ref: ${{ github.base_ref || github.ref }} # TRUSTED BASE/DEFAULT CODE ONLY
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6, same pin as public-site checks
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Evaluate open PRs and publish exact-head statuses
+        run: |
+          node --input-type=module -e "
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs/promises';
+          import {PUBLISH_CONTEXT, listOpenPRs, parseHoldsFile, publishEvaluation} from './website/scripts/release-gate.mjs';
+          const repo = process.env.GITHUB_REPOSITORY;
+          assert.equal(repo, 'synchronic1/AIPSTER');
+          async function api(path, init) {
+            const res = await fetch('https://api.github.com/repos/' + repo + '/' + path, {headers: {
+              Authorization: 'Bearer ' + process.env.GH_TOKEN, Accept: 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              ...(init && init.body ? {'Content-Type': 'application/json'} : {})},
+              method: (init && init.method) || 'GET',
+              body: init && init.body ? JSON.stringify(init.body) : undefined,
+              signal: AbortSignal.timeout(15000), redirect: 'error'});
+            assert(res.ok, 'Metadata API returned HTTP ' + res.status + ' for ' + path);
+            return res.json();
+          }
+          const numbers = process.env.PR_NUMBERS
+            ? process.env.PR_NUMBERS.split(',').map((s) => s.trim()).filter(Boolean)
+            : await listOpenPRs({request: api});
+          const holds = parseHoldsFile(JSON.parse(
+            await fs.readFile('.github/release-holds.json', 'utf8')));
+          for (const n of numbers) {
+            await publishEvaluation({request: api, n, holds,
+              context: PUBLISH_CONTEXT});
+          }
+          "
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBERS: ${{ github.event.pull_request.number }}

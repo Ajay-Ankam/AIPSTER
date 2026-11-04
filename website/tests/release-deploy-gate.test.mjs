@@ -1,0 +1,338 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {evaluateDeployGate, realGit} from '../scripts/release-deploy-gate.mjs';
+
+const LIVE = 'e'.repeat(40);
+const TARGET = 'f'.repeat(40);
+const HEAD1 = 'a'.repeat(40);
+const HEAD2 = 'b'.repeat(40);
+const MERGE1 = 'c'.repeat(40);
+const MERGE2 = 'd'.repeat(40);
+const HOLD_SHA = LIVE;
+
+const blockFor = (head) => ['RELEASE-EVIDENCE', 'reviewer: 948a',
+  'author: fixture-source-agent',
+  'model: muse-spark-1.3-contributor', 'sha: ' + head, 'verdict: PASS',
+  'report: REVIEW-X.md', 'tests: 12/12', 'blocking: none'].join('\n');
+const markerFor = (head) => blockFor(head) + '\nRELEASE-ACCEPT ' + head;
+const SITE_SUITE = 900;
+const WORKER_SUITE = 901;
+const INSTALLER_SUITE = 902;
+const siteCheck = (sha) => ({id: 9, name: 'Public site asset and build checks',
+  head_sha: sha, status: 'completed', conclusion: 'success',
+  app: {slug: 'github-actions'}, check_suite: {id: SITE_SUITE}});
+const SITE_RUNS = 'actions/workflows/.github/workflows/public-site-checks.yml/runs';
+const WORKER_RUNS = 'actions/workflows/.github/workflows/local-worker-checks.yml/runs';
+const INSTALLER_RUNS = 'actions/workflows/.github/workflows/worker-installer-build.yml/runs';
+// Suite ids the mocked workflow-runs API reports per head SHA.
+const suiteRunsFor = (entries) => (path) => {
+  const m = path.match(/head_sha=([0-9a-f]{40})/);
+  const ids = (m && entries[m[1]]) || [];
+  return {workflow_runs: ids.map((id) => ({id: 5000 + id, head_sha: m && m[1],
+    check_suite_id: id}))};
+};
+
+function mockRequest(routes, failOn = []) {
+  const seen = [];
+  const request = async (path) => {
+    seen.push(path);
+    for (const fail of failOn) if (path.startsWith(fail)) {
+      throw new Error('HTTP 401 for ' + path);
+    }
+    const [base] = path.split('?');
+    assert(base in routes, 'unexpected API path: ' + path);
+    const route = routes[base];
+    return typeof route === 'function' ? route(path) : route;
+  };
+  return {seen, request};
+}
+
+const prDoc = (n, head, fork) => ({number: n, head: {sha: head, ref: 'x',
+  repo: {full_name: fork ? 'someone/AIPSTER' : 'synchronic1/AIPSTER'}},
+  base: {ref: 'main', repo: {full_name: 'synchronic1/AIPSTER'}},
+  user: {login: 'author1'}, state: 'closed', merged: true, merge_commit_sha: n === 90 ? MERGE1 : MERGE2});
+const reviewDoc = (head, over = {}) => ({id: 1, user: {login: '948a'},
+  author_association: 'OWNER', state: 'APPROVED', commit_id: head,
+  body: markerFor(head), submitted_at: '2026-11-03T00:00:00Z', ...over});
+const assoc = (n) => ({number: n, state: 'closed', merged_at: '2026-11-03T00:00:00Z',
+  merge_commit_sha: n === 90 ? MERGE1 : MERGE2,
+  base: {ref: 'main', repo: {full_name: 'synchronic1/AIPSTER'}}});
+
+const installerCheckFor = (sha) => ({id: 12, name: 'Build and qualify Windows installer',
+  head_sha: sha, status: 'completed', conclusion: 'success', app: {slug: 'github-actions'},
+  check_suite: {id: INSTALLER_SUITE}});
+const workerCheckFor = (sha) => ({id: 7, name: 'mock-install', head_sha: sha,
+  status: 'completed', conclusion: 'success', app: {slug: 'github-actions'},
+  check_suite: {id: WORKER_SUITE}});
+function baseRoutes(over = {}, suites = {[HEAD1]: [SITE_SUITE],
+  [HEAD2]: [SITE_SUITE], [TARGET]: [SITE_SUITE]}) {
+  const suiteRoute = suiteRunsFor(suites);
+  return {[`commits/${MERGE1}/pulls`]: [assoc(90)],
+    [`commits/${MERGE2}/pulls`]: [assoc(91)],
+    'pulls/90': prDoc(90, HEAD1), 'pulls/91': prDoc(91, HEAD2),
+    'pulls/90/reviews': [reviewDoc(HEAD1)],
+    'pulls/91/reviews': [reviewDoc(HEAD2)],
+    'pulls/90/files': [{filename: 'website/public/x.html'}],
+    'pulls/91/files': [{filename: 'website/public/y.html'}],
+    [`commits/${TARGET}/check-runs`]: {check_runs: [siteCheck(TARGET)]},
+    [SITE_RUNS]: suiteRoute, [WORKER_RUNS]: suiteRoute,
+    [INSTALLER_RUNS]: suiteRoute, ...over};
+}
+const git = (over = {}) => ({commitsInRange: () => [MERGE2, MERGE1],
+  secondParent: (m) => (m === MERGE1 ? HEAD1 : (m === MERGE2 ? HEAD2 : null)),
+  isAncestor: () => false,
+  changedFiles: () => ['website/public/index.html'], ...over});
+function gateInput(over = {}) {
+  const {request} = mockRequest(baseRoutes());
+  return {git: git(), request, fetchChecks: async () => [siteCheck(TARGET)],
+    fetchHeadChecks: async (sha) => [siteCheck(sha)],
+    liveSha: LIVE, targetSha: TARGET, mode: 'auto', holds: {}, ...over};
+}
+
+test('happy path evaluates every included PR', async () => {
+  const out = await evaluateDeployGate(gateInput());
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.prs.map(p => p.number), [91, 90]); // newest-first range order
+  assert.equal(out.prs[0].acceptedBy, '948a');
+});
+test('fresh endpoint standing wins over stale caller claims', async () => {
+  const collab = (head) => reviewDoc(head, {user: {login: 'helper'},
+    author_association: 'COLLABORATOR'});
+  // Stale caller downgrade cannot veto a fresh endpoint-proven admin.
+  {
+    const {request} = mockRequest(baseRoutes({
+      'pulls/90/reviews': [collab(HEAD1)],
+      'pulls/91/reviews': [collab(HEAD2)],
+      'collaborators/helper/permission': {permission: 'admin'}}));
+    const out = await evaluateDeployGate({...gateInput(), request,
+      permissions: {helper: 'read'}});
+    assert.equal(out.ok, true);
+    assert.equal(out.prs[0].acceptedBy, 'helper');
+  }
+  // A caller-claimed admin the endpoint reports as read must not accept:
+  // the proved-outsider records are ignored at binding, so the gate
+  // refuses with no evidence rather than manufacturing acceptance.
+  {
+    const {request} = mockRequest(baseRoutes({
+      'pulls/90/reviews': [collab(HEAD1)],
+      'pulls/91/reviews': [collab(HEAD2)],
+      'collaborators/helper/permission': {permission: 'read'}}));
+    await assert.rejects(evaluateDeployGate({...gateInput(), request,
+      permissions: {helper: 'admin'}}), /No independent review evidence/);
+  }
+});
+test('same-head CHANGES_REQUESTED blocks deploy until same-author approval', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T01:00:00Z';
+  const T2 = '2026-11-03T02:00:00Z';
+  const pass = reviewDoc(HEAD1, {submitted_at: T0});
+  const cr = reviewDoc(HEAD1, {id: 2, state: 'CHANGES_REQUESTED',
+    body: 'needs work', submitted_at: T1});
+  const blocked = mockRequest(baseRoutes({'pulls/90/reviews': [pass, cr]}));
+  await assert.rejects(evaluateDeployGate({...gateInput(),
+    request: blocked.request}), /changes-requested by 948a/);
+  const resolved = mockRequest(baseRoutes({'pulls/90/reviews':
+    [pass, cr, reviewDoc(HEAD1, {id: 3, submitted_at: T2})]}));
+  const out = await evaluateDeployGate({...gateInput(),
+    request: resolved.request});
+  assert.equal(out.ok, true);
+});
+test('unrelated dismissal cannot clear a live blocker (deploy path)', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T10:00:00Z';
+  const T2 = '2026-11-03T10:01:00Z';
+  const pass = reviewDoc(HEAD1, {submitted_at: T0});
+  const cr10 = reviewDoc(HEAD1, {id: 10, user: {login: 'helper'},
+    author_association: 'COLLABORATOR', state: 'CHANGES_REQUESTED',
+    body: 'needs work', submitted_at: T1});
+  const dis11 = reviewDoc(HEAD1, {id: 11, user: {login: 'helper'},
+    author_association: 'COLLABORATOR', state: 'DISMISSED', body: '',
+    submitted_at: T2});
+  const {request} = mockRequest(baseRoutes({
+    'pulls/90/reviews': [pass, cr10, dis11],
+    'collaborators/helper/permission': {permission: 'admin'}}));
+  await assert.rejects(evaluateDeployGate({...gateInput(), request}),
+    /review 10/);
+});
+test('outsider evidence never binds on the deploy path', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T10:01:00Z';
+  const outsiderPass = ['RELEASE-EVIDENCE', 'reviewer: claimed-independent-agent',
+    'author: fixture-source-agent',
+    'model: muse-spark-1.3-contributor', 'sha: ' + HEAD1, 'verdict: PASS',
+    'report: invented-fixture-report.md', 'tests: 1/1', 'blocking: none'].join('\n');
+  const ownerAccept = reviewDoc(HEAD1, {body: 'RELEASE-ACCEPT ' + HEAD1,
+    submitted_at: T0});
+  const outsiderReport = reviewDoc(HEAD1, {id: 2, user: {login: 'fixture-outsider'},
+    author_association: 'NONE', state: 'COMMENTED', body: outsiderPass,
+    submitted_at: T1});
+  const {request} = mockRequest(baseRoutes({
+    'pulls/90/reviews': [ownerAccept, outsiderReport],
+    'collaborators/fixture-outsider/permission': {permission: 'read'}}));
+  await assert.rejects(evaluateDeployGate({...gateInput(), request}),
+    /No independent review evidence/);
+});
+test('stale unknown history cannot wedge a deploy verdict', async () => {
+  const T0 = '2026-11-03T00:00:00Z';
+  const T1 = '2026-11-03T10:01:00Z';
+  const OLDH = 'b'.repeat(40);
+  const stalePass = blockFor(OLDH);
+  const pass = reviewDoc(HEAD1, {submitted_at: T0});
+  const staleUnknown = reviewDoc(HEAD1, {id: 2, user: {login: 'fixture-old-outsider'},
+    author_association: 'NONE', state: 'COMMENTED', commit_id: OLDH,
+    body: stalePass, submitted_at: T1});
+  const {request} = mockRequest(baseRoutes(
+    {'pulls/90/reviews': [pass, staleUnknown]}));
+  const out = await evaluateDeployGate({...gateInput(), request});
+  assert.equal(out.ok, true);
+});
+test('spoofed per-PR head check from another workflow is refused', async () => {
+  const spoof = {...siteCheck(HEAD1), id: 99, check_suite: {id: 4242}};
+  const {request} = mockRequest(baseRoutes(
+    {}, {[HEAD1]: [SITE_SUITE], [HEAD2]: [SITE_SUITE], [TARGET]: [SITE_SUITE]}));
+  const gate = {...gateInput(), request,
+    fetchHeadChecks: async (sha) => (sha === HEAD1
+      ? [siteCheck(sha), spoof] : [siteCheck(sha)])};
+  await assert.rejects(evaluateDeployGate(gate), /not produced by/);
+});
+test('fork-origin PR merged canonically is releasable', async () => {
+  const {request} = mockRequest(baseRoutes({'pulls/90': prDoc(90, HEAD1, true)}));
+  const out = await evaluateDeployGate({...gateInput(), request});
+  assert.equal(out.ok, true);
+});
+test('unassociated merge fails closed', async () => {
+  const {request} = mockRequest(baseRoutes({[`commits/${MERGE1}/pulls`]: []}));
+  await assert.rejects(evaluateDeployGate({...gateInput(), request}), /no associated pull request/);
+});
+test('evidence on the wrong head binds nothing', async () => {
+  const {request} = mockRequest(baseRoutes(
+    {'pulls/90/reviews': [reviewDoc(HEAD2)]}));
+  await assert.rejects(evaluateDeployGate({...gateInput(), request}),
+    /No independent review evidence bound/);
+});
+test('second-parent mismatch fails integration proof', async () => {
+  const badGit = git({secondParent: () => HEAD2});
+  await assert.rejects(evaluateDeployGate({...gateInput(), git: badGit}),
+    /does not integrate/);
+});
+test('hold descendant blocks both paths; unrelated does not', async () => {
+  const holds = {[HOLD_SHA]: {sha: HOLD_SHA, active: true, reason: 'PR84 hold', setBy: 's'}};
+  const covering = git({isAncestor: () => true});
+  await assert.rejects(evaluateDeployGate({...gateInput(), holds, git: covering}),
+    /HOLD active/);
+  await assert.rejects(evaluateDeployGate({...gateInput(), holds, git: covering, mode: 'manual',
+    dispatchActor: 'synchronic1'}), /HOLD active/);
+  const out = await evaluateDeployGate({...gateInput(), holds});
+  assert.equal(out.ok, true); // isAncestor false → unrelated
+});
+test('merged-main CI required at target; worker conditional', async () => {
+  await assert.rejects(evaluateDeployGate(
+    {...gateInput(), fetchChecks: async () => []}), /passing/);
+  const workerGit = git({changedFiles: () => ['local-worker/x.py']});
+  await assert.rejects(evaluateDeployGate({...gateInput(), git: workerGit}),
+    /worker-covered/);
+  const targetSuites = mockRequest(baseRoutes({}, {[HEAD1]: [SITE_SUITE],
+    [HEAD2]: [SITE_SUITE], [TARGET]: [SITE_SUITE, WORKER_SUITE]}));
+  const out = await evaluateDeployGate({...gateInput(), git: workerGit,
+    request: targetSuites.request,
+    fetchChecks: async () => [siteCheck(TARGET),
+      {id: 3, name: 'mock-install', head_sha: TARGET, status: 'completed',
+        conclusion: 'success', app: {slug: 'github-actions'},
+        check_suite: {id: WORKER_SUITE}}]});
+  assert.equal(out.ok, true);
+});
+test('already-live is a noop; manual dispatch actor accepted', async () => {
+  const out = await evaluateDeployGate({...gateInput(), liveSha: TARGET});
+  assert.deepEqual(out, {ok: true, noop: 'already-live'});
+  const noMarker = baseRoutes({'pulls/90/reviews':
+    [{...reviewDoc(HEAD1), body: blockFor(HEAD1)}]});
+  const {request} = mockRequest(noMarker);
+  const manual = await evaluateDeployGate({...gateInput(), request,
+    mode: 'manual', dispatchActor: 'synchronic1'});
+  assert.equal(manual.prs.find(p => p.number === 90).via, 'dispatch');
+  await assert.rejects(evaluateDeployGate({...gateInput(), request, mode: 'manual'}),
+    /No maintainer acceptance/);
+});
+test('every regular first-parent commit is refused, even with later ancestry', async () => {
+  const S = '9'.repeat(40);
+  // S sits below a reviewed merge (it WOULD be an ancestor of the head):
+  // ancestry proves nothing about review coverage, so it still refuses.
+  const mixed = git({commitsInRange: () => [MERGE2, S, MERGE1],
+    isAncestor: () => true});
+  await assert.rejects(evaluateDeployGate({...gateInput(), git: mixed}),
+    /Unbound mainline commit/);
+});
+test('worker PR heads require worker+installer CI; target needs no installer', async () => {
+  const workerFiles = {'pulls/90/files': [{filename: 'local-worker/x.py'}]};
+  const workerSuites = {[HEAD1]: [SITE_SUITE, WORKER_SUITE, INSTALLER_SUITE],
+    [HEAD2]: [SITE_SUITE], [TARGET]: [SITE_SUITE, WORKER_SUITE]};
+  const {request} = mockRequest(baseRoutes(workerFiles, workerSuites));
+  const noInstaller = {...gateInput(), request,
+    fetchHeadChecks: async (sha) => [siteCheck(sha), workerCheckFor(sha)]};
+  await assert.rejects(evaluateDeployGate(noInstaller), /installer/i);
+  const full = mockRequest(baseRoutes(workerFiles, workerSuites));
+  const out = await evaluateDeployGate({...gateInput(), request: full.request,
+    fetchHeadChecks: async (sha) => [siteCheck(sha), workerCheckFor(sha),
+      installerCheckFor(sha)],
+    git: git({changedFiles: () => ['local-worker/x.py']}),
+    fetchChecks: async () => [siteCheck(TARGET), workerCheckFor(TARGET)]});
+  assert.equal(out.ok, true); // installer absent at target is correct
+});
+test('realGit on a tiny repo: first-parent range, exit codes, unknown throws', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-'));
+  const sh = (...args) => execFileSync('git', args, {cwd: dir, encoding: 'utf8'}).trim();
+  sh('init', '-q');
+  sh('config', 'user.email', 't@t');
+  sh('config', 'user.name', 't');
+  sh('checkout', '-qb', 'main');
+  fs.writeFileSync(path.join(dir, 'base.txt'), 'base');
+  sh('add', 'base.txt');
+  sh('commit', '-qm', 'M0');
+  const M0 = sh('rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(dir, 's.txt'), 'direct');
+  sh('add', 's.txt');
+  sh('commit', '-qm', 'direct-to-main');
+  const S = sh('rev-parse', 'HEAD');
+  sh('checkout', '-qb', 'pr');
+  fs.writeFileSync(path.join(dir, 'f.txt'), 'feat');
+  sh('add', 'f.txt');
+  sh('commit', '-qm', 'PR head');
+  const H = sh('rev-parse', 'HEAD');
+  sh('checkout', '-q', 'main');
+  sh('merge', '--no-ff', '-m', 'Merge PR', 'pr');
+  const M2 = sh('rev-parse', 'HEAD');
+  const g = realGit(dir);
+  assert.deepEqual(g.commitsInRange(M0, M2), [M2, S]);
+  assert.equal(g.secondParent(M2), H);
+  assert.equal(g.secondParent(S), null);
+  assert.equal(g.isAncestor(M0, M2), true);
+  assert.equal(g.isAncestor(H, M0), false); // genuine exit 1
+  assert.throws(() => g.isAncestor(M0, '0'.repeat(40)), /Ancestry unknown/); // exit 128
+});
+test('hold-registry touch in range refuses; global hold blocks descendant', async () => {
+  const touched = git({changedFiles: () => ['website/a.mjs', '.github/release-holds.json']});
+  await assert.rejects(evaluateDeployGate({...gateInput(), git: touched}),
+    /hold registry/);
+  const HOLD_SHA = 'd'.repeat(40);
+  const global = {[HOLD_SHA]: {sha: HOLD_SHA, active: true,
+    reason: 'PR84 all', setBy: 's', blockMerges: true}};
+  await assert.rejects(evaluateDeployGate({...gateInput(), holds: global}),
+    /HOLD active/);
+});
+test('git and API failures fail closed', async () => {
+  const badGit = git({commitsInRange: () => { throw new Error('git gone'); }});
+  await assert.rejects(evaluateDeployGate({...gateInput(), git: badGit}), /git gone/);
+  const {request} = mockRequest({[`commits/${MERGE2}/pulls`]: [assoc(91)],
+    [`commits/${MERGE1}/pulls`]: [assoc(90)],
+    'pulls/91': prDoc(91, HEAD2),
+    'pulls/91/reviews': [reviewDoc(HEAD2)],
+    'pulls/91/files': [{filename: 'website/public/y.html'}],
+    [SITE_RUNS]: suiteRunsFor({[HEAD2]: [SITE_SUITE]})}, ['pulls/90']);
+  await assert.rejects(evaluateDeployGate({...gateInput(), request,
+    fetchHeadChecks: async (sha) => [siteCheck(sha)]}), /401/);
+});
+
