@@ -572,6 +572,14 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
     // else passes through and is judged by matchGrant.
     const actions = rawActions.map((a) => (a === 'infer' ? 'inference' : a));
     if (!Number.isSafeInteger(g.version) || !isIso(g.created_at) || !isIso(g.expiry)) return null;
+    // Spend counters must be strict nonnegative safe integers before any
+    // headroom is accepted. A pre-0029 schema reads them as undefined, and
+    // Number(undefined)/Number(null) coercion would silently pass NaN/zero
+    // headroom and mint an admission with no spend recorded. Missing, null,
+    // fractional, negative, non-finite, or non-numeric values (including
+    // numeric strings) are never valid counters: the grant is not live.
+    if (!Number.isSafeInteger(g.used_tokens) || g.used_tokens < 0
+      || !Number.isSafeInteger(g.used_jobs) || g.used_jobs < 0) return null;
     return { grant: g, connection: conn, resource: r, entry, node, consumers, actions, models, ceilings };
   }
   async function fabricGrantView({ grant_id, principal_id, resource_id } = {}) {

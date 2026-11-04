@@ -138,6 +138,51 @@ test('suspended connection, deny, quarantine and stale incarnation refuse dispat
   }
 });
 
+test('malformed or missing spend counters refuse admission with no rows or spend', async () => {
+  // 630 review gap on fe2ce0b: a pre-0029 schema (or a corrupt counter)
+  // reads as undefined/NaN through Number() coercion, and NaN headroom
+  // arithmetic silently passes — admission minted at 201 with zero
+  // spend recorded. Counters must be strict nonnegative safe integers
+  // before any headroom is accepted; valid 0 stays admissible.
+  const cases = [
+    ['missing columns (pre-0029 schema)', async (s) => {
+      await s.t.DB.prepare('ALTER TABLE fabric_grants DROP COLUMN used_tokens').bind().run();
+      await s.t.DB.prepare('ALTER TABLE fabric_grants DROP COLUMN used_jobs').bind().run();
+    }, true],
+    ['null counters (nullable re-add, no coercion to zero)', async (s) => {
+      await s.t.DB.prepare('ALTER TABLE fabric_grants DROP COLUMN used_tokens').bind().run();
+      await s.t.DB.prepare('ALTER TABLE fabric_grants ADD COLUMN used_tokens INTEGER').bind().run();
+    }, false],
+    ['fractional counters', async (s) => {
+      await s.t.DB.prepare('UPDATE fabric_grants SET used_tokens = 1.5, used_jobs = 0 WHERE id = ?').bind(s.grantId).run();
+    }, false],
+    ['negative counters', async (s) => {
+      await s.t.DB.prepare('UPDATE fabric_grants SET used_tokens = 0, used_jobs = -5 WHERE id = ?').bind(s.grantId).run();
+    }, false],
+    ['non-numeric text counters (no coercion)', async (s) => {
+      // Numeric text ('100') is normalized to 100 by SQLite INTEGER
+      // affinity on write, so only genuinely non-numeric text reaches the
+      // guard — and must be refused, never coerced.
+      await s.t.DB.prepare("UPDATE fabric_grants SET used_tokens = 'abc', used_jobs = 'x' WHERE id = ?").bind(s.grantId).run();
+    }, false],
+  ];
+  for (const [name, mutate, dropped] of cases) {
+    const s = await setup();
+    await mutate(s);
+    const adm = await admit(s, s.t.bob, {});
+    assert.equal(adm.status, 404, `${name}: schema failure is never a successful admission: ${adm.text}`);
+    assert.equal(adm.json.code, 'NOT_FOUND', name);
+    const a = await s.t.DB.prepare('SELECT COUNT(*) AS n FROM dispatch_admissions').bind().first();
+    assert.equal(a.n, 0, `${name}: no admission minted`);
+    const j = await s.t.DB.prepare('SELECT COUNT(*) AS n FROM dispatch_jobs').bind().first();
+    assert.equal(j.n, 0, `${name}: no dispatch row`);
+    if (!dropped) {
+      const r = await s.t.DB.prepare('SELECT used_tokens AS n, used_jobs AS j FROM fabric_grants WHERE id = ?').bind(s.grantId).first();
+      assert.ok(!(r.n === 0 && r.j === 0), `${name}: counters not reset to zero`);
+    }
+  }
+});
+
 test('wrong tenant cannot use another principal admission', async () => {
   const s = await setup();
   const adm = await admit(s, s.t.bob, {});
