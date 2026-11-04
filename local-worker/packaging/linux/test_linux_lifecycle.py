@@ -315,8 +315,38 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("declare-external", text)
         self.assertIn("clear-external", text)
 
+    def test_orphan_of_previous_tray_run_is_not_recorded_as_external(self):
+        self.env.busy, self.env.healthy = True, True
+        c = make(self.data)
+        c.previous_worker_pid = os.getppid()  # alive, ours, not this process
+        self.assertFalse(c.start_worker())
+        self.assertFalse(os.path.lexists(self.record()))
+        self.assertEqual((c.state, c.child.starts), (st.PORT_BUSY, 0))
+        c.previous_worker_pid = 2 ** 22 + 12345  # not a live pid
+        c.start_worker()
+        self.assertTrue(self.record().exists())
+
+    def test_prepare_captures_previous_pid_before_overwrite(self):
+        st.write_state(self.data / "state.json", st.RUNNING, "", 4242, "127.0.0.1", 8090)
+        c = make(self.data)
+        with patch.object(ctl.Controller, "prepare", lambda self: None):
+            c.prepare()
+        self.assertEqual(c.previous_worker_pid, 4242)
+
+    def test_record_create_failure_has_truthful_detail(self):
+        self.env.busy, self.env.healthy = True, True
+        c = make(self.data)
+        with patch.object(lc.os, "link", side_effect=OSError("no hard links")):
+            self.assertFalse(c.start_worker())
+        self.assertIn("could not be created", c.detail)
+        self.assertEqual(c.child.starts, 0)
+
+    def test_boolean_version_is_invalid(self):
+        self.record().write_text('{"version": true}')
+        self.assertFalse(lc.load_external(self.data)["valid"])
+
     def test_status_text_is_honest(self):
-        for text in (lc.EXTERNAL_DETAIL, lc.INVALID_DETAIL):
+        for text in (lc.EXTERNAL_DETAIL, lc.INVALID_DETAIL, lc.RECORD_FAILED_DETAIL):
             st.check_honest(text)
             self.assertNotIn("systemd", text.lower())
 

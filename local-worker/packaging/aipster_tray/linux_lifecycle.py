@@ -35,11 +35,14 @@ MAX_RECORD_BYTES = 4096
 EXTERNAL_DETAIL = ("Managed outside this app: this app will not start a worker or "
                    "heartbeat sender here. To let this app manage the worker, "
                    "delete {path}.")
+RECORD_FAILED_DETAIL = ("A worker this app did not start holds this port, and the "
+                        "external-management record could not be created at {path}, "
+                        "so this app will not start a worker or heartbeat sender.")
 INVALID_DETAIL = ("External-management record is unreadable or invalid, so this "
                   "app will not start a worker or heartbeat sender. Delete {path} "
                   "to let this app manage the worker.")
 
-for _text in (EXTERNAL_DETAIL, INVALID_DETAIL):
+for _text in (EXTERNAL_DETAIL, INVALID_DETAIL, RECORD_FAILED_DETAIL):
     st.check_honest(_text)
 del _text
 
@@ -79,7 +82,8 @@ def load_external(data):
         value = json.loads(content)
     except (ValueError, UnicodeError):
         return {"valid": False, "reason": "invalid"}
-    if not isinstance(value, dict) or value.get("version") != 1:
+    version = value.get("version") if isinstance(value, dict) else None
+    if type(version) is not int or version != 1:  # bool True is not version 1
         return {"valid": False, "reason": "invalid"}
     return {"valid": True, "source": str(value.get("source", "")),
             "origin": str(value.get("origin", ""))}
@@ -149,6 +153,28 @@ class LinuxController(Controller):
     """Controller whose starts honor the external-management record."""
 
     external = None  # last loaded record (None, or a dict from load_external)
+    previous_worker_pid = None  # worker pid a previous tray run recorded
+
+    def prepare(self):
+        # prepare() rewrites state.json, so read the previous run's worker pid
+        # first: a worker this app spawned survives a killed tray (own session).
+        try:
+            payload = st.read_state(self.data / "state.json") or {}
+            pid = payload.get("worker_pid")
+            self.previous_worker_pid = pid if type(pid) is int and pid > 0 else None
+        except Exception:  # noqa: BLE001 - unknown previous pid: none
+            self.previous_worker_pid = None
+        return super().prepare()
+
+    def _previous_worker_alive(self):
+        pid = self.previous_worker_pid
+        if not pid or pid == os.getpid():
+            return False
+        try:
+            os.kill(pid, 0)  # existence/permission probe only; sends nothing
+        except (ProcessLookupError, PermissionError, OSError):
+            return False  # gone, or another user's process (never ours)
+        return True
 
     def external_record(self):
         self.external = load_external(self.data)
@@ -161,10 +187,13 @@ class LinuxController(Controller):
         except Exception:  # noqa: BLE001 - unknown means "maybe ours": do not record
             return True
 
-    def _refuse(self, record):
+    def _refuse(self, record, record_failed=False):
         self.restart_at = None
         path = external_path(self.data)
-        template = EXTERNAL_DETAIL if record.get("valid") else INVALID_DETAIL
+        if record_failed:
+            template = RECORD_FAILED_DETAIL
+        else:
+            template = EXTERNAL_DETAIL if record.get("valid") else INVALID_DETAIL
         detail = template.format(path=path)
         busy = False
         if self.loaded is not None:
@@ -185,10 +214,21 @@ class LinuxController(Controller):
         host, port = self.loaded.node.host, self.loaded.node.port
         if _ctl.port_busy(host, port) and not self._own_child_alive() \
                 and _ctl._health_ok(host, port):
+            if self._previous_worker_alive():
+                # Most likely our own worker orphaned by a killed tray: not
+                # recorded as external (no lock-out); the original busy-port
+                # path still refuses to spawn beside it.
+                self.log(f"healthy holder of {host}:{port} may be this app's worker "
+                         f"from a previous run (pid {self.previous_worker_pid}); "
+                         "not recording external management")
+                return super().start_worker(manual)
             created = record_external(self.data, host, port)
             self.log(f"healthy worker not started by this app holds {host}:{port}; "
                      f"external-management record created={created}")
-            return self._refuse(self.external_record() or {"valid": False})
+            record = self.external_record()
+            if record is None:
+                return self._refuse({"valid": False}, record_failed=True)
+            return self._refuse(record)
         return super().start_worker(manual)
 
     def start_sender(self):
