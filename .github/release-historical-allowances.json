@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "allowances": {
+    "RELEASE158-8bcd4c7": {
+      "liveSha": "8bcd4c7a054e8fa6dda8e4d087be490d15b8f923",
+      "registryTouches": [
+        "00c7d848cf3329d32e4d4d286b0a042a37fb4f5d",
+        "ff82c051c45a51521f8c5b6e7053bda7df97c15a",
+        "3bad6d97dee628986a052a5edffa718b3784a0a5"
+      ],
+      "supersededHeads": [
+        {
+          "pr": 83,
+          "head": "01fce781f6926db9023964acddfb2ddc1b570293",
+          "merge": "851f9e46d95686cb54fcc2d53fabbd89f7de9229",
+          "repairedBy": [
+            {"pr": 97, "head": "d494f1173993a6bc4a0973915140d3ce5c3c3798"},
+            {"pr": 99, "head": "f39736b1c97036070167934cd910c85b75ba36df"},
+            {"pr": 104, "head": "55e567510f0bb7dd08c8f4301b7893644d48f0b7"}
+          ],
+          "reason": "PR 83 head 01fce781 is NOT a PASS: its only exact-head independent review (0bb9) was HOLD with two fail-open catalog defects (compat cache collision on unresolved selectors; fp16 filename), and the owner's review 5755949055 required the dashboard file picker. Both defects were repaired in-range by PR 97 (d494f117) and PR 99 (f39736b1); the picker landed in PR 104 (55e56751, commit 28c2a77). Each repair head must carry its own bound evidence in the same range."
+        }
+      ],
+      "decision": "PROPOSED, NOT YET APPROVED: one-time historical release from live 8bcd4c7 only. Allows exactly the three listed hold-registry commits (PR 94 seed 00c7d84 and FIX-010 ff82c05; PR 101 owner clearance 3bad6d9) and substitutes PR 83's missing exact-head evidence with the named in-range repair chain. Inert once live moves past 8bcd4c7. Becomes effective only after synchronic1 posts the RELEASE-HISTORICAL-ALLOWANCE marker review at the introducing PR's head.",
+      "approvedBy": "synchronic1"
+    }
+  }
+}
