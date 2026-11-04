@@ -374,6 +374,36 @@ class ManagedLivenessTests(AttachUsableTests.__bases__[0]):
                 usable, why = self.decide(write_managed_config(self.data, node.port))
                 self.assertFalse(usable, f"{label}: {why}")
 
+    def test_managed_state_contract(self):
+        """Only explicit live lifecycle states count; malformed states fail
+        closed without crashing the sender (READINESS060)."""
+        base = {"id": RUNTIME, "kind": "ik_llama", "mode": "managed",
+                "busy": False, "simulated": False, "last_error": None}
+        model = {"id": MODEL, "runtime": RUNTIME, "available": True,
+                 "resident": False, "simulated": False}
+        for label, state, present, usable in [
+            ("unloaded", "unloaded", True, True),
+            ("loading", "loading", True, True),
+            ("ready", "ready", True, True),
+            ("generating", "generating", True, True),
+            ("error", "error", True, False),
+            ("unavailable", "unavailable", True, False),
+            ("unknown string", "bogus-state", True, False),
+            ("missing", None, False, False),
+            ("null", None, True, False),
+            ("list", ["ready"], True, False),
+            ("dict", {"state": "ready"}, True, False),
+        ]:
+            with self.subTest(label):
+                runtime = dict(base)
+                if present:
+                    runtime["state"] = state
+                node = self.node(body={"runtimes": [runtime], "models": [dict(model)]})
+                got, why = self.decide(write_managed_config(self.data, node.port))
+                self.assertEqual(got, usable, f"{label}: {why}")
+                if not usable:
+                    self.assertIn("not reported healthy", why)
+
     def test_missing_token_is_not_usable(self):
         node = self.node(body=managed_report())
         (self.data / "api-token.txt").unlink()
