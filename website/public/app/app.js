@@ -491,7 +491,7 @@ async function loadOverview() {
 // unqualified on every OS; run verify_vendor.py after checkout and move
 // either pin only with a re-verified re-pin.
 const WORKER_COMMIT = '0e6b60890c736207664d122c62e39d8c4affd2fa';
-const DOCS_COMMIT = '326217a2c654fa6d4f7ba4f93efa9143807d1b63';
+const DOCS_COMMIT = '2742a7bb150bc732bf38a4a3f09613dbd998b1e4';
 const DOCS_TREE = 'https://github.com/synchronic1/AIPSTER/blob/' + DOCS_COMMIT + '/local-worker/';
 const WORKER_LINKS = {
   quickstart: DOCS_TREE + 'README.md',
