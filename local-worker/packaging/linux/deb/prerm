@@ -1,0 +1,8 @@
+#!/bin/sh
+# AIPSTER Worker prerm: the worker is per-user (each user's tray owns its
+# own data dir), so there is nothing safe for a root script to stop here.
+# Before uninstalling, stop the tray from its own window or terminal
+# (`aipster-tray quit`); a still-running tray keeps serving from already
+# opened files until it quits, and its data dir is always preserved.
+set -e
+exit 0

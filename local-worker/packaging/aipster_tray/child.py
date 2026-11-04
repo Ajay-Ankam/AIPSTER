@@ -62,10 +62,14 @@ class RotatingLog:
 
 
 def dendrite_exe(bundle):
-    direct = Path(bundle) / ("dendrite.exe" if os.name == "nt" else "dendrite")
+    # Linux ships the CLI as aipster-dendrite: a frozen exe named `dendrite`
+    # would shadow the bundled `dendrite/` package directory and break every
+    # `dendrite.*` submodule import (the .exe suffix saves Windows here).
+    exe_name = "dendrite.exe" if os.name == "nt" else "aipster-dendrite"
+    direct = Path(bundle) / exe_name
     if direct.exists():
         return str(direct)
-    found = shutil.which("dendrite")
+    found = shutil.which(exe_name)
     if found:
         return found
     raise SystemExit("aipster-tray: dendrite executable not found next to the tray app")
@@ -325,8 +329,9 @@ def sender_argv(bundle, data_dir):
     if worker_exe.exists():
         # Frozen bundle, or a dev checkout beside a built bundle: same entry.
         return [str(worker_exe), "sender", "--data-dir", str(data_dir)]
-    # Source checkout: the launcher module in this same tree.
-    launcher = Path(__file__).resolve().parent.parent / "windows" / "launcher.py"
+    # Source checkout: the platform launcher module in this same tree.
+    platform_dir = "windows" if os.name == "nt" else "linux"
+    launcher = Path(__file__).resolve().parent.parent / platform_dir / "launcher.py"
     return [sys.executable, str(launcher), "sender", "--data-dir", str(data_dir)]
 
 

@@ -125,12 +125,24 @@ class Controller:
             return str(exc)
 
     def child_env(self):
-        system32 = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32")
-        env = {"SYSTEMROOT": os.environ.get("SYSTEMROOT", r"C:\Windows"),
-               "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
-               "COMSPEC": os.environ.get("COMSPEC", system32 + r"\cmd.exe"),
-               "TEMP": os.environ.get("TEMP", ""), "TMP": os.environ.get("TMP", ""),
-               "PATH": system32, self.token_env: self.token_value}
+        if os.name == "nt":
+            system32 = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32")
+            env = {"SYSTEMROOT": os.environ.get("SYSTEMROOT", r"C:\Windows"),
+                   "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
+                   "COMSPEC": os.environ.get("COMSPEC", system32 + r"\cmd.exe"),
+                   "TEMP": os.environ.get("TEMP", ""), "TMP": os.environ.get("TMP", ""),
+                   "PATH": system32, self.token_env: self.token_value}
+            return {k: v for k, v in env.items() if v}
+        # POSIX (Linux): minimal login-like environment. The daemon child is
+        # a local server; it needs PATH for its own lookups, HOME for
+        # per-user caches, and the configured API token. Nothing else is
+        # inherited, and secrets other than the token never pass through.
+        env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+               self.token_env: self.token_value}
+        if os.environ.get("HOME"):
+            env["HOME"] = os.environ["HOME"]
+        if os.environ.get("LANG"):
+            env["LANG"] = os.environ["LANG"]
         return {k: v for k, v in env.items() if v}
 
     # -- state ---------------------------------------------------------------
@@ -265,7 +277,8 @@ class Controller:
             return (str(exe), ["pair"])
         if getattr(sys, "frozen", False):
             return None
-        launcher = Path(__file__).resolve().parent.parent / "windows" / "launcher.py"
+        platform_dir = "windows" if os.name == "nt" else "linux"
+        launcher = Path(__file__).resolve().parent.parent / platform_dir / "launcher.py"
         if launcher.exists():
             return (sys.executable, [str(launcher), "pair"])
         return None

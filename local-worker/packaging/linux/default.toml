@@ -1,0 +1,27 @@
+# AIPSTER Worker default configuration (written on first run; safe to edit).
+# FIRST-RUN STATUS: this default selects the mock engine only, which is an
+# explicit test/demo option — first run reports "setup required" until a real
+# configured runtime is selected. Supported: native ik_llama (managed, with a
+# real GGUF model file you install yourself) or llama_cpp (managed/attach).
+# Nothing is downloaded, started, or enrolled automatically; select a runtime
+# by editing this file. Lab harnesses may elect the mock demo explicitly
+# per launch with AIPSTER_WORKER_MOCK_DEMO=1 (labeled test/demo, never silent).
+# Simulation only: the mock engine answers locally. No model downloads, no
+# cloud connection, no sharing. Pairing: mint a code in the dashboard
+# (My Compute, Pair this computer), then use the tray window Pair button
+# (or run `aipster-worker pair` in a terminal).
+[node]
+id = "standalone-demo"
+host = "127.0.0.1"
+port = 8090
+state_dir = "state"
+
+[[runtimes]]
+id = "mock"
+kind = "mock"
+gpu_layers = 0
+
+[[models]]
+id = "mock-summary"
+runtime = "mock"
+capabilities = ["summarize"]

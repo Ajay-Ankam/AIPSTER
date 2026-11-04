@@ -1,0 +1,23 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Source: https://github.com/synchronic1/AIPSTER
+
+Files: *
+Copyright: AIPSTER contributors
+License: Apache-2.0
+ The full license text is shipped in
+ /usr/share/doc/aipster-worker/AIPSTER-APACHE-LICENSE.txt
+ (repository root LICENSE).
+
+Files: usr/lib/aipster-worker/app/licenses/DENDRITE-*
+Copyright: public Dendrite/EIF contributors (see vendored NOTICE)
+License: Apache-2.0
+
+Files: usr/lib/aipster-worker/app/licenses/python/*
+Comment: third-party Python dependency licenses collected from the
+ frozen build environment's dist-info metadata at build time.
+ See usr/lib/aipster-worker/app/licenses/DEPENDENCIES.json for the
+ pinned dependency record.
+
+Files: usr/lib/aipster-worker/app/licenses/PYINSTALLER-BOOTLOADER-NOTE.txt
+Comment: PyInstaller is GPL-2.0-or-later WITH a bootloader exception that
+ permits frozen applications under any license; the note ships verbatim.

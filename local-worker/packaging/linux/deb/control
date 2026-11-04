@@ -1,0 +1,16 @@
+Package: aipster-worker
+Version: @VERSION@
+Architecture: amd64
+Maintainer: AIPSTER
+Section: utils
+Priority: optional
+Depends: @DEPENDS@
+Description: AIPSTER local worker (tray + console launcher)
+ Ships the reviewed standalone worker as a per-user desktop program:
+ a status window with Start/Stop/Connect/Pair/Settings, a foreground
+ server on loopback, and the account-pairing sender. First run creates
+ the private data directory ~/.local/share/aipster-worker (config,
+ API token, pairing, state, logs); uninstall and upgrade preserve it.
+ .
+ Simulation only by default: the bundled engine answers locally, nothing
+ is shared until you pair this computer with your AIPSTER account.
