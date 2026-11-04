@@ -15,12 +15,16 @@ const R99 = h('3');
 const R104 = h('4');
 const ALLOW = h('5');
 const UNREL = h('6');
+const OLD88 = '0d'.repeat(20);
+const R98 = '9d'.repeat(20);
 const M83 = h('a');
 const M97 = h('b');
 const M99 = h('c');
 const M104 = h('d');
 const MALLOW = h('9');
 const MUNREL = h('8');
+const M88 = 'b8'.repeat(20);
+const M98 = 'c8'.repeat(20);
 const TOUCHES = [h('7'), h('0'), 'ab'.repeat(20)];
 const DIGEST = 'c0ffee'.padEnd(64, '0');
 const ID = 'RELEASE158-8bcd4c7';
@@ -32,7 +36,10 @@ const REGISTRY = '.github/release-holds.json';
 const entry = (over = {}) => ({liveSha: LIVE, registryTouches: [...TOUCHES],
   supersededHeads: [{pr: 83, head: OLD83, merge: M83,
     repairedBy: [{pr: 97, head: R97}, {pr: 99, head: R99}, {pr: 104, head: R104}],
-    reason: 'Old head had two fail-open defects and no picker; repaired in-range.'}],
+    reason: 'Old head had two fail-open defects and no picker; repaired in-range.'},
+  {pr: 88, head: OLD88, merge: M88,
+    repairedBy: [{pr: 98, head: R98}],
+    reason: 'Old head had dark-CSS self-cycles and overflows; repaired in-range by PR 98.'}],
   decision: 'Peter: historical release of the 8bcd4c7..target range only.',
   approvedBy: 'synchronic1', ...over});
 const allowances = (over) => parseAllowancesFile({version: 1, allowances: {[ID]: entry(over)}});
@@ -59,7 +66,9 @@ const installer = (sha) => ({id: 12, name: 'Build and qualify Windows installer'
 function prTable(over = {}) {
   const t = {
     83: {head: OLD83, merge: M83, reviews: [], files: ['website/public/app/app.js']},
+    88: {head: OLD88, merge: M88, reviews: [], files: ['website/public/app/styles.css']},
     97: {head: R97, merge: M97, reviews: [review(R97, evidenceBody(R97))], files: ['website/public/a.js']},
+    98: {head: R98, merge: M98, reviews: [review(R98, evidenceBody(R98))], files: ['website/public/app/styles.css']},
     99: {head: R99, merge: M99, reviews: [review(R99, evidenceBody(R99))], files: ['website/public/b.js']},
     104: {head: R104, merge: M104, reviews: [review(R104, evidenceBody(R104))], files: ['website/public/c.js']},
     150: {head: ALLOW, merge: MALLOW,
@@ -69,7 +78,7 @@ function prTable(over = {}) {
   return {...t, ...over};
 }
 
-function harness({table = prTable(), order = [MALLOW, M104, M99, M97, M83],
+function harness({table = prTable(), order = [MALLOW, M104, M99, M98, M97, M88, M83],
   touches = TOUCHES, changed = ['website/public/x.html', REGISTRY], headBlob = 'blob1',
   targetBlob = 'blob1', headChecks = null, suitesFor = null} = {}) {
   const byMerge = Object.fromEntries(Object.entries(table).map(([n, p]) => [p.merge, {n: Number(n), ...p}]));
@@ -121,7 +130,7 @@ test('default off: no allowance keeps both original refusals', async () => {
   // No allowance entry names this head, so nothing is deferred: the
   // original, unchanged per-PR refusal is thrown immediately.
   await assert.rejects(run(harness()), /^AssertionError \[ERR_ASSERTION\]: No independent review evidence bound to the current head$/);
-  const noOld = harness({table: (() => { const t = prTable(); t[83].reviews = [review(OLD83, evidenceBody(OLD83))]; return t; })()});
+  const noOld = harness({table: (() => { const t = prTable(); t[83].reviews = [review(OLD83, evidenceBody(OLD83))]; t[88].reviews = [review(OLD88, evidenceBody(OLD88))]; return t; })()});
   await assert.rejects(run(noOld), /touches the hold registry .*no allowance pinned to this live SHA/);
 });
 
@@ -129,19 +138,44 @@ test('intended historical chain releases and is fully recorded', async () => {
   const out = await run(harness(), {allowances: allowances(), allowanceDigest: DIGEST});
   assert.equal(out.ok, true);
   assert.deepEqual(out.historicalAllowances.map((u) => Object.keys(u).sort()),
-    [['allowance', 'registryTouches'], ['allowance', 'supersededHead']]);
-  assert.equal(out.historicalAllowances[1].supersededHead.pr, 83);
+    [['allowance', 'registryTouches'], ['allowance', 'supersededHead'], ['allowance', 'supersededHead']]);
+  assert.deepEqual(out.historicalAllowances.slice(1).map((u) => u.supersededHead.pr).sort(), [83, 88]);
   assert.equal(out.prs.find((p) => p.number === 83).evidence, 0, 'old head is never called PASS');
+  assert.equal(out.prs.find((p) => p.number === 88).evidence, 0, 'old head is never called PASS');
 });
 
 test('wrong or missing repair head refuses', async () => {
   const wrong = allowances({supersededHeads: [{...entry().supersededHeads[0],
-    repairedBy: [{pr: 97, head: h('2').replace(/2$/, '3')}, {pr: 99, head: R99}, {pr: 104, head: R104}]}]});
+    repairedBy: [{pr: 97, head: h('2').replace(/2$/, '3')}, {pr: 99, head: R99}, {pr: 104, head: R104}]},
+    entry().supersededHeads[1]]});
   await assert.rejects(run(harness(), {allowances: wrong, allowanceDigest: DIGEST}),
     /repair PR 97 head .* is not merged in this range/);
   // Repair PR absent from the range.
-  await assert.rejects(run(harness({order: [MALLOW, M104, M97, M83]}),
+  await assert.rejects(run(harness({order: [MALLOW, M104, M98, M97, M88, M83]}),
     {allowances: allowances(), allowanceDigest: DIGEST}), /repair PR 99 head/);
+});
+
+test('PR88 wrong or missing repair head refuses', async () => {
+  const wrong = allowances({supersededHeads: [...entry().supersededHeads.slice(0, 1),
+    {...entry().supersededHeads[1], repairedBy: [{pr: 98, head: R98.replace(/d$/, 'e')}]}]});
+  await assert.rejects(run(harness(), {allowances: wrong, allowanceDigest: DIGEST}),
+    /repair PR 98 head .* is not merged in this range/);
+  // Repair PR absent from the range (PR98 merge missing, PR88 chain unsatisfied).
+  await assert.rejects(run(harness({order: [MALLOW, M104, M99, M97, M88, M83]}),
+    {allowances: allowances(), allowanceDigest: DIGEST}), /repair PR 98 head/);
+});
+
+test('PR88 repair without its own evidence refuses (no transitive pass)', async () => {
+  const t = prTable(); t[98].reviews = [];
+  await assert.rejects(run(harness({table: t}), {allowances: allowances(), allowanceDigest: DIGEST}),
+    /PR 98 head|No independent review evidence/);
+});
+
+test('PR88 keeps its blocking-review requirement', async () => {
+  const blocked = prTable({88: {...prTable()[88], reviews: [review(OLD88, 'Needs fix.',
+    {state: 'CHANGES_REQUESTED'})]}});
+  await assert.rejects(run(harness({table: blocked}), {allowances: allowances(), allowanceDigest: DIGEST}),
+    /PR 88 has unresolved/);
 });
 
 test('repair head without its own evidence refuses (no transitive pass)', async () => {
@@ -193,11 +227,11 @@ test('an additional registry touch refuses', async () => {
 
 test('unrelated PR still needs its own evidence and CI', async () => {
   const t = prTable({160: {head: UNREL, merge: MUNREL, reviews: [], files: ['website/public/z.js']}});
-  await assert.rejects(run(harness({table: t, order: [MUNREL, MALLOW, M104, M99, M97, M83]}),
+  await assert.rejects(run(harness({table: t, order: [MUNREL, MALLOW, M104, M99, M98, M97, M88, M83]}),
     {allowances: allowances(), allowanceDigest: DIGEST}), /No independent review evidence/);
   const t2 = prTable({160: {head: UNREL, merge: MUNREL, reviews: [review(UNREL, evidenceBody(UNREL))],
     files: ['website/public/z.js']}});
-  await assert.rejects(run(harness({table: t2, order: [MUNREL, MALLOW, M104, M99, M97, M83],
+  await assert.rejects(run(harness({table: t2, order: [MUNREL, MALLOW, M104, M99, M98, M97, M88, M83],
     headChecks: (sha) => (sha === UNREL ? [] : [site(sha)])}),
   {allowances: allowances(), allowanceDigest: DIGEST}), /PR 160 head lacks a passing/);
 });
