@@ -267,6 +267,15 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
   }
 
   const clock = () => Number(now());
+  // Cross-owner (fabric) execution requires BOTH deployment flags: the
+  // inference routes gate on INFERENCE_ENABLED, and this store refuses every
+  // fabric authority unless FEDERATION_ENABLED is exactly '1' (mirrors
+  // fabric/router.mjs federationEnabled). Owner and app-grant paths are
+  // unaffected. Read per call so a flag flip takes effect on in-flight work.
+  const federationOn = () => !!env && env.FEDERATION_ENABLED === '1';
+  // Only an explicit 'internal' route consent authorizes live execution;
+  // the historical 'fixture' route is control-plane-only consent.
+  const EXECUTION_ROUTE = 'internal';
 
   async function opRow(op_id) {
     return first(db, 'SELECT * FROM dispatch_operations WHERE op_id = ?', op_id);
@@ -307,6 +316,8 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
   // in-flight work withholds its result; version/incarnation/binding drift
   // reads as 'authority_changed'. Spend is never touched here.
   async function fabricAuthorityProblem(op, binding, authority) {
+    // Federation switched off: every fabric authority reads as lost access.
+    if (!federationOn()) return 'revoked';
     if (typeof authority.grant_revision !== 'number' || typeof authority.incarnation !== 'string') {
       return 'authority_changed';
     }
@@ -342,6 +353,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
     }
     if (typeof authority.grant_id === 'string' && authority.grant_id.startsWith(FABRIC_GRANT_PREFIX)
       && authority.grant_id.length > FABRIC_GRANT_PREFIX.length) {
+      if (!federationOn()) return { sql: '0', binds: [] };
       return {
         sql: `EXISTS (
           SELECT 1 FROM fabric_grants g
@@ -349,6 +361,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
           JOIN resources r ON r.id = ?
           JOIN fabric_nodes n ON n.id = g.recipient_node
           WHERE g.id = ? AND g.status = 'enforced' AND g.quarantine_reason IS NULL
+            AND g.route = 'internal'
             AND c.state = 'active' AND r.owner_id = g.exporter_id
             AND g.version = ? AND r.incarnation = ?
             AND n.owner_id = ? AND n.workspace = g.recipient_workspace
@@ -402,6 +415,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       // The coordinator pins peer_node/peer_workspace from issuance; for
       // fabric grants the peer is the *recipient* (importer side), not the
       // resource node/owner as in the app/owner paths below.
+      let grantExpiryMs = Infinity;
       let peerNode = resource.node_id || resource.id;
       let peerWorkspace = resource.owner_id;
       if (grantId === null) {
@@ -439,6 +453,10 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
         grant_id = grantId;
         revision = live.grant.version;
         pool_id = `${GRANT_POOL_PREFIX}${grantId}`;
+        // The admission (and so the job deadline, lease window and result
+        // intake, which all sit at or before it) never outlives the
+        // consented time window.
+        grantExpiryMs = Date.parse(live.grant.expiry);
         peerNode = live.grant.recipient_node;
         peerWorkspace = live.grant.recipient_workspace;
       } else {
@@ -459,7 +477,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       }
 
       const admission_ref = rid16('adm_');
-      const expires_at = t + ADMISSION_TTL_MS;
+      const expires_at = Math.min(t + ADMISSION_TTL_MS, grantExpiryMs);
       const runtime = runtime_id;
       const pools = [{ pool_id, amount: max_tokens }];
       const cap = admissionLimit(env);
@@ -549,9 +567,11 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
   // and the coordinator's live re-verification below.
   async function fabricGrantLive({ grant_id, principal_id, resource_id } = {}) {
     if (!isStr(grant_id) || !isStr(principal_id) || !isStr(resource_id)) return null;
+    if (!federationOn()) return null;
     const g = await first(db, 'SELECT * FROM fabric_grants WHERE id = ?', grant_id);
     if (!g || g.status !== 'enforced'
       || (g.quarantine_reason !== undefined && g.quarantine_reason !== null)) return null;
+    if (g.route !== EXECUTION_ROUTE) return null;
     const conn = await first(db, 'SELECT id, state FROM connections WHERE id = ?', g.connection_id);
     if (!conn || conn.state !== 'active') return null;
     const r = await first(db, 'SELECT id, owner_id, incarnation FROM resources WHERE id = ?', resource_id);
@@ -598,7 +618,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       recipientNode: g.recipient_node, recipientWorkspace: g.recipient_workspace,
       consumers, resourceId: r.id, incarnation: r.incarnation,
       actions, models, notBefore: g.created_at, expiry: g.expiry,
-      ceilings, route: INFERENCE_ROUTE,
+      ceilings, route: g.route,
     };
   }
   async function readGrant({ grant_id, principal_id, resource_id } = {}) {

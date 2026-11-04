@@ -35,7 +35,7 @@ async function consent(t) {
   })).body.id;
   const prev = (await core.createPreview(t.DB, alice(), {
     connectionId: conn, resourceIds: [RES], consumers: ['u_bob'],
-    models: ['llama'], maxTokens: 1000, maxRequests: 10,
+    models: ['llama'], maxTokens: 1000, maxRequests: 10, route: 'internal',
   })).body;
   const appr = (await core.requestApproval(t.DB, alice(), { previewId: prev.id })).body;
   assert.equal((await core.decideApproval(t.DB, alice(), appr.id, { decision: 'approve' })).status, 200);
@@ -47,7 +47,7 @@ async function consent(t) {
 async function setup(t) {
   const tEnv = t ?? (await fabricEnv());
   const c = await consent(tEnv);
-  const store = createD1DispatchStore(tEnv.DB, { now: () => Date.now(), env: {} });
+  const store = createD1DispatchStore(tEnv.DB, { now: () => Date.now(), env: { FEDERATION_ENABLED: '1' } });
   return { t: tEnv, store, ...c };
 }
 const read = (s, principal, resource = RES) =>

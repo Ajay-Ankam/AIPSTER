@@ -313,7 +313,10 @@ export function createFabricOpenAIRoute({
     } catch {
       return uncertain('lookup', 'AUTHORITY_UNAVAILABLE');
     }
-    if (isObj(recorded)) {
+    // Reconcile against a RECORDED operation (replay, or the loser of a
+    // concurrent first-request race on the same key). Never mints new
+    // admissions, placement or spend; a changed payload stays a conflict.
+    const replayRecorded = async (recorded) => {
       const storedRef = isObj(recorded.binding) && typeof recorded.binding.admission_ref === 'string'
         ? recorded.binding.admission_ref : null;
       let admission = null;
@@ -380,8 +383,8 @@ export function createFabricOpenAIRoute({
           admissionRef: admission.admission_ref, deadline_at, out });
       }
       return mapDispatchResult(out);
-    }
-
+    };
+    if (isObj(recorded)) return replayRecorded(recorded);
     // New operation: strict readiness selection FIRST, so unadvertised models
     // never reach issueAdmission (the owner issuance path does not validate
     // model residency; this layer is the residency gate).
@@ -438,6 +441,24 @@ export function createFabricOpenAIRoute({
     const out = await coordinator.submit(ctx, dispatchBody);
     if (isObj(out) && out.status === 'settled') {
       return mapSettled({ store, principal, opKey, admissionRef: admission.admission_ref, out });
+    }
+    if (isObj(out) && out.status === 'rejected' && out.code === 'IDEMPOTENCY_CONFLICT') {
+      // Concurrent first requests on one key: the lookup above saw nothing,
+      // both minted an admission, and the other request's claim won. Re-read
+      // the durable operation and reconcile against IT (its admission and
+      // deadline); only a digest-equal payload reconciles, a changed one
+      // keeps the conflict. This request's unclaimed admission carries no
+      // hold or spend and ages out at its TTL.
+      let raced = null;
+      try {
+        raced = await store.getOperation({ op_key: opKey });
+      } catch {
+        raced = null;
+      }
+      if (isObj(raced) && isObj(raced.binding) && raced.binding.admission_ref !== admission.admission_ref) {
+        return replayRecorded(raced);
+      }
+      return mapDispatchResult(out);
     }
     if (!isObj(out) || out.status !== 'dispatched') return mapDispatchResult(out);
     return pollToTerminal({ store, principal, coordinator, ctx, key, opKey,

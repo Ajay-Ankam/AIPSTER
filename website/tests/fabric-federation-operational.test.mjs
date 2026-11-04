@@ -35,7 +35,7 @@ async function setup({ grant = true } = {}) {
   const t = await fabricEnv();
   t.env.INFERENCE_ENABLED = '1';
   const pair = await connectPair(t);
-  const flow = grant ? await commitFlow(t, pair.conn.id, [RES], ['u_bob']) : null;
+  const flow = grant ? await commitFlow(t, pair.conn.id, [RES], ['u_bob'], { route: 'internal' }) : null;
   const hb = await heartbeatKey(t, t.alice, RES);
   const bobKey = await userKey(t, t.bob, 'inference');
   return { t, pair, grantId: flow && flow.grant.id, hb, bobKey };

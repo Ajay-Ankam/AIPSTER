@@ -53,8 +53,10 @@ async function connectPair(t) {
   return { nodeA: regA.json, nodeB: regB.json, conn: acc.json };
 }
 
-async function commitFlow(t, connId, resourceIds = ['r_gpu1'], consumers = ['bob-op']) {
-  const prev = await readJson(await t.call('/v1/fabric/previews', { method: 'POST', headers: S(t, t.alice, { 'Idempotency-Key': freshKey() }), body: { connectionId: connId, resourceIds, consumers, models: ['llama'], maxTokens: 1000, maxRequests: 10 } }));
+// route: omit for the historical fixture-route (consent-only) preview; pass
+// 'internal' for explicit live-execution consent (CLAUDE135).
+async function commitFlow(t, connId, resourceIds = ['r_gpu1'], consumers = ['bob-op'], { route } = {}) {
+  const prev = await readJson(await t.call('/v1/fabric/previews', { method: 'POST', headers: S(t, t.alice, { 'Idempotency-Key': freshKey() }), body: { connectionId: connId, resourceIds, consumers, models: ['llama'], maxTokens: 1000, maxRequests: 10, ...(route === undefined ? {} : { route }) } }));
   assert.equal(prev.status, 201);
   const appr = await readJson(await t.call('/v1/fabric/approvals', { method: 'POST', headers: S(t, t.alice, { 'Idempotency-Key': freshKey() }), body: { previewId: prev.json.id } }));
   assert.equal(appr.status, 201);

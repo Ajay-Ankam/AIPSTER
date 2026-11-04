@@ -602,7 +602,23 @@ const PREVIEW_TTL_MS = 30 * 60e3;
 function buildConfirmation(terms) {
   const models = new Set();
   for (const s of terms.snapshot || []) for (const m of s.models || []) models.add(m);
-  return `Share ${(terms.snapshot || []).length} resource(s) with ${terms.importerNode} for ${(terms.consumers || []).length} consumer(s), models ${[...models].join(', ')}, up to ${terms.ceilings.maxTokens} tokens / ${terms.ceilings.maxRequests} requests, until ${terms.expiry}. ${(terms.exclusions || []).length} owned resource(s) excluded. Connection only carries inference; nothing else is shared.`;
+  return `Share ${(terms.snapshot || []).length} resource(s) with ${terms.importerNode} for ${(terms.consumers || []).length} consumer(s), models ${[...models].join(', ')}, up to ${terms.ceilings.maxTokens} tokens / ${terms.ceilings.maxRequests} requests, until ${terms.expiry}. ${(terms.exclusions || []).length} owned resource(s) excluded. Connection only carries inference; nothing else is shared.${terms.route === 'internal'
+    ? ' Route: live inference executes on the shared resource through AIPSTER-managed workers; results return to the consumer.'
+    : ''}`;
+}
+
+// Execution route consent. 'fixture' (the historical default) is
+// control-plane-only consent and authorizes no live execution; 'internal'
+// is the explicit exporter consent that live inference may run on the
+// shared resource through AIPSTER's internal worker route. Anything else
+// is refused, never coerced.
+const GRANT_ROUTES = new Set(['fixture', 'internal']);
+function routeOf(input) {
+  if (input.route === undefined) return 'fixture';
+  if (typeof input.route !== 'string' || !GRANT_ROUTES.has(input.route)) {
+    throw err(400, 'BAD_ROUTE', 'route must be "fixture" (no execution) or "internal" (live inference).');
+  }
+  return input.route;
 }
 
 export async function createPreview(db, actor, input = {}, op = null) {
@@ -634,6 +650,7 @@ export async function createPreview(db, actor, input = {}, op = null) {
   const ceilings = { maxTokens: Math.min(Math.max(Number(input.maxTokens) || 0, 1), 1e9), maxRequests: Math.min(Math.max(Number(input.maxRequests) || 0, 1), 1e6) };
   if (!(Number(input.maxTokens) > 0) || !(Number(input.maxRequests) > 0)) throw err(400, 'BAD_CEILINGS', 'Positive maxTokens and maxRequests are required.');
   const days = Math.min(Math.max(Number(input.validDays) || 7, 1), 30);
+  const route = routeOf(input);
   const owned = await all(db, 'SELECT id, imported_from FROM resources WHERE owner_id = ?', actor.user.id);
   const exclusions = owned.filter((r) => !resourceIds.includes(r.id)).slice(0, 200)
     .map((r) => ({ resourceId: r.id, reason: r.imported_from ? 'not owner-controlled' : 'not selected' }));
@@ -641,7 +658,7 @@ export async function createPreview(db, actor, input = {}, op = null) {
   const preview = {
     encodingVersion: 'aipster-jcs-0', connectionId: conn.id, exporterNode, importerNode,
     importerWorkspace: importer ? importer.workspace : '', snapshot, consumers, actions: ['infer'],
-    route: 'fixture', retention: 'outputs-pinned-7d', ceilings,
+    route, retention: 'outputs-pinned-7d', ceilings,
     notBefore: now, expiry: new Date(Date.now() + days * 86400e3).toISOString(), exclusions, capturedAt: now
   };
   const digest = await digestJson(preview);
@@ -1029,6 +1046,11 @@ export async function reviseGrant(db, actor, id, input = {}, op = null) {
   if (terms.connectionId !== grant.connection_id || terms.importerNode !== grant.recipient_node || terms.importerWorkspace !== grant.recipient_workspace) {
     throw err(422, 'PREVIEW_MISMATCH', 'This preview names a different connection or recipient.');
   }
+  // A revision never changes the consented execution route (the stored
+  // route is not rewritten by revise): a route change needs a new grant.
+  if ((terms.route || 'fixture') !== (grant.route || 'fixture')) {
+    throw err(422, 'PREVIEW_MISMATCH', 'This preview names a different execution route; commit a new grant instead.');
+  }
   const conn = await first(db, 'SELECT * FROM connections WHERE id = ?', grant.connection_id);
   if (!conn || conn.state !== 'active') throw err(409, 'CONNECTION_DOWN', 'Connection is not active.');
   // Scope: the approval must have been issued for this connection.
@@ -1368,7 +1390,7 @@ export async function authorizationPreview(db, actor, input = {}) {
     action: String(input.action || 'infer'), model: String(input.model || ''),
     peerNode: node.id, peerWorkspace: node.workspace,
     consumer: String(input.consumer || actor.user.id),
-    maxTokens: Number(input.maxTokens) || 0, route: 'fixture', at: nowIso()
+    maxTokens: Number(input.maxTokens) || 0, route: input.route === 'internal' ? 'internal' : 'fixture', at: nowIso()
   };
   // Live identity gate (fail-closed): the grant snapshot authorizes a
   // specific resource incarnation. If the authoritative row is gone or its
