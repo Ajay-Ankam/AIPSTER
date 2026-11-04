@@ -4,9 +4,10 @@
 
 - Base: `0de5103b078a223546ab422ef16a73436ea39cdb` (upstream `main`)
 - Branch: `muse/ubuntu-desktop-20261104` (sole writer; isolated checkout)
-- Candidate code commit: `55919ede842113abea8fd5272c3aeb51ab1dbad4`
-  (probe-vs-acquire race fix; this handoff ships in a follow-up commit
-  on the same branch; supersedes `9e3be30`)
+- Candidate code commit: `e406e187cc6750d27a685e1eced90b0d5e4b025f`
+  (canonical Ai icon, window identity, clipboard, endpoint policy;
+  this handoff ships in a follow-up commit on the same branch;
+  supersedes `55919ed` which superseded `9e3be30`)
 
 ## Scope delivered
 
@@ -68,8 +69,8 @@ Two Linux-only facts the reviewer must know:
 ## Reproducible artifact
 
 - `local-worker/packaging/linux/dist/aipster-worker_0.1.0-1_amd64.deb`
-  (22,018,310 bytes)
-- `sha256 d8a4e5cc46e1bf966b1d0f09ae39ae80b1949c68a6bbae49ed0271f6b2de2830`
+  (22,030,010 bytes)
+- `sha256 6648f71be89c06b67d2b646c12af021d53374fa89e9588c4ece154c2b8095d92`
 - `manifest.json` + `SHA256SUMS` alongside; locks:
   `requirements.lock`, `build-requirements.lock`,
   `packaging/linux/installer-build.lock`; CPython 3.12.14 via uv,
@@ -166,16 +167,46 @@ a second sender there (the production heartbeat unit owns that lock).
 ## Installed verification (coordinator, system install)
 
 - Coordinator installed this exact artifact with `sudo dpkg -i` at
-  18:13:55Z: install ok, version 0.1.0-1, SHA256 `d8a4e5cc…2de2830`
-  as above.
+  18:33:28Z: install ok, version 0.1.0-1, SHA256 `6648f71b…8095d92`
+  as above. (An earlier install of the superseded `d8a4e5cc…` build at
+  18:13:55Z verified start/stop/restart, healthz, and clean quit.)
 - Installed `/usr/bin/aipster-tray` verified under an isolated Xvfb
   with temp data: native window attached, mock worker healthz ok, live
   status running, quit delivered rc 0 and launcher exit 0 at 18:14Z.
+  Coordinator is verifying the fresh window on the actual XFCE display
+  with isolated data, then closes only the verification window; the
+  existing live tray (PID 1564395) is preserved.
 - Existing heartbeat unit unchanged: MainPID 1536738 active,
   NRestarts 0; production pairing/sender state untouched.
 - Real inference remains unproven by design: the bundled engine is
   simulated, `/api/jobs` stays disabled, and heartbeats prove
   reachability only — never inference readiness.
+
+## Desktop UI delta (this candidate)
+
+Peter's three installed-UI reports, fixed and rebuilt:
+- Applications icon is the canonical Ai letterform (dashboard
+  `website/public/favicon.svg`, copper on green), Chromium-rendered to
+  hicolor PNGs + byte-identical scalable SVG; provenance (source hash,
+  tool, commands, output hashes) in
+  `packaging/linux/icons/PROVENANCE.txt`. Renders match the reviewer's
+  independent chromium oracle within edge-AA noise.
+- Running window has an icon (`iconphoto` from the bundled Ai PNG,
+  `_NET_WM_ICON` confirmed) and a pinned identity: Tk
+  `className`/`appname` give `WM_CLASS "aipster-worker",
+  "Aipster-worker"` (xprop-verified), matching the desktop entry's
+  `StartupWMClass=Aipster-worker`.
+- Copy uses the native Tk clipboard (no xclip/xsel needed). With no
+  verified public fabric endpoint in the tree (fabric OpenAI route
+  unmerged, production disabled), copy stays disabled in the window and
+  indicator menus with the note "Fabric endpoint unavailable. No
+  OpenAI-compatible fabric address is configured yet." The local
+  serving address is never shown or copied as an endpoint. All labels
+  wrap within a minimum window width (fixes the 270px clipping).
+- Evidence: 48 unit tests OK; BackendLinuxTests 7/7 + DebTemplate 13/13
+  under isolated Xvfb (icon 64x64, WM_CLASS, clipboard round-trip, copy
+  disabled + note); rebuild frozen Tk smoke OK; no fabric-owner
+  confirmation is claimed (coordinator owns the fabric contract).
 
 ## Verdict: READY-for-demo (installed verification completed)
 
