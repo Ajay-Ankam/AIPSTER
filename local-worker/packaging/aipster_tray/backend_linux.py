@@ -290,6 +290,10 @@ class LinuxWindowBackend(LinuxBaseBackend):
             self.root = None
             return
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
+        # Initial render: prepare() already set STOPPED before this backend
+        # attached, and with no auto-start (no elected demo runtime) no state
+        # transition follows — without this the window stays blank gray.
+        self.refresh_current()
         self.log("backend=linux-window attached")
 
     def _build(self):

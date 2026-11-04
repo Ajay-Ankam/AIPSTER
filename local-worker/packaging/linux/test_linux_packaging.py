@@ -665,6 +665,30 @@ class DebTemplateTests(unittest.TestCase):
             finally:
                 backend.detach()
 
+    def test_window_renders_on_attach_without_state_change(self):
+        # First-run regression: a fresh store with no elected runtime stays
+        # STOPPED with no transition after attach, so attach itself must
+        # render once — otherwise the window is blank gray.
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            self.skipTest("needs an isolated display (run under xvfb-run)")
+        backend = backend_linux.LinuxWindowBackend(lambda m: None)
+        ctl = FakeController(Path("/tmp/does-not-matter"))
+        ctl.state = state.STOPPED
+        ctl.detail = "setup required: mock runtime is a test/demo option only"
+        ctl.pairing = {"key": state.PAIR_UNPAIRED, "line": state.UNPAIRED_LINE,
+                       "sender": "Sender: stopped"}
+        try:
+            backend.attach(ctl)
+            if backend.root is None:
+                self.skipTest("display unavailable to tkinter")
+            self.assertEqual(backend.widgets["header"].cget("text"),
+                             f"AIPSTER Worker — {state.STATE_TEXT[state.STOPPED]}")
+            self.assertIn("start", backend.widgets["action_buttons"])
+            self.assertEqual(backend.widgets["endpoint_note"].cget("text"),
+                             backend_linux.ENDPOINT_UNAVAILABLE_NOTE)
+        finally:
+            backend.detach()
+
     def test_window_clipboard_roundtrip(self):
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
             self.skipTest("needs an isolated display (run under xvfb-run)")
