@@ -448,16 +448,17 @@ async function loadOverview() {
 // pairing / reachable); it never claims an unverified state.
 // Immutable pins for setup. Worker source is the current main merge
 // (reviewed via PR process, hosted CI green): it supersedes the mock-era
-// 3fa309c pin because only it contains the real-runner contract (runtime
-// planner, engine discovery, model identity, real configs). Docs is the
-// staged docs commit on top of it whose README/CHANGELOG describe this same
-// real-first flow; worker and docs pins are compatible but not required to
-// be equal. Both pins are immutable; advertised links are verified after
-// publication before merge/release. Native execution remains unqualified on
-// every OS; run verify_vendor.py after checkout and move either pin only
-// with a re-verified re-pin.
-const WORKER_COMMIT = '6af33d4a76765b47f9bed1a14c73d36e5aace592';
-const DOCS_COMMIT = '33a4b838dec2de70d288d732a5d6c3bcb24f0bec';
+// 3fa309c pin (no real-runner contract) and the 6af33d4 pin (presence-only
+// usable, attach never eligible) because it contains the real-runner
+// contract plus merged authenticated /v1/node readiness for managed and
+// attach models (PR107). Docs is the staged docs commit on top of it whose
+// README/CHANGELOG describe this same real-first flow; worker and docs pins
+// are compatible but not required to be equal. Both pins are immutable;
+// advertised links are verified after publication before merge/release.
+// Native execution remains unqualified on every OS; run verify_vendor.py
+// after checkout and move either pin only with a re-verified re-pin.
+const WORKER_COMMIT = '6483c2f379795beec188d3cda2641b3c891e2098';
+const DOCS_COMMIT = '1a2d12f93bf6c39c8249e9daf45c52a2df9985f1';
 const DOCS_TREE = 'https://github.com/synchronic1/AIPSTER/blob/' + DOCS_COMMIT + '/local-worker/';
 const WORKER_LINKS = {
   quickstart: DOCS_TREE + 'README.md',
@@ -704,8 +705,8 @@ function agentSetupPacket(os, setup) {
     '  true: a non-GGUF file exits 0 with cached_on_disk false and stops the setup;',
     '  an unreadable file exits nonzero.',
     '- Preflight the plan: run "' + py + ' runtime_setup.py --config config.toml" until',
-    '  it reports ready (exit 0). "setup-required" lists the exact actions; do them',
-    '  yourself and re-run. The planner never downloads, installs, starts, or',
+    '  it reports ready (exit 0). "setup-required" (exit 2) lists the exact actions;',
+    '  do them yourself and re-run. The planner never downloads, installs, starts, or',
     '  enrolls anything. Inspect availability without loading a model: ' + exe + ' inspect --config config.toml.',
     '',
     'Step 6 - start the real worker and verify (no simulation):',
@@ -754,12 +755,15 @@ function agentSetupPacket(os, setup) {
     '  does not start a sender.',
     '- Then explicitly start reachability heartbeats with:',
     '  ' + pairing[1],
-    '- Heartbeat usability at this pin is file-and-PATH presence only: usable is true',
-    '  only when a configured non-mock runtime has a model file with GGUF magic on',
-    '  disk and its executable on PATH (attach mode always reports false); it never',
-    '  contacts the running worker, model, or engine, so it is not readiness. The',
-    '  mock always reports usable=false and is opt-in only. Report the status row',
-    '  as-is and never relabel it. Choose Done or reopen My Compute to load the paired',
+    '- Heartbeat usability at this pin is verified readiness, not file presence:',
+    '  usable is true only when the running worker proves it over its own',
+    '  authenticated loopback /v1/node — managed: model file with GGUF magic on',
+    '  disk, executable on PATH, and the worker reports the model available and',
+    '  not simulated on a live managed runtime (cold counts; loading is transient);',
+    '  attach: the worker reports your exact configured model resident on a ready',
+    '  attach runtime. Worker down or restarting, a non-loopback listener, a',
+    '  missing token, or any mock config always reports false, so report the status',
+    '  row as-is and never relabel it. Choose Done or reopen My Compute to load the paired',
     '  resource; a heartbeat proves reachability only, never inference readiness.',
     ...packagedPair,
     '',
@@ -973,7 +977,7 @@ function paintConnectCard() {
 <p class="muted">The worker is published as source, pinned to the reviewed revision, which includes the <a href="${esc(L.securityFix)}">local-token and Host/Origin guards (#17)</a>. See the <a href="${esc(L.changelog)}">install changelog</a> for dated pin history.</p>
 <h3>Connect</h3>
 <p>Mint a one-time pairing code in Manual repair below (10-minute expiry, single use). In a second terminal in the same <code>local-worker</code> directory, run <code>${esc(pairingCommands[0])}</code> and type the code locally. Pairing contacts AIPSTER, registers this computer automatically and stores a private heartbeat key. Do not paste the code or key into an agent chat.</p>
-<p>Pairing does not start the sender. In that terminal, run <code>${esc(pairingCommands[1])}</code> to post reachability heartbeats. The heartbeat <code>usable</code> bit at this pin is file-and-PATH presence only, not readiness; the mock stays <code>usable=false</code>. No inference is enabled. Keep this sender terminal open. See the <a href="${esc(L.pairing)}">pairing and sender details</a>.</p>
+<p>Pairing does not start the sender. In that terminal, run <code>${esc(pairingCommands[1])}</code> to post reachability heartbeats. The heartbeat <code>usable</code> bit at this pin is verified readiness from the running worker (see Step 7); the mock stays <code>usable=false</code>. No inference is enabled. Keep this sender terminal open. See the <a href="${esc(L.pairing)}">pairing and sender details</a>.</p>
 <p>Status: <strong>not linked until paired</strong>. Choose Done or reopen My Compute after pairing to load the resource below. Heartbeats prove reachability only, never readiness. Manual entry stays under <strong>Advanced: manual resource registration</strong>. See the <a href="${esc(L.heartbeat)}">heartbeat intake</a> and the <a href="${esc(L.gaps)}">execution gaps</a>.</p>
     ${packagedPairPara}
 <p class="muted">If the key is revoked or expires, the sender exits asking for a re-pair with a fresh code.</p>

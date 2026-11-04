@@ -19,10 +19,10 @@ import { checkPublic } from '../scripts/check.mjs';
 
 const PUBLIC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 // Reviewed pairing client retaining the #17 local-token and Host/Origin guards.
-const WORKER_COMMIT = '6af33d4a76765b47f9bed1a14c73d36e5aace592';
+const WORKER_COMMIT = '6483c2f379795beec188d3cda2641b3c891e2098';
 // Staged docs commit (local, unpublished): README/CHANGELOG describe the same
 // real-first flow and install WORKER_COMMIT (see pin-consistency.test.mjs).
-const DOCS_COMMIT = '33a4b838dec2de70d288d732a5d6c3bcb24f0bec';
+const DOCS_COMMIT = '1a2d12f93bf6c39c8249e9daf45c52a2df9985f1';
 const TREE = `https://github.com/synchronic1/AIPSTER/blob/${DOCS_COMMIT}/local-worker/`;
 const EXPECTED_LINKS = [
   `${TREE}README.md`,
@@ -390,6 +390,7 @@ test('one action mints and copies the code-bearing setup packet once', async () 
     'do not start a duplicate sender', 'not a fabric route', 'never relabel it',
     'where.exe llama-server', 'pairing.py serve-jobs --once', 'GET /v1/node',
     'compare fingerprint only, never content_digest',
+    'verified readiness, not file presence', 'cold counts; loading is transient',
     'a heartbeat proves reachability only, never inference readiness', 'A running worker is NOT proof of inference readiness',
     'Remove only local-worker/.venv', 'There is no automatic update']) {
     assert.ok(flat.includes(phrase), `missing: ${phrase}`);
