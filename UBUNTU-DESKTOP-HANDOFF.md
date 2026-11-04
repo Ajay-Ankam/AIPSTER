@@ -166,17 +166,18 @@ a second sender there (the production heartbeat unit owns that lock).
 ## Installed verification (coordinator, system install)
 
 - Coordinator installed this exact artifact with `sudo dpkg -i` at
-  18:33:28Z: install ok, version 0.1.0-1, SHA256 `6648f71b…8095d92`
-  as above. (An earlier install of the superseded `d8a4e5cc…` build at
-  18:13:55Z verified start/stop/restart, healthz, and clean quit.)
-- Installed `/usr/bin/aipster-tray` verified under an isolated Xvfb
-  with temp data: native window attached, mock worker healthz ok, live
-  status running, quit delivered rc 0 and launcher exit 0 at 18:14Z.
-  Coordinator is verifying the fresh window on the actual XFCE display
-  with isolated data, then closes only the verification window; the
-  existing live tray (PID 1564395) is preserved.
+  18:38:15Z: install ok, version 0.1.0-1, SHA256 `1b526277…cf38593202`
+  as above. (Earlier installs of superseded builds verified
+  start/stop/restart, healthz, and clean quit.)
+- Fresh temp-data app verified on the actual XFCE display :10:
+  header/buttons readable, fabric-unavailable note legible, Copy
+  disabled; screenshot `/tmp/aipster-ui-verify-hsgc9a7_/window.png`
+  visually inspected by coordinator. `WM_CLASS aipster-worker,
+  Aipster-worker` and 64px `_NET_WM_ICON` present. Quit only the temp
+  window, rc 0. The existing live tray (PID 1564395) is preserved.
 - Existing heartbeat unit unchanged: MainPID 1536738 active,
-  NRestarts 0; production pairing/sender state untouched.
+  NRestarts 0; production pairing/sender state untouched. Zero service
+  restarts.
 - Real inference remains unproven by design: the bundled engine is
   simulated, `/api/jobs` stays disabled, and heartbeats prove
   reachability only — never inference readiness.
