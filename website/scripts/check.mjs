@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {parse} from 'parse5';
 
-export const publicFiles=['404.html','_headers','admin/admin.js','admin/index.html','admin/styles.css','app/app.js','app/experiments/dsh-dgm/admin-gate.mjs','app/experiments/dsh-dgm/dsh-dgm.js','app/experiments/dsh-dgm/fixtures/work-items.mjs','app/experiments/dsh-dgm/index.html','app/experiments/dsh-dgm/site.css','app/experiments/dsh-dgm/src/adapter.mjs','app/experiments/dsh-dgm/src/canonical.mjs','app/experiments/dsh-dgm/src/checks.mjs','app/experiments/dsh-dgm/src/contract.mjs','app/experiments/dsh-dgm/src/demo.mjs','app/experiments/dsh-dgm/src/evaluate.mjs','app/experiments/dsh-dgm/src/measure.mjs','app/experiments/dsh-dgm/src/selection.mjs','app/experiments/dsh-dgm/src/view.mjs','app/experiments/dsh-dgm/styles.css','app/experiments/inference-demo/app.js','app/experiments/inference-demo/contract.mjs','app/experiments/inference-demo/index.html','app/experiments/inference-demo/styles.css','app/icon.svg','app/index.html','app/styles.css','assets/AIPSTER-model-LoRA-drilldown.png','assets/AIPSTER-model-LoRA-drilldown.svg','assets/IRB-DGM-JEV-component-flow.png','assets/IRB-DGM-JEV-component-flow.svg','assets/aipster-intro-v0-2-poster.jpg','assets/aipster-intro-v0-2.mp4','assets/aipster-intro-v0-2.vtt','assets/aipster-wordmark.svg','assets/aipster-wordmark-on-dark.svg','assets/progress-log-20261026.png','assets/progress-wordmark-d.png','assets/sponsors/baseten.svg','assets/sponsors/heurchain.svg','assets/sponsors/kainotomic.svg','assets/sponsors/meta.svg','assets/sponsors/modal.svg','assets/social-preview.png','assets/social-preview.svg','favicon.svg','index.html','release.json','styles.css'].sort();
+export const publicFiles=['404.html','_headers','admin/admin.js','admin/index.html','admin/styles.css','app/app.js','app/background166.css','app/background166.js','app/experiments/dsh-dgm/admin-gate.mjs','app/experiments/dsh-dgm/dsh-dgm.js','app/experiments/dsh-dgm/fixtures/work-items.mjs','app/experiments/dsh-dgm/index.html','app/experiments/dsh-dgm/site.css','app/experiments/dsh-dgm/src/adapter.mjs','app/experiments/dsh-dgm/src/canonical.mjs','app/experiments/dsh-dgm/src/checks.mjs','app/experiments/dsh-dgm/src/contract.mjs','app/experiments/dsh-dgm/src/demo.mjs','app/experiments/dsh-dgm/src/evaluate.mjs','app/experiments/dsh-dgm/src/measure.mjs','app/experiments/dsh-dgm/src/selection.mjs','app/experiments/dsh-dgm/src/view.mjs','app/experiments/dsh-dgm/styles.css','app/experiments/inference-demo/app.js','app/experiments/inference-demo/contract.mjs','app/experiments/inference-demo/index.html','app/experiments/inference-demo/styles.css','app/icon.svg','app/index.html','app/styles.css','assets/AIPSTER-model-LoRA-drilldown.png','assets/AIPSTER-model-LoRA-drilldown.svg','assets/IRB-DGM-JEV-component-flow.png','assets/IRB-DGM-JEV-component-flow.svg','assets/aipster-intro-v0-2-poster.jpg','assets/aipster-intro-v0-2.mp4','assets/aipster-intro-v0-2.vtt','assets/aipster-wordmark.svg','assets/aipster-wordmark-on-dark.svg','assets/progress-log-20261026.png','assets/progress-wordmark-d.png','assets/sponsors/baseten.svg','assets/sponsors/heurchain.svg','assets/sponsors/kainotomic.svg','assets/sponsors/meta.svg','assets/sponsors/modal.svg','assets/social-preview.png','assets/social-preview.svg','favicon.svg','index.html','release.json','styles.css'].sort();
 
 export const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 async function files(root,dir=root){const result=[];for(const entry of await readdir(dir,{withFileTypes:true})){assert(!entry.isSymbolicLink(),'Symlinks are outside the public upload policy');const path=resolve(dir,entry.name);if(entry.isDirectory())result.push(...await files(root,path));else{assert(entry.isFile(),'Unexpected asset type');result.push(relative(root,path).replaceAll('\\','/'));}}return result.sort();}
@@ -66,6 +66,12 @@ function checkCss(text, path, ids = new Set()) {
 // authority of its own, and keep every API call server-authorized.
 const APPROVED_PANEL_SCRIPTS = new Map([['app/index.html', '/app/app.js'], ['admin/index.html', '/admin/admin.js'], ['app/experiments/dsh-dgm/index.html', '/app/experiments/dsh-dgm/dsh-dgm.js'], ['app/experiments/inference-demo/index.html', '/app/experiments/inference-demo/app.js']]);
 
+// BACKGROUND166: the signed-in control panel alone may load one extra
+// decorative script after its approved entry. It carries no authority of its
+// own: no fetch, no storage, no API calls, only a self-contained canvas.
+// Any other second script, or a second script on any other shell, still fails.
+const APPROVED_EXTRA_SCRIPTS = new Map([['app/index.html', ['/app/background166.js']]]);
+
 function checkMarkup(text, path) {
   const errors = [];
   // The approved diagram export includes this inert XML declaration. Other
@@ -118,12 +124,16 @@ function checkMarkup(text, path) {
       // The inference-demo shell alone loads an ES-module entry, so it alone
       // carries exactly `src` + `type="module"` in that order; every other
       // panel keeps the single-attribute rule with identical behavior.
+      // BACKGROUND166: app/index.html alone may additionally load the
+      // approved decorative background script right after its entry.
       const approved = APPROVED_PANEL_SCRIPTS.get(path);
+      const extras = APPROVED_EXTRA_SCRIPTS.get(path) || [];
+      const expectedSrc = scripts === 0 ? approved : extras[scripts - 1];
       const moduleShape = path === 'app/experiments/inference-demo/index.html'
         && attrs.length === 2 && attrs[0].name === 'src' && attrs[0].value === approved
         && attrs[1].name === 'type' && attrs[1].value === 'module';
       const classicShape = path !== 'app/experiments/inference-demo/index.html'
-        && attrs.length === 1 && attrs[0].name === 'src' && attrs[0].value === approved;
+        && attrs.length === 1 && attrs[0].name === 'src' && attrs[0].value === expectedSrc;
       assert(approved && node.namespaceURI === 'http://www.w3.org/1999/xhtml'
         && (moduleShape || classicShape)
         && (node.childNodes || []).every(child => child.nodeName === '#text' && !child.value.trim()),
@@ -139,7 +149,7 @@ function checkMarkup(text, path) {
       }
     }
   }
-  if (APPROVED_PANEL_SCRIPTS.has(path)) assert.equal(scripts, 1, 'A panel shell must load exactly its approved script');
+  if (APPROVED_PANEL_SCRIPTS.has(path)) assert.equal(scripts, 1 + (APPROVED_EXTRA_SCRIPTS.get(path) || []).length, 'A panel shell must load exactly its approved script');
 }
 
 export async function checkPublic(root){
