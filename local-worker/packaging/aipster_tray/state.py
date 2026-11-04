@@ -23,7 +23,9 @@ STATES = (STOPPED, STARTING, RUNNING, PORT_BUSY, ERROR)
 STATE_TEXT = {
     STOPPED: "Stopped",
     STARTING: "Starting…",
-    RUNNING: "Running locally (simulated engine)",
+    # Engine-neutral: the tray only runs a real configured runtime unless the
+    # mock engine was explicitly elected, which state_text() labels below.
+    RUNNING: "Running locally",
     PORT_BUSY: "Port busy",
     ERROR: "Error",
 }
@@ -56,6 +58,23 @@ UNPAIRED_LINE = "Not paired — mint a code in My Compute, then Pair this comput
 
 FORBIDDEN_STATUS_WORDS = ("connected", "inference ready", "inference-ready", "online", "live")
 
+SIMULATED_SUFFIX = " (simulated engine, test/demo)"
+# firstrun.runtime_note() prefix for an explicitly elected mock engine.
+SIMULATED_NOTE_PREFIX = "test/demo:"
+
+
+def simulated(detail):
+    """True when the RUNNING detail says the mock engine was elected."""
+    return str(detail or "").startswith(SIMULATED_NOTE_PREFIX)
+
+
+def state_text(state, detail=""):
+    """Honest state text. RUNNING says "simulated" only for the elected mock."""
+    text = STATE_TEXT[state]
+    if state == RUNNING and simulated(detail):
+        text += SIMULATED_SUFFIX
+    return text
+
 
 def check_honest(text):
     """Refuse any status wording that overclaims. Raises ValueError."""
@@ -70,7 +89,7 @@ def header_line(state, detail=""):
     # Only our template is gated: dynamic details (ports, exit codes, config
     # errors) are data under an honest header, not status claims, so a model
     # or hostname containing "live" must never break the menu.
-    text = check_honest(STATE_TEXT[state])
+    text = check_honest(state_text(state, detail))
     if detail and state in (PORT_BUSY, ERROR):
         text += f" — {detail}"
     return text
@@ -166,7 +185,7 @@ def menu_model(state, endpoint="", detail="", pairing=None):
     overlay = pairing or {"key": PAIR_UNPAIRED, "line": UNPAIRED_LINE,
                           "sender": "Sender: stopped"}
     items = [
-        {"kind": "text", "label": f"AIPSTER Worker — {STATE_TEXT[state]}"},
+        {"kind": "text", "label": f"AIPSTER Worker — {state_text(state, detail)}"},
     ]
     if endpoint and state in (STARTING, RUNNING):
         items.append({"kind": "text", "label": endpoint})
@@ -198,7 +217,7 @@ def menu_model(state, endpoint="", detail="", pairing=None):
 def balloon_for(event, state="", detail=""):
     """(title, body) notification text for a controller event."""
     if event == "reuse":
-        return ("AIPSTER Worker", f"Already running — {check_honest(STATE_TEXT[state])}")
+        return ("AIPSTER Worker", f"Already running — {check_honest(state_text(state, detail))}")
     if event == "restarted":
         return ("AIPSTER Worker", "Worker process restarted after a crash.")
     if event == "giveup":
@@ -211,7 +230,7 @@ def balloon_for(event, state="", detail=""):
                                   "Pairing stays available either way "
                                   "(it needs no local port).")
     if event == "started":
-        return ("AIPSTER Worker", "Worker running locally (simulated engine).")
+        return ("AIPSTER Worker", f"Worker {state_text(RUNNING, detail).lower()}.")
     if event == "stopped":
         return ("AIPSTER Worker", "Worker stopped.")
     if event == "paired":
@@ -226,7 +245,8 @@ def balloon_for(event, state="", detail=""):
 
 # Fail fast (import time) if any shipped template overclaims. Menu headers embed
 # STATE_TEXT verbatim, so gating the values covers the menu too.
-for _text in list(STATE_TEXT.values()) + [UNPAIRED_LINE]:
+for _text in (list(STATE_TEXT.values()) + [UNPAIRED_LINE]
+              + [state_text(RUNNING, SIMULATED_NOTE_PREFIX + " sample")]):
     check_honest(_text)
 for _event, _state in (("reuse", RUNNING), ("restarted", STARTING), ("giveup", ERROR),
                        ("port_busy", PORT_BUSY), ("started", RUNNING), ("stopped", STOPPED),

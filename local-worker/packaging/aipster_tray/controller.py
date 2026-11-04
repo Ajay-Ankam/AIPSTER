@@ -383,7 +383,7 @@ class Controller:
                 self._classify_exit(code)
             elif self.loaded and _health_ok(self.loaded.node.host, self.loaded.node.port):
                 self.set_state(st.RUNNING, runtime_note(self.loaded))
-                self.backend.notify("started", st.RUNNING)
+                self.backend.notify("started", st.RUNNING, self.detail)
             elif now >= (self.health_deadline or now):
                 self.log("worker did not become healthy in time")
                 self.intentional_stop = True
