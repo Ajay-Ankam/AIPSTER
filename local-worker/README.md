@@ -25,8 +25,8 @@ From PowerShell in a fresh directory (these commands match the tested Windows x6
 git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
 cd AIPSTER
 git sparse-checkout set --no-cone /local-worker/ /LICENSE
-git fetch origin 3fa309cb08461ea046ee23e801404911c1f3bcc2
-git checkout --detach 3fa309cb08461ea046ee23e801404911c1f3bcc2
+git fetch origin 6af33d4a76765b47f9bed1a14c73d36e5aace592
+git checkout --detach 6af33d4a76765b47f9bed1a14c73d36e5aace592
 cd local-worker
 uv run --no-project --python 3.12.14 python install.py
 .\.venv\Scripts\dendrite.exe inspect --config configs/mock.toml
@@ -71,15 +71,15 @@ anything else changed, back it up and use a fresh clone instead.
 
 1. Stop the running `heartbeat-loop` sender terminal with Ctrl+C. Old senders
    hold no lock, so confirm only one sender runs afterwards.
-2. Fetch the reviewed revision (current pin `3fa309c`):
+2. Fetch the reviewed revision (current pin `6af33d4`):
 ```powershell
-git fetch origin 3fa309cb08461ea046ee23e801404911c1f3bcc2
+git fetch origin 6af33d4a76765b47f9bed1a14c73d36e5aace592
 ```
 3. Hash-gate the overlay: the LF-normalized local `pairing.py` must equal the
    reviewed blob:
 ```powershell
 $blob = .\local-worker\.venv\Scripts\python.exe -c "import hashlib,pathlib;b=pathlib.Path('local-worker/pairing.py').read_bytes().replace(b'\r\n',b'\n');print(hashlib.sha1(b'blob '+str(len(b)).encode()+b'\x00'+b).hexdigest())"
-$want = git rev-parse 3fa309cb08461ea046ee23e801404911c1f3bcc2:local-worker/pairing.py
+$want = git rev-parse 6af33d4a76765b47f9bed1a14c73d36e5aace592:local-worker/pairing.py
 if ($blob.Trim() -ne $want.Trim()) { Write-Output 'STOP: pairing.py does not match the reviewed overlay; use a fresh clone instead' }
 ```
    If it prints STOP, do not continue; use a fresh clone.
@@ -89,7 +89,7 @@ git checkout -- local-worker/pairing.py
 ```
 5. Move to the reviewed revision:
 ```powershell
-git checkout --detach 3fa309cb08461ea046ee23e801404911c1f3bcc2
+git checkout --detach 6af33d4a76765b47f9bed1a14c73d36e5aace592
 ```
 6. Keep `.venv` and do not rerun `install.py`: there are no lock or vendor
    changes between `f3e115e` and `3fa309c`.
@@ -362,9 +362,13 @@ owner may stop or switch it. A genuine end-to-end run needs the token, a residen
 model this worker owns (or explicit consent for a shared attachment) and the
 operator's authorization to run inference.
 
-## Optional real engine preparation (not needed for the mock check)
+## Real engine preparation (resident reuse preferred)
 
-The worker does not contain llama-server. The separately obtained native source
+Prefer reusing a resident loopback engine: point `serve-jobs` at it with
+`--upstream-url` (or read its `GET /v1/models` identity for attach mode with
+`mode = "attach"` and that exact `upstream_model`). Build from source only if
+no resident engine exists. The worker does not contain llama-server. The
+separately obtained native source
 pin is `ikawrakow/ik_llama.cpp` commit
 `3bb386eb68ffee0a5dc7db21da0735d594929eeb`. Its root license is MIT, with ggml,
 llama.cpp and ik_llama.cpp authors credited; dependencies retain their notices.
@@ -416,22 +420,33 @@ latest: on any pin mismatch, stop and report instead of adapting silently.
 git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
 cd AIPSTER
 git sparse-checkout set --no-cone /local-worker/ /LICENSE
-git fetch origin 3fa309cb08461ea046ee23e801404911c1f3bcc2
-git checkout --detach 3fa309cb08461ea046ee23e801404911c1f3bcc2
+git fetch origin 6af33d4a76765b47f9bed1a14c73d36e5aace592
+git checkout --detach 6af33d4a76765b47f9bed1a14c73d36e5aace592
 cd local-worker
 uv run --no-project --python 3.12.14 python install.py
 .venv/bin/python test_installation.py
 export DENDRITE_API_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-.venv/bin/dendrite serve --config configs/mock.toml
+cp configs/cpu.toml config.toml
+# edit config.toml yourself: set the [[models]] path to your operator-provided GGUF file
+.venv/bin/python model_identity.py <your-model.gguf>
+.venv/bin/python runtime_setup.py --config config.toml
+.venv/bin/dendrite serve --config config.toml
 ```
 
-Mock expectations: health ok, node identity present, execution output marked
-`simulated: true` with `usable: false`. A running worker, a completed
-pairing, a green heartbeat, and a reachable dashboard status prove
-reachability only — never GPU readiness and never fabric dispatch; dispatch
-stays disabled. Pairing and uninstall follow the generated prompt's steps
-(private no-echo code entry, one sender, heartbeat loop for reachability,
-`unpair` plus key revocation to disconnect, remove only `.venv`/`.state`).
+Real-path expectations: `runtime_setup.py --config config.toml` must report
+ready (exit 0) before serving; health ok, the models list includes your
+configured model id, and the reported identity matches the
+model_identity.py row. A running worker, a completed pairing, a green
+heartbeat, and a reachable dashboard status prove reachability only —
+never GPU readiness and never fabric dispatch; dispatch stays disabled and
+no fabric endpoint is configured (loopback is local-only, not a fabric
+route). Read usable=false literally and never relabel it ready. If a sender
+is already serving, reuse it; do not start a duplicate. Mock serve
+(`AIPSTER_WORKER_MOCK_DEMO=1` with `configs/mock.toml`, expecting
+simulated=true, usable=false) is explicit demo/diagnostic opt-in only.
+Pairing and uninstall follow the generated prompt's steps (private no-echo
+code entry, one sender, heartbeat loop for reachability, `unpair` plus key
+revocation to disconnect, remove only `.venv`/`.state`).
 
 ## Stop, uninstall and troubleshoot
 

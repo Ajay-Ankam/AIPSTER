@@ -1,5 +1,32 @@
 # local-worker install changelog
 
+## 2026-11-04 — Real setup path on all OS prompts; worker pin moves to 6af33d4
+
+- Worker pin moves to `6af33d4a76765b47f9bed1a14c73d36e5aace592` (published
+  main merge, PR-reviewed, hosted CI green): the only reviewed revision
+  carrying the real-runner contract (`runtime_setup.py`, `runtime_discovery.py`,
+  `model_identity.py`, `configs/cpu.toml`). It supersedes the mock-era
+  `3fa309c` pin, which predates those files. The docs pin is the commit
+  carrying this entry; worker and docs pins are compatible but not required
+  to be equal.
+- Website setup packets (Windows/macOS/Linux) now install and configure a
+  REAL worker (resident engine + operator-provided model, planned with
+  `runtime_setup.py --config config.toml`, served with `config.toml`).
+  Mock serve is explicit demo/diagnostic opt-in only
+  (`AIPSTER_WORKER_MOCK_DEMO=1` with `configs/mock.toml`); a self-test or a
+  green connection is never a qualification claim.
+- Packet honesty additions: reuse an already-running sender instead of a
+  duplicate; usable=false is read literally and never relabeled; no fabric
+  endpoint is configured (loopback is local-only, not a fabric route).
+- README quickstart, update overlay (including the `pairing.py` hash gate),
+  and Linux notes now install the new pin, so the linked docs no longer name
+  the old `3fa309c` checkout. The engine section is renamed to "Real engine
+  preparation (resident reuse preferred)" with a reuse-before-build pointer.
+- Status: real setup is unqualified natively on every OS. Windows x64 mock
+  remains the only tested installation. Screenshot evidence (paired node
+  with heartbeat OK, usable=False, simulated engine, no fabric address;
+  host unconfirmed) confirms a green connection is reachability only.
+
 ## 2026-11-04 — Linux notes (unqualified adaptation)
 
 - Added `README.md` "Linux notes (unqualified adaptation)": x64 bash
