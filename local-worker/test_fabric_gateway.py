@@ -217,10 +217,11 @@ class LifecycleTests(GatewayBase):
         threading.Thread(target=other.serve_forever, daemon=True).start()
         self.addCleanup(other.server_close)
         self.addCleanup(other.shutdown)
+        before = proxy.FabricOpenAIProxyHandler.fabric_origin
         a = self.gateway()
         b = self.gateway(fabric_origin="http://127.0.0.1:%d" % other.server_port)
         self.assertNotEqual(a.start()["fabric_origin"], b.start()["fabric_origin"])
-        self.assertIsNone(proxy.FabricOpenAIProxyHandler.fabric_origin)  # base class untouched
+        self.assertEqual(proxy.FabricOpenAIProxyHandler.fabric_origin, before)  # base class untouched
 
 
 class EndpointContractTests(GatewayBase):
