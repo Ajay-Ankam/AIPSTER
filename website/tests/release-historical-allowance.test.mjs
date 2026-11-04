@@ -128,8 +128,9 @@ const run = (input, over = {}) => evaluateDeployGate({...input, ...over});
 
 test('default off: no allowance keeps both original refusals', async () => {
   // No allowance entry names this head, so nothing is deferred: the
-  // original, unchanged per-PR refusal is thrown immediately.
-  await assert.rejects(run(harness()), /^AssertionError \[ERR_ASSERTION\]: No independent review evidence bound to the current head$/);
+  // original per-PR refusal is thrown immediately, naming the refused head.
+  await assert.rejects(run(harness()), /No independent review evidence bound to the current head/);
+  await assert.rejects(run(harness()), /PR 88 head .*No independent review evidence/);
   const noOld = harness({table: (() => { const t = prTable(); t[83].reviews = [review(OLD83, evidenceBody(OLD83))]; t[88].reviews = [review(OLD88, evidenceBody(OLD88))]; return t; })()});
   await assert.rejects(run(noOld), /touches the hold registry .*no allowance pinned to this live SHA/);
 });

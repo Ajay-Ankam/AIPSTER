@@ -182,7 +182,10 @@ export async function evaluateDeployGate({git, request, fetchChecks,
         evidence = bindEvidence({pr, reviews, permissions});
       } catch (err) {
         const hit = supersededEntry(pr, sha);
-        if (!hit) throw err;
+        // Name the refused PR/head: the raw bind error alone (as seen in
+        // run 41898734744) leaves the blocker unidentified. Behavior
+        // unchanged — still throws for non-superseded heads.
+        if (!hit) throw new Error(`PR ${pr.number} head ${pr.headSha}: ${err && err.message || err}`);
         deferred.push({number: pr.number, head: pr.headSha, merge: sha, ...hit,
           evidenceError: String(err && err.message || err)});
         evidence = [];
