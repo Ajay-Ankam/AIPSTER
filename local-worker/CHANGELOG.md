@@ -18,10 +18,19 @@
 - Packet honesty additions: reuse an already-running sender instead of a
   duplicate; usable=false is read literally and never relabeled; no fabric
   endpoint is configured (loopback is local-only, not a fabric route).
-- README quickstart, update overlay (including the `pairing.py` hash gate),
-  and Linux notes now install the new pin, so the linked docs no longer name
-  the old `3fa309c` checkout. The engine section is renamed to "Real engine
-  preparation (resident reuse preferred)" with a reuse-before-build pointer.
+- README quickstart, Linux notes, and engine section now name the new pin
+  (the engine section is renamed to "Real engine preparation (resident reuse
+  preferred)" with a reuse-before-build pointer), so the linked docs no longer
+  present the old `3fa309c` checkout as current. The update overlay moves the
+  checkout and re-gates `pairing.py`, but additionally requires removing
+  `.venv` and rerunning `install.py`: the vendored `dendrite` package changed
+  between the pins and is installed non-editable, so a kept `.venv` would run
+  the old code under the new checkout.
+- Managed runtimes stay cold (`resident` false) until an explicit
+  user-approved `POST /v1/models/load`; attach mode must show resident true.
+  Existing mock-era installs migrate with identity kept: stop the old sender
+  in its own terminal, restart one sender on the real `config.toml`, never
+  kill or duplicate it.
 - Status: real setup is unqualified natively on every OS. Windows x64 mock
   remains the only tested installation. Screenshot evidence (paired node
   with heartbeat OK, usable=False, simulated engine, no fabric address;

@@ -19,7 +19,7 @@ using the appropriate official release for your OS. Ensure `uv --version` report
 0.12.12. Obtain Python 3.12.14 using `uv python install 3.12.14` if needed.
 Python and uv are prerequisites; they are not bundled.
 
-From PowerShell in a fresh directory (these commands match the tested Windows x64 setup):
+From PowerShell in a fresh directory (historical tested Windows x64 mock check — the tested-installation record, not the current setup; the current real-first setup follows the generated setup prompt with `config.toml` in place of the mock config below):
 
 ```powershell
 git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
@@ -91,9 +91,15 @@ git checkout -- local-worker/pairing.py
 ```powershell
 git checkout --detach 6af33d4a76765b47f9bed1a14c73d36e5aace592
 ```
-6. Keep `.venv` and do not rerun `install.py`: there are no lock or vendor
-   changes between `f3e115e` and `3fa309c`.
-7. Restart one `heartbeat-loop` sender from `local-worker`. Pairing state
+6. Do NOT keep `.venv`: the vendored `dendrite` package changed between
+   `3fa309c` and `6af33d4`, and `install.py` installs `vendor/eif`
+   non-editable into `.venv` while refusing an existing `.venv`. Remove
+   `local-worker/.venv` and rerun `install.py` (quickstart step) so the
+   installed package matches the new checkout.
+7. Restart one `heartbeat-loop` sender from `local-worker` on your real
+   `config.toml` (see the migration note in the generated setup prompt:
+   keep the pairing identity, stop the old sender in its own terminal with
+   Ctrl+C, never kill it, never run a duplicate). Pairing state
    lives in `%LOCALAPPDATA%\AIPSTER-Worker` and survives the update.
 
 ## Pairing with AIPSTER
@@ -113,8 +119,10 @@ stores a sender key privately. It exits without starting the sender. Explicitly
 start it in that terminal, next to the daemon's `serve` terminal:
 
 ```powershell
-.\.venv\Scripts\python.exe pairing.py heartbeat-loop --config configs/mock.toml
+.\.venv\Scripts\python.exe pairing.py heartbeat-loop --config config.toml
 ```
+
+(The mock-era flow used `configs/mock.toml`; use your real `config.toml`.)
 
 Mock always reports `usable=false`. Heartbeats prove reachability only, never
 inference readiness; `/api/jobs` remains disabled. Choose Done or reopen My
@@ -434,19 +442,29 @@ cp configs/cpu.toml config.toml
 ```
 
 Real-path expectations: `runtime_setup.py --config config.toml` must report
-ready (exit 0) before serving; health ok, the models list includes your
-configured model id, and the reported identity matches the
-model_identity.py row. A running worker, a completed pairing, a green
-heartbeat, and a reachable dashboard status prove reachability only —
+ready (exit 0; exit 2 means setup-required actions remain, exit 1 means
+config-error) before serving. `GET /healthz` is an unauthenticated liveness
+probe (status ok, no identity); authenticated `GET /v1/node` must show your
+configured model id with available true and simulated false, and the entry
+fingerprint must equal the `model_identity.py` row fingerprint (compare
+fingerprint only, never content_digest). A managed runtime stays cold
+(resident false) until an explicit user-approved `POST /v1/models/load`;
+attach mode must show resident true. A running worker, a completed pairing,
+a green heartbeat, and a reachable dashboard status prove reachability only —
 never GPU readiness and never fabric dispatch; dispatch stays disabled and
 no fabric endpoint is configured (loopback is local-only, not a fabric
-route). Read usable=false literally and never relabel it ready. If a sender
-is already serving, reuse it; do not start a duplicate. Mock serve
-(`AIPSTER_WORKER_MOCK_DEMO=1` with `configs/mock.toml`, expecting
-simulated=true, usable=false) is explicit demo/diagnostic opt-in only.
-Pairing and uninstall follow the generated prompt's steps (private no-echo
-code entry, one sender, heartbeat loop for reachability, `unpair` plus key
-revocation to disconnect, remove only `.venv`/`.state`).
+route). The heartbeat usable bit at this pin is file-and-PATH presence only,
+not readiness; attach mode always reports false. If a sender is already
+serving, reuse it; do not start a duplicate. Prefer a resident loopback
+engine where one exists (generated prompt Step 1): bind it as the consumer
+upstream or attach runtime; after pairing, `pairing.py serve-jobs --once`
+runs one bounded dark poll cycle. Mock serve (explicitly typing
+`configs/mock.toml` yourself — nothing auto-selects it; expecting
+simulated=true, usable=false) is explicit demo/diagnostic opt-in only. The
+`AIPSTER_WORKER_MOCK_DEMO=1` variable is honored by the planner and tray,
+not by serve itself. Pairing and uninstall follow the generated prompt's steps
+(private no-echo code entry, one sender, heartbeat loop for reachability,
+`unpair` plus key revocation to disconnect, remove only `.venv`/`.state`).
 
 ## Stop, uninstall and troubleshoot
 
