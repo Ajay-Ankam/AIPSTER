@@ -128,15 +128,37 @@ test('worker applicability follows the cumulative changed paths', () => {
   assert.equal(isWorkerApplicable([]), false);
   assert.equal(isWorkerApplicable(undefined), false);
 });
-test('worker path patterns mirror the workflow trigger filters exactly', async () => {
+test('worker path patterns mirror the PR trigger filters; main push runs unfiltered', async () => {
   const {readFile} = await import('node:fs/promises');
   const yml = await readFile(new URL('../../.github/workflows/local-worker-checks.yml', import.meta.url), 'utf8');
-  const sections = yml.split(/^  (?:pull_request|push):/m).slice(1);
-  assert.equal(sections.length, 2);
-  for (const section of sections) {
-    const paths = [...section.matchAll(/^ {6}- '([^']+)'/gm)].map(m => m[1]);
-    assert.deepEqual(paths, WORKER_PATH_PATTERNS);
-  }
+  const onBlock = yml.slice(yml.search(/^on:$/m), yml.search(/^permissions:/m));
+  const sectionOf = (name) => {
+    const parts = onBlock.split(new RegExp(`^  ${name}:`, 'm'));
+    assert.equal(parts.length, 2, `workflow must declare exactly one ${name} trigger`);
+    return parts[1].split(/^  \w[\w-]*:/m)[0];
+  };
+  const prPaths = [...sectionOf('pull_request').matchAll(/^ {6}- '([^']+)'/gm)].map(m => m[1]);
+  assert.deepEqual(prPaths, WORKER_PATH_PATTERNS);
+  const push = sectionOf('push');
+  assert(push.includes('branches: [main]'), 'unfiltered push stays scoped to main');
+  assert(!/^\s*paths:/m.test(push), 'main push must run worker checks unfiltered');
+});
+test('registry-only or docs-only target still needs worker CI after worker changes', () => {
+  // The 0de5103 case: the pushed files alone look unrelated, but the gate
+  // evaluates the cumulative live-to-target range. A hold-registry or
+  // docs-only push following worker changes is worker-applicable, so the
+  // target must carry its own mock-install result (supplied by the
+  // unfiltered main push trigger, asserted structurally above).
+  assert.equal(isWorkerApplicable(['.github/release-holds.json']), false);
+  assert.equal(isWorkerApplicable(['docs/redesign.md', 'README.md']), false);
+  assert.equal(isWorkerApplicable(['local-worker/pairing.py', '.github/release-holds.json']), true);
+  assert.equal(isWorkerApplicable(['website/src/worker.js', 'docs/redesign.md']), true);
+});
+test('automatic release names the missing worker suite instead of deploying', () => {
+  const value = autoGood();
+  value.workerApplicable = true;
+  value.workerChecks = [siteCheck({id: 8})];
+  assert.throws(() => validateAutoRelease(value), /mock-install/);
 });
 test('migration hold uses the cumulative live baseline and fails closed', () => {
   const base = {liveSha: otherSha, targetSha: autoSha, ancestor: true, diffOk: true, changedMigrationPaths: []};
