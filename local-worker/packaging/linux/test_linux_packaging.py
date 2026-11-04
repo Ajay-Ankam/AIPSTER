@@ -5,6 +5,7 @@ file under xvfb-run so they are exercised on a headless host. Everything
 else runs anywhere with the standard library.
 """
 
+import fcntl
 import importlib.util
 import io
 import os
@@ -226,6 +227,44 @@ class IpcLinuxTests(unittest.TestCase):
         self.assertEqual(list(self.data.iterdir()), [])
         delivered, _ = ipc_linux.send_command(self.data, "start", timeout=2)
         self.assertFalse(delivered)
+
+    def test_acquire_tolerates_transient_exclusive_hold(self):
+        # Regression test for the intermittent cycle-test bring-up failure:
+        # _lock_busy()'s liveness probe takes LOCK_EX for microseconds, and
+        # an acquire() landing exactly in that window used to read as a live
+        # instance (then waited 10s for a server that never comes). Hold the
+        # lock from a second fd, release it after 100ms (orders of magnitude
+        # longer than any probe hold), and require acquire() to succeed.
+        ready = threading.Event()
+
+        def hold():
+            with open(ipc_linux.lock_path(self.data), "a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                ready.set()
+                time.sleep(0.1)
+
+        thread = threading.Thread(target=hold, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(ready.wait(timeout=10), "holder never took the lock")
+            guard = ipc_linux.SingleInstance(self.data)
+            self.assertTrue(
+                guard.acquire(),
+                "transient exclusive hold must not read as a live instance")
+            guard.release()
+        finally:
+            thread.join(timeout=10)
+
+    def test_acquire_still_reports_live_owner(self):
+        # The retry above must stay bounded: a genuinely held lock still
+        # reports False (after the retry window, not forever).
+        with open(ipc_linux.lock_path(self.data), "a+b") as holder:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+            guard = ipc_linux.SingleInstance(self.data)
+            started = time.monotonic()
+            self.assertFalse(guard.acquire())
+            self.assertLess(time.monotonic() - started, 5.0,
+                            "acquire must stay bounded on a live owner")
 
     def test_running_reflects_lock_and_socket(self):
         self.assertFalse(ipc_linux.running(self.data))

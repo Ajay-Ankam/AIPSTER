@@ -17,6 +17,7 @@ import fcntl
 import hashlib
 import os
 import socket
+import time
 from pathlib import Path
 
 COMMANDS = ("ensure", "stop", "start", "restart", "quit")
@@ -38,6 +39,16 @@ def lock_path(data_dir):
     return Path(data_dir) / LOCK_NAME
 
 
+# A _lock_busy() liveness probe holds LOCK_EX for microseconds; an
+# acquire() landing exactly in that window must not read as a live
+# instance (it would then wait 10s for a server that never comes). Retry
+# briefly: transient probe holds clear in far less than this window, while
+# a genuine owner holds for the tray's lifetime. Mutual exclusion is
+# unchanged — success still requires actually holding the lock.
+ACQUIRE_TIMEOUT = 0.5
+ACQUIRE_RETRY_DELAY = 0.02
+
+
 class SingleInstance:
     """fcntl lock guard. held is True when this process owns the instance."""
 
@@ -49,16 +60,22 @@ class SingleInstance:
     def acquire(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.handle = open(lock_path(self.data_dir), "a+b")
-        try:
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            if exc.errno in (errno.EACCES, errno.EAGAIN):
-                self.handle.close()
-                self.handle = None
-                return False
-            raise
-        self.held = True
-        return True
+        deadline = time.monotonic() + ACQUIRE_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.held = True
+                return True
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    self.handle.close()
+                    self.handle = None
+                    raise
+                if time.monotonic() >= deadline:
+                    self.handle.close()
+                    self.handle = None
+                    return False
+                time.sleep(ACQUIRE_RETRY_DELAY)
 
     def release(self):
         if self.handle is not None:
