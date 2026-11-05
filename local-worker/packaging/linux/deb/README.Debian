@@ -1,0 +1,20 @@
+AIPSTER Worker for Debian/Ubuntu
+-------------------------------
+
+First run creates the private per-user data directory
+~/.local/share/aipster-worker (or $AIPSTER_WORKER_DATA) holding
+config.toml, api-token.txt, pairing.json, state/ and logs/. Upgrade,
+removal and even purge preserve it; to delete it manually, stop the
+worker first (`aipster-tray quit`) and remove that directory.
+
+The tray (`aipster-tray`, also in the applications menu) owns one local
+worker plus the account-pairing heartbeat sender. Pairing never starts
+anything by itself: mint a one-time code in the dashboard (My Compute,
+Pair this computer), then use the Pair button (or `aipster-worker pair`).
+
+The worker starts nothing on login by default. To start the tray on
+login: `aipster-worker autostart on`. To stop: `aipster-worker
+autostart off`.
+
+The bundled engine is simulated: `/api/jobs` stays disabled and
+heartbeats prove reachability only, never inference readiness.

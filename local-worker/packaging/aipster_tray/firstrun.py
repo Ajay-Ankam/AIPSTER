@@ -154,10 +154,16 @@ def data_dir():
     override = os.environ.get("AIPSTER_WORKER_DATA")
     if override:
         return Path(override)
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        raise SystemExit("aipster: LOCALAPPDATA is not set; cannot locate the data directory")
-    return Path(local) / APP_NAME
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        if not local:
+            raise SystemExit("aipster: LOCALAPPDATA is not set; cannot locate the data directory")
+        return Path(local) / APP_NAME
+    # POSIX: share one store with the standalone pairing CLI so the tray
+    # overlay and `pairing.py pair` see the same pairing. (pairing's
+    # default_data_dir honors AIPSTER_WORKER_DATA too, checked above.)
+    from pairing import default_data_dir as _pairing_default
+    return _pairing_default()
 
 
 def token_is_strong(value):

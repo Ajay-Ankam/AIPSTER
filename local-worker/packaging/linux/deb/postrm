@@ -1,0 +1,12 @@
+#!/bin/sh
+# AIPSTER Worker postrm: refresh caches only. User data in
+# ~/.local/share/aipster-worker (config, API token, pairing, state, logs)
+# is NEVER removed — not on remove, not on purge. To delete it manually:
+#   aipster-worker tray quit   # or Quit from the tray window
+#   rm -rf ~/.local/share/aipster-worker
+set -e
+if [ "$1" = "remove" ] || [ "$1" = "purge" ] || [ "$1" = "disappear" ]; then
+  update-desktop-database -q /usr/share/applications || true
+  gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+exit 0

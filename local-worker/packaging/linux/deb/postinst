@@ -1,0 +1,10 @@
+#!/bin/sh
+# AIPSTER Worker postinst: refresh desktop/icon caches only. No service,
+# no autostart, no network, no user-data changes (the data dir is created
+# on first run inside each user's $HOME and is never touched here).
+set -e
+if [ "$1" = "configure" ]; then
+  update-desktop-database -q /usr/share/applications || true
+  gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+exit 0

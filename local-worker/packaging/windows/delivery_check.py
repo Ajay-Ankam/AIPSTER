@@ -30,15 +30,29 @@ EXIT_READY = 0
 EXIT_BLOCKED = 2
 EXIT_SENDER_RUNNING = 6
 
-REQUIRED_APP_FILES = (
-    "aipster-tray.exe",
-    "aipster-worker.exe",
-    "dendrite.exe",
-    "BUILD.json",
-    "default.toml",
-)
+if os.name == "nt":
+    REQUIRED_APP_FILES = (
+        "aipster-tray.exe",
+        "aipster-worker.exe",
+        "dendrite.exe",
+        "BUILD.json",
+        "default.toml",
+    )
 
-TRAY_EXE = "aipster-tray.exe"
+    TRAY_EXE = "aipster-tray.exe"
+else:
+    # Linux bundle: same payload, extensionless executables. The raw CLI is
+    # aipster-dendrite (a frozen `dendrite` exe would shadow the bundled
+    # `dendrite/` package directory and break its submodule imports).
+    REQUIRED_APP_FILES = (
+        "aipster-tray",
+        "aipster-worker",
+        "aipster-dendrite",
+        "BUILD.json",
+        "default.toml",
+    )
+
+    TRAY_EXE = "aipster-tray"
 
 SUPPORTED_MANAGED_KINDS = ("ik_llama", "llama_cpp")
 PLACEHOLDER_MODEL_MARKER = "replace-with-your-model"

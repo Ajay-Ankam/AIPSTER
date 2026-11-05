@@ -4,5 +4,7 @@ __pycache__/
 *.pyc
 packaging/windows/build/
 packaging/windows/dist/
+packaging/linux/build/
+packaging/linux/dist/
 packaging/icon/previews/
 packaging/icon/previews/

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=AIPSTER Worker
+GenericName=Local AI worker
+Comment=Run the AIPSTER local worker (simulated engine) and pair this computer
+Exec=/usr/bin/aipster-tray
+Icon=aipster-worker
+Terminal=false
+StartupWMClass=Aipster-worker
+Categories=Utility;Network;
+Keywords=ai;worker;aipster;compute;
+StartupNotify=true
+X-GNOME-UsesNotifications=true
