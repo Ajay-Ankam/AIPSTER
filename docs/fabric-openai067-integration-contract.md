@@ -148,10 +148,47 @@ directly affected test.
 - Tenant/owner binding (SQL `WHERE r.owner_id = ?` on the verified actor id),
   budgets, deadlines, cancel/retry, idempotency, start authority, resource
   freshness, no-cross-user-grant bypass: inherited from admission +
-  coordinator. Grant-shared models are honestly 409 until a follow-up wires
-  grant-shared evidence.
+  coordinator. Grant-shared models (CLAUDE135 G3): a recipient also sees
+  models of a resource named by a LIVE `fg_` fabric share with explicit
+  `route: 'internal'` consent, while BOTH `FEDERATION_ENABLED` and
+  `INFERENCE_ENABLED` are '1'. Shared rows are qualified against the grant's
+  recorded exporter (tenant check kept), restricted to the grant's models
+  (exact id match with worker evidence), listed by model id only, selected
+  only when no owned candidate serves, and admitted with the grant named.
+  Authority is re-derived at issuance, submit, lease and release. App grants
+  (`g_*`) are not bridged here.
 - Release is rechecked from current authority on every surfacing; revoked or
   refused releases withhold with reasons, never leak.
+- Flag-off pause (F1): switching `FEDERATION_ENABLED` off refuses new share
+  starts and withholds in-flight releases, but queued share jobs stay
+  `queued` — they are never expired solely because the flag is off. After
+  the flag is restored a paused job leases only if its grant is still
+  authorized and its deadline still ahead; a revoke or expiry that lands
+  while paused settles it terminal `expired` (`authority_lost`) with the
+  reservation charged, so stale authority never revives.
+- Pre-existing shares (F5): every `fabric_grants` row committed before the
+  explicit-route fix carries `route = 'fixture'` and cannot admit or
+  execute. Such shares need a new grant with explicit `route: 'internal'`
+  consent; there is no migration that flips old rows to live execution.
+- Share selection (F2): when no owner resource serves the request, shared
+  candidates are restricted to tuples that ONE grant on that resource could
+  admit at this request size (per-request ceiling, remaining cumulative
+  tokens, remaining jobs), then the unchanged model rule and freshness
+  tie-break choose. A fresher share that is too small or spent no longer
+  hides another eligible share. Grants are never combined; an explicit
+  model is never swapped for another; owner-first is unchanged (no share
+  fallback when an owner resource exists). If a consented share exists but
+  no single grant fits, the answer stays 429 `grant_quota_exhausted` with no
+  admission. One issuance attempt only: a refusal there is final.
+- Discovery (F3): `listLiveShares` drops shares that fail demo parity and
+  reports `remainingTokens` / `remainingJobs`; `/v1/models` lists a shared
+  model only while some single grant has headroom for a minimal request.
+  These are read-time hints: issuance and the atomic hold re-check every
+  term and remain authoritative, so a concurrent spend or revoke after
+  discovery still refuses. Listing a model promises no capacity.
+- Remaining limits: `SHARE_SCAN_LIMIT` (64 grant×resource rows, ordered by
+  grant id then resource) still truncates deterministically before the
+  F2/F3 filters; owner pool exhaustion does not fall back to a share.
 - No new keys minted/rotated/stored; no key values logged/returned.
 - No new DDL: reuse migrations 0022/0024/0025/0029 (node_capabilities +
   dispatch store). The owner verifies they are applied (read-only check).

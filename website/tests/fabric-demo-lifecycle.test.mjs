@@ -18,7 +18,7 @@ async function setup() {
   const t = await fabricEnv();
   t.env.INFERENCE_ENABLED = '1';
   const pair = await connectPair(t);
-  const flow = await commitFlow(t, pair.conn.id, [RES], ['u_bob']);
+  const flow = await commitFlow(t, pair.conn.id, [RES], ['u_bob'], { route: 'internal' });
   const grantId = flow.grant.id;
   const key = await readJson(await t.call('/api/keys', {
     method: 'POST', headers: S(t, t.alice), body: { name: 'hb', scope: 'heartbeat', resourceId: RES },

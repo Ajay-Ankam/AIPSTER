@@ -22,7 +22,7 @@ async function setup() {
   const pair = await connectPair(t);
   // The coordinator binds the authenticated principal, so the consented demo
   // grant names the consumer user id through the real preview flow.
-  const flow = await commitFlow(t, pair.conn.id, ['r_gpu1'], ['u_bob']);
+  const flow = await commitFlow(t, pair.conn.id, ['r_gpu1'], ['u_bob'], { route: 'internal' });
   const grantId = flow.grant.id;
   // Heartbeat the fixture resource online through the owner key path.
   const key = await readJson(await t.call('/api/keys', {

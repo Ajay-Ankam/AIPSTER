@@ -46,6 +46,10 @@ import { CONTENT_MAX } from './worker-transport.mjs';
 import { matchDeny } from '../fabric/policy.mjs';
 
 export const ADMISSION_TTL_MS = 10 * 60 * 1000;
+// Queued jobs examined per worker lease poll (bounded scan; skipped jobs age out).
+const LEASE_SCAN_LIMIT = 16;
+// Grant x resource rows examined for recipient share discovery (bounded).
+const SHARE_SCAN_LIMIT = 64;
 // Per-principal limits. Three independent caps, because one number cannot
 // express "how much may run at once", "how much new work may arrive" and "how
 // much history may be kept":
@@ -265,6 +269,15 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
   }
 
   const clock = () => Number(now());
+  // Cross-owner (fabric) execution requires BOTH deployment flags: the
+  // inference routes gate on INFERENCE_ENABLED, and this store refuses every
+  // fabric authority unless FEDERATION_ENABLED is exactly '1' (mirrors
+  // fabric/router.mjs federationEnabled). Owner and app-grant paths are
+  // unaffected. Read per call so a flag flip takes effect on in-flight work.
+  const federationOn = () => !!env && env.FEDERATION_ENABLED === '1';
+  // Only an explicit 'internal' route consent authorizes live execution;
+  // the historical 'fixture' route is control-plane-only consent.
+  const EXECUTION_ROUTE = 'internal';
 
   async function opRow(op_id) {
     return first(db, 'SELECT * FROM dispatch_operations WHERE op_id = ?', op_id);
@@ -305,6 +318,8 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
   // in-flight work withholds its result; version/incarnation/binding drift
   // reads as 'authority_changed'. Spend is never touched here.
   async function fabricAuthorityProblem(op, binding, authority) {
+    // Federation switched off: every fabric authority reads as lost access.
+    if (!federationOn()) return 'revoked';
     if (typeof authority.grant_revision !== 'number' || typeof authority.incarnation !== 'string') {
       return 'authority_changed';
     }
@@ -340,6 +355,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
     }
     if (typeof authority.grant_id === 'string' && authority.grant_id.startsWith(FABRIC_GRANT_PREFIX)
       && authority.grant_id.length > FABRIC_GRANT_PREFIX.length) {
+      if (!federationOn()) return { sql: '0', binds: [] };
       return {
         sql: `EXISTS (
           SELECT 1 FROM fabric_grants g
@@ -347,6 +363,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
           JOIN resources r ON r.id = ?
           JOIN fabric_nodes n ON n.id = g.recipient_node
           WHERE g.id = ? AND g.status = 'enforced' AND g.quarantine_reason IS NULL
+            AND g.route = 'internal'
             AND c.state = 'active' AND r.owner_id = g.exporter_id
             AND g.version = ? AND r.incarnation = ?
             AND n.owner_id = ? AND n.workspace = g.recipient_workspace
@@ -400,6 +417,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       // The coordinator pins peer_node/peer_workspace from issuance; for
       // fabric grants the peer is the *recipient* (importer side), not the
       // resource node/owner as in the app/owner paths below.
+      let grantExpiryMs = Infinity;
       let peerNode = resource.node_id || resource.id;
       let peerWorkspace = resource.owner_id;
       if (grantId === null) {
@@ -437,6 +455,10 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
         grant_id = grantId;
         revision = live.grant.version;
         pool_id = `${GRANT_POOL_PREFIX}${grantId}`;
+        // The admission (and so the job deadline, lease window and result
+        // intake, which all sit at or before it) never outlives the
+        // consented time window.
+        grantExpiryMs = Date.parse(live.grant.expiry);
         peerNode = live.grant.recipient_node;
         peerWorkspace = live.grant.recipient_workspace;
       } else {
@@ -457,7 +479,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       }
 
       const admission_ref = rid16('adm_');
-      const expires_at = t + ADMISSION_TTL_MS;
+      const expires_at = Math.min(t + ADMISSION_TTL_MS, grantExpiryMs);
       const runtime = runtime_id;
       const pools = [{ pool_id, amount: max_tokens }];
       const cap = admissionLimit(env);
@@ -547,9 +569,11 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
   // and the coordinator's live re-verification below.
   async function fabricGrantLive({ grant_id, principal_id, resource_id } = {}) {
     if (!isStr(grant_id) || !isStr(principal_id) || !isStr(resource_id)) return null;
+    if (!federationOn()) return null;
     const g = await first(db, 'SELECT * FROM fabric_grants WHERE id = ?', grant_id);
     if (!g || g.status !== 'enforced'
       || (g.quarantine_reason !== undefined && g.quarantine_reason !== null)) return null;
+    if (g.route !== EXECUTION_ROUTE) return null;
     const conn = await first(db, 'SELECT id, state FROM connections WHERE id = ?', g.connection_id);
     if (!conn || conn.state !== 'active') return null;
     const r = await first(db, 'SELECT id, owner_id, incarnation FROM resources WHERE id = ?', resource_id);
@@ -596,9 +620,57 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       recipientNode: g.recipient_node, recipientWorkspace: g.recipient_workspace,
       consumers, resourceId: r.id, incarnation: r.incarnation,
       actions, models, notBefore: g.created_at, expiry: g.expiry,
-      ceilings, route: INFERENCE_ROUTE,
+      ceilings, route: g.route,
     };
   }
+  // Live shares this principal may execute on as a fabric RECIPIENT, for
+  // grant-derived candidate discovery (OpenAI route). Read-only: every row is
+  // re-derived through fabricGrantLive (federation flag, explicit internal
+  // route, connection, exporter-held incarnation, recipient-node ownership,
+  // consumers, denies, strict spend counters) plus the time window. Nothing
+  // is authorized here: issuance re-verifies every term again.
+  async function listLiveShares({ principal_id } = {}) {
+    if (!isStr(principal_id) || !federationOn()) return [];
+    const rows = await all(db, `SELECT g.id AS grant_id, json_extract(s.value, '$.resourceId') AS resource_id
+      FROM fabric_grants g, json_each(g.snapshot) s
+      WHERE g.status = 'enforced' AND g.quarantine_reason IS NULL AND g.route = 'internal'
+        AND EXISTS (SELECT 1 FROM json_each(g.consumers) WHERE value = ?)
+      ORDER BY g.id, resource_id LIMIT ${SHARE_SCAN_LIMIT}`, principal_id);
+    const t = clock();
+    const out = [];
+    // Demo parity is an issuance term (exporter and consumer must match);
+    // a mismatched share can never admit, so it is not discovered (F3).
+    const demoCache = new Map();
+    const demoOf = async (id) => {
+      if (!demoCache.has(id)) {
+        const u = await first(db, 'SELECT demo FROM "user" WHERE id = ?', id);
+        demoCache.set(id, u ? Number(u.demo || 0) : null);
+      }
+      return demoCache.get(id);
+    };
+    for (const row of rows) {
+      if (!isStr(row.grant_id) || !isStr(row.resource_id)) continue;
+      const live = await fabricGrantLive({ grant_id: row.grant_id, principal_id, resource_id: row.resource_id });
+      if (!live || !(Date.parse(live.grant.expiry) > t)) continue;
+      const maxTokens = Number(live.ceilings.maxTokens);
+      const maxRequests = Number(live.ceilings.maxRequests);
+      if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) continue;
+      if (!Number.isSafeInteger(maxRequests) || maxRequests < 1) continue;
+      if (!live.actions.includes('inference')) continue;
+      const consumerDemo = await demoOf(principal_id);
+      const exporterDemo = await demoOf(live.grant.exporter_id);
+      if (consumerDemo === null || exporterDemo === null || consumerDemo !== exporterDemo) continue;
+      // Headroom is a read-time hint for discovery and selection only
+      // (F2/F3). Spend is cumulative on the stable grant id; issuance and
+      // the atomic hold re-check it and remain authoritative.
+      out.push({ grant_id: live.grant.id, resource_id: live.resource.id, exporter_id: live.grant.exporter_id,
+        models: live.models.filter((m) => isStr(m)), maxTokens,
+        remainingTokens: Math.max(0, maxTokens - live.grant.used_tokens),
+        remainingJobs: Math.max(0, maxRequests - live.grant.used_jobs) });
+    }
+    return out;
+  }
+
   async function readGrant({ grant_id, principal_id, resource_id } = {}) {
     if (!isStr(grant_id)) return null;
     if (isOwnerGrant(grant_id)) {
@@ -1290,31 +1362,95 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
       const t = Number.isSafeInteger(at) ? at : clock();
       const lease_id = rid16('lease_');
       const tIso = isoAt(t);
-      // One atomically selected queued job: matching resource, redeemed and
-      // unfenced operation, no recorded uncertainty, deadline still ahead.
-      const [res] = await db.batch([
-        db.prepare(`UPDATE dispatch_jobs
-          SET status = 'leased', lease_id = ?, leased_at = ?, updated_at = ?
-          WHERE job_id = (SELECT j.job_id FROM dispatch_jobs j
-              JOIN dispatch_operations o ON o.op_id = j.op_id AND o.generation = j.generation
-              WHERE j.resource_id = ? AND j.status = 'queued' AND j.deadline_at > ?
-                AND o.phase IN ('redeemed', 'dispatched') AND o.uncertain_phase IS NULL
-                AND NOT EXISTS (SELECT 1 FROM dispatch_fences f
-                  WHERE f.op_id = j.op_id AND f.generation = j.generation)
-                AND EXISTS (SELECT 1 FROM dispatch_start_redemptions s
-                  WHERE s.op_id = j.op_id AND s.generation = j.generation)
-              ORDER BY j.created_at, j.job_id LIMIT 1)
-            AND status = 'queued'`).bind(lease_id, tIso, tIso, resource_id, t),
-      ]);
-      if (changed(res) !== 1) return null;
-      const row = await first(db, 'SELECT * FROM dispatch_jobs WHERE lease_id = ?', lease_id);
-      if (!row) return null;
-      return {
-        job_id: row.job_id,
-        lease_id: row.lease_id,
-        envelope: JSON.parse(row.envelope_json),
-        deadline_at: Number(row.deadline_at),
-      };
+      // Queued jobs in order: matching resource, redeemed and unfenced
+      // operation, no recorded uncertainty, deadline still ahead.
+      const leasable = `j.resource_id = ? AND j.status = 'queued' AND j.deadline_at > ?
+        AND EXISTS (SELECT 1 FROM dispatch_operations o
+          WHERE o.op_id = j.op_id AND o.generation = j.generation
+            AND o.phase IN ('redeemed', 'dispatched') AND o.uncertain_phase IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM dispatch_fences f
+          WHERE f.op_id = j.op_id AND f.generation = j.generation)
+        AND EXISTS (SELECT 1 FROM dispatch_start_redemptions s
+          WHERE s.op_id = j.op_id AND s.generation = j.generation)`;
+      // B1: while federation is paused, share-bound jobs are skipped and
+      // stay queued (F1). Exclude them from the bounded scan window itself,
+      // so paused share work queued ahead can never hide leasable jobs (for
+      // example the exporter's own) behind LEASE_SCAN_LIMIT. Only selection
+      // narrows: the per-candidate checks and the lease CAS are unchanged,
+      // and a malformed binding is still not excluded here (the loop skips
+      // it as before). Order and tie-breaks are unchanged.
+      const paused = federationOn() ? '' : `
+        AND NOT EXISTS (SELECT 1 FROM dispatch_operations p
+          WHERE p.op_id = j.op_id AND json_valid(p.binding_json)
+            AND substr(json_extract(p.binding_json, '$.grant_id'), 1, ?) = ?)`;
+      const pausedBinds = paused ? [FABRIC_GRANT_PREFIX.length, FABRIC_GRANT_PREFIX] : [];
+      const candidates = await all(db, `SELECT j.job_id, j.op_id, j.generation FROM dispatch_jobs j
+        WHERE ${leasable}${paused} ORDER BY j.created_at, j.job_id LIMIT ${LEASE_SCAN_LIMIT}`,
+      resource_id, t, ...pausedBinds);
+      for (const cand of candidates || []) {
+        // Cross-owner (fabric) work is handed to the exporter's worker only
+        // while the consent still holds at lease time: a job queued before a
+        // revoke, pause, suspension, deny, or grant expiry must not consume
+        // exporter compute. Such a job is skipped (it stays queued and ages
+        // out at its deadline); jobs behind it remain leasable. The CAS below
+        // re-asserts the same live authority so a concurrent narrowing wins.
+        const cond = [];
+        const binds = [];
+        const op = await opRow(cand.op_id);
+        if (!op || Number(op.generation) !== Number(cand.generation)) continue;
+        let binding;
+        try { binding = JSON.parse(op.binding_json); } catch { continue; }
+        if (!isObj(binding)) continue;
+        if (typeof binding.grant_id === 'string' && binding.grant_id.startsWith(FABRIC_GRANT_PREFIX)) {
+          // A switched-off federation flag is an operator pause, not lost
+          // consent: skip the job and leave it queued. New starts are
+          // already refused while off (fabricGrantLive reads null,
+          // liveAuthoritySql reads '0') and in-flight releases are
+          // withheld by fabricAuthorityProblem. Expiry, deadline,
+          // revocation and deny checks below still run the moment the
+          // flag is restored, so a revoke or expiry that lands while
+          // paused never revives into a lease.
+          if (!federationOn()) continue;
+          const authority = {
+            grant_id: binding.grant_id, grant_revision: binding.grant_revision, incarnation: binding.incarnation,
+          };
+          const live = await liveAuthoritySql(op, binding, authority);
+          const g = await first(db, 'SELECT expiry FROM fabric_grants WHERE id = ?', binding.grant_id);
+          if (await authorityProblem(op, binding, authority) || !g || !(Date.parse(g.expiry) > t)) {
+            // Authority lost while queued: make the job terminal 'expired'
+            // (never leased, never executed) so reconcile settles it instead
+            // of aging it into an uncertain operation. Guarded on 'queued'
+            // and on authority still being absent, so a concurrent restore
+            // wins. Accounting is unchanged: the post-start reservation
+            // stays charged, as for every other post-start outcome.
+            const expiredOnly = g && Date.parse(g.expiry) > t ? ` AND NOT ${live.sql}` : '';
+            await db.batch([
+              db.prepare(`UPDATE dispatch_jobs SET status = 'expired', result_json = ?, updated_at = ?
+                WHERE job_id = ? AND status = 'queued'${expiredOnly}`).bind(
+                json({ reason: 'authority_lost' }), tIso, cand.job_id, ...(expiredOnly ? live.binds : [])),
+            ]);
+            continue;
+          }
+          cond.push(live.sql);
+          binds.push(...live.binds);
+        }
+        const [res] = await db.batch([
+          db.prepare(`UPDATE dispatch_jobs AS j
+            SET status = 'leased', lease_id = ?, leased_at = ?, updated_at = ?
+            WHERE j.job_id = ? AND ${leasable}${cond.length ? ` AND ${cond.join(' AND ')}` : ''}`).bind(
+            lease_id, tIso, tIso, cand.job_id, resource_id, t, ...binds),
+        ]);
+        if (changed(res) !== 1) continue;
+        const row = await first(db, 'SELECT * FROM dispatch_jobs WHERE lease_id = ?', lease_id);
+        if (!row) return null;
+        return {
+          job_id: row.job_id,
+          lease_id: row.lease_id,
+          envelope: JSON.parse(row.envelope_json),
+          deadline_at: Number(row.deadline_at),
+        };
+      }
+      return null;
     });
   }
 
@@ -1397,7 +1533,7 @@ export function createD1DispatchStore(db, { now = () => Date.now(), env = null }
 
   return {
     // coordinator authority
-    resolveAdmission, readGrant, claimOperation, getOperation, acquireHold, admit, redeemStart,
+    resolveAdmission, readGrant, listLiveShares, claimOperation, getOperation, acquireHold, admit, redeemStart,
     fenceStart, releaseHolds, recordDispatch, markUncertain, recordCancelIntent, recheckRelease, settle,
     validateBinding,
     // issuer + bound-job transport primitives (L2)
