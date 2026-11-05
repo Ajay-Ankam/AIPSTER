@@ -111,6 +111,11 @@ jobs:
           test "$BUILT_SHA" = "$RELEASE_SHA" || { echo "Checked-out $BUILT_SHA differs from resolved $RELEASE_SHA"; exit 1; }
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
+      # Pinned Node 24 for every script step below, including the early ones.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 verified 2026-10-26
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Read live deployment baseline
         id: live
         run: |
@@ -183,10 +188,6 @@ jobs:
           HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           WORKER_APPLICABLE: ${{ steps.worker.outputs.applicable }}
           GH_TOKEN: ${{ github.token }}
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 verified 2026-10-26
-        with:
-          node-version: '24'
-          package-manager-cache: false
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run check
       - run: npm test
