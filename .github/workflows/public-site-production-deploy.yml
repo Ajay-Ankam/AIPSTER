@@ -23,6 +23,12 @@
 # the run that can proceed. PR-only checks that never run on main (installer
 # build artifacts) are not deploy gates; their gate lives in PR review.
 #
+# Ordering (RELEASE199): the live baseline, schema hold and an early
+# preflight run right after checkout, before npm install/test/build, so an
+# automatic hold or an early wake (the other suite still pending) fails in
+# seconds instead of minutes. Preflight and the release gate run again
+# after the build as the last recheck before `wrangler deploy`.
+#
 # Honest limitations: branch protection is absent (API returned
 # "Branch not protected"), so this file cannot prove review occurred; the
 # exact-merge-commit rule rejects unassociated main pushes from the automatic
@@ -105,19 +111,11 @@ jobs:
           test "$BUILT_SHA" = "$RELEASE_SHA" || { echo "Checked-out $BUILT_SHA differs from resolved $RELEASE_SHA"; exit 1; }
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
+      # Pinned Node 24 for every script step below, including the early ones.
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6 verified 2026-10-26
         with:
           node-version: '24'
           package-manager-cache: false
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm run check
-      - run: npm test
-      # Pin stamps to the resolved release SHA: for workflow_run events
-      # GITHUB_SHA is the branch head, not the verified head_sha.
-      - name: Build dist
-        run: npm run build
-        env:
-          GITHUB_SHA: ${{ steps.release.outputs.sha }}
       - name: Read live deployment baseline
         id: live
         run: |
@@ -139,6 +137,24 @@ jobs:
         env:
           LIVE_SHA: ${{ steps.live.outputs.live_sha }}
           TARGET_SHA: ${{ steps.release.outputs.sha }}
+      # Fail fast: an automatic hold stops the job here, before any
+      # dependency install, test or build spend.
+      - name: Report automatic hold
+        if: steps.migration.outputs.hold == 'true'
+        run: |
+          {
+            echo '## AUTODEPLOY HOLD — no deployment performed'
+            echo ''
+            echo "- release SHA: $RELEASE_SHA"
+            echo "- reason: $HOLD_REASON"
+            echo ''
+            echo 'Ship via manual workflow_dispatch after review.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::AUTODEPLOY HOLD: $HOLD_REASON"
+          exit 1
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          HOLD_REASON: ${{ steps.migration.outputs.reason }}
       - name: Determine worker-suite applicability
         id: worker
         if: steps.release.outputs.mode == 'auto' && steps.migration.outputs.hold != 'true'
@@ -153,6 +169,34 @@ jobs:
         env:
           LIVE_SHA: ${{ steps.live.outputs.live_sha }}
           TARGET_SHA: ${{ steps.release.outputs.sha }}
+      # Fail fast on an early wake: the same preflight that guards the deploy
+      # runs once here, before any dependency install, test or build spend,
+      # so a duplicate wake (one suite still pending) or a stale revision
+      # exits in seconds. The final recheck immediately before deploy stays.
+      - name: Fail fast on an early wake or stale revision
+        if: steps.migration.outputs.hold != 'true'
+        run: node scripts/release-preflight.mjs
+        env:
+          BUILT_SHA: ${{ steps.verify.outputs.built_sha }}
+          GITHUB_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_MODE: ${{ steps.release.outputs.mode }}
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          WORKER_APPLICABLE: ${{ steps.worker.outputs.applicable }}
+          GH_TOKEN: ${{ github.token }}
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+      # Pin stamps to the resolved release SHA: for workflow_run events
+      # GITHUB_SHA is the branch head, not the verified head_sha.
+      - name: Build dist
+        run: npm run build
+        env:
+          GITHUB_SHA: ${{ steps.release.outputs.sha }}
       - name: Require the verified current main revision and successful CI
         if: steps.migration.outputs.hold != 'true'
         run: node scripts/release-preflight.mjs
@@ -198,19 +242,3 @@ jobs:
           # run's own stamp, so the verifier validates the receipt instead of
           # byte-comparing deployment.json. New deploys stay byte-strict.
           AIPSTER_ALREADY_LIVE: ${{ steps.live.outputs.already }}
-      - name: Report automatic hold
-        if: steps.migration.outputs.hold == 'true'
-        run: |
-          {
-            echo '## AUTODEPLOY HOLD — no deployment performed'
-            echo ''
-            echo "- release SHA: $RELEASE_SHA"
-            echo "- reason: $HOLD_REASON"
-            echo ''
-            echo 'Ship via manual workflow_dispatch after review.'
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::AUTODEPLOY HOLD: $HOLD_REASON"
-          exit 1
-        env:
-          RELEASE_SHA: ${{ steps.release.outputs.sha }}
-          HOLD_REASON: ${{ steps.migration.outputs.reason }}
