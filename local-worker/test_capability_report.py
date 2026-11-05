@@ -193,8 +193,11 @@ class RuntimeDiscoveryTests(unittest.TestCase):
         exe = Path(sys.executable).resolve()
         config = write_config(self.tmp.name, f'[[runtimes]]\nid = "rt"\nkind = "llama_cpp"\nmode = "managed"\n'
                                              f'executable = {json.dumps(str(exe))}\n')
+        # Qualification lane: each entry carries its transport mode and the
+        # stable configured model ids (from config only); readiness `models`
+        # stay absent without a live probe.
         self.assertEqual(pairing._reportable_runtimes(str(config)),
-                         [{"name": "llama-server", "formats": ["gguf"]}])
+                         [{"name": "llama-server", "mode": "managed", "formats": ["gguf"], "configured": ["m"]}])
 
     def assert_valid_config(self, config):
         # A config that fails to load would also claim nothing; prove these
