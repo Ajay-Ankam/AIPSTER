@@ -18,7 +18,14 @@
   </div>
 </header>
 <main id="main">
-  <section id="view-login" class="card" aria-labelledby="login-h">
+  <!-- Shown until /api/auth/get-session answers, so a signed-in caller never
+       sees a sign-in flash and the sign-in view appears only when the server
+       confirms there is no valid session (issue #106). -->
+  <section id="view-auth" class="card loading" aria-live="polite">
+    <p id="auth-status" role="status">Checking your session…</p>
+    <button id="auth-retry" type="button" hidden>Try again</button>
+  </section>
+  <section id="view-login" class="card" aria-labelledby="login-h" hidden>
     <h1 id="login-h">Sign in</h1>
     <p class="muted login-lede">Sign in with GitHub. New here? Your account is created automatically on first sign-in — no invitation needed. A verified GitHub email is required.</p>
     <p id="login-error" class="error" role="alert" hidden></p>
