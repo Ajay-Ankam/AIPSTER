@@ -6,10 +6,11 @@
   "main": "src/worker.js",
   "compatibility_flags": ["nodejs_als"],
   "preview_urls": false,
+  "triggers": { "crons": ["15 3 * * *"] },
   // Public, non-secret: the canonical origin better-auth uses for callbacks
   // and trusted origins. Secrets (BETTER_AUTH_SECRET, GITHUB_*) are set via
   // `wrangler secret put` by the rollout owner, never here.
-  "vars": { "BETTER_AUTH_URL": "https://aipster.net", "FEDERATION_ENABLED": "1" },
+  "vars": { "BETTER_AUTH_URL": "https://aipster.net", "FEDERATION_ENABLED": "1", "DGM_SELF_TEST_ENABLED": "1" },
   "assets": { "directory": "./dist", "not_found_handling": "404-page", "run_worker_first": true, "binding": "ASSETS" },
   "d1_databases": [
     {

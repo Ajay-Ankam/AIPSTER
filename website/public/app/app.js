@@ -429,6 +429,7 @@ async function loadOverview() {
   $('status-strip').innerHTML = '<h2>Resource status</h2><p class="muted">Checking resource status…</p>';
   refreshStatusStrip(token, gen, 0);
   loadFabricFlow();
+  loadQualification();
   try {
     const [inv, shared, usage, catalog] = await Promise.all([api('/api/inventory?limit=50'), api('/api/shared-with-me?limit=50'), api('/api/usage?limit=1'), api('/api/catalog/summary')]);
     // Reachability is fresh liveness, not terminal usability (Codex P2
@@ -1966,11 +1967,11 @@ async function submitAdvice(retryKey) {
   const key = retryKey || (crypto.randomUUID ? crypto.randomUUID() : 'op-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
   advLastKey = key;
   const gen = generation;
-  advAbort = new AbortController();
+  advAbort = typeof AbortController === 'function' ? new AbortController() : null;
   $('adv-cancel').hidden = false; $('adv-submit').disabled = true; $('adv-retry').hidden = true;
   loading($('adv-result'));
   try {
-    const out = await api('/api/advisor', { method: 'POST', body: JSON.stringify({ task, refs, opKey: key }), signal: advAbort.signal });
+    const out = await api('/api/advisor', { method: 'POST', body: JSON.stringify({ task, refs, opKey: key }), signal: advAbort ? advAbort.signal : undefined });
     if (gen !== generation) return;
     renderAdvice(out);
   } catch (e) {
@@ -1984,6 +1985,226 @@ async function submitAdvice(retryKey) {
 }
 
 function cancelAdvice() { if (advAbort) advAbort.abort(); }
+
+// ---- hardware qualification (Overview panel) ----
+// Owner-only report from GET /api/qualifications, rendered as three visibly
+// separate lanes: Detected (measured inventory), Advisory (Meta
+// recommendation), Measured (benchmark result). Advisory text is never
+// measured performance; a fixture receipt is labelled fixture, never live
+// evidence. Request posts owner session + CSRF with a fresh op key, then
+// reloads the panel. In-flight work is generation-fenced like every loader.
+let qualAbort = null;
+
+// Client mirror of tpsOf/promptTpsOf in src/qualification/validate.mjs,
+// which is the source of truth: tokens/sec only from the coherent native
+// predicted/prompt pairs, never wall-clock division, never worker-claimed.
+function qualNativeTimings(result) {
+  const t = result && typeof result === 'object' ? result.nativeTimings : null;
+  if (!t || typeof t !== 'object') return null;
+  for (const f of ['promptN', 'promptMs', 'predictedN', 'predictedMs']) {
+    if (typeof t[f] !== 'number' || !Number.isFinite(t[f]) || t[f] < 0) return null;
+  }
+  if (t.promptMs <= 0 || t.predictedMs <= 0 || !Number.isInteger(t.predictedN) || t.predictedN <= 0 || t.predictedN > 32 || !Number.isInteger(t.promptN)) return null;
+  if (Number.isSafeInteger(result.completionTokens) && result.completionTokens !== t.predictedN) return null;
+  return t;
+}
+function qualTps(result) {
+  const t = qualNativeTimings(result);
+  return t === null ? null : (t.predictedN / t.predictedMs) * 1000;
+}
+function qualPromptTps(result) {
+  const t = qualNativeTimings(result);
+  return t === null ? null : (t.promptN / t.promptMs) * 1000;
+}
+
+// Advisory candidates at the current identity, live preferred over fixture.
+// A row is current when its digest matches the profile digest for its mode;
+// anything else is history from a changed profile, kept but never current.
+function qualRowMode(row) {
+  if (row && row.mode === 'live') return 'live';
+  try {
+    const receipt = row && row.receipt_json ? JSON.parse(row.receipt_json) : null;
+    if (receipt && receipt.mode === 'live') return 'live';
+  } catch { /* unparseable receipt: fixture label stands */ }
+  return 'fixture';
+}
+function qualRowCurrent(row, profile) {
+  if (!profile || !profile.has_snapshot || !row || !row.profile_digest) return false;
+  const want = qualRowMode(row) === 'live' ? profile.profile_digest_live : profile.profile_digest;
+  return row.profile_digest === want;
+}
+function qualProvenanceLine(r) {
+  const served = typeof r.servedModelId === 'string' && r.servedModelId ? ` · served as ${esc(r.servedModelId)}` : '';
+  if (r.placementProvenance === 'operator-declared') {
+    return `<p class="muted">Placement: operator-declared (the config pins CPU; not independently measured)${served}.</p>`;
+  }
+  if (r.placementProvenance === 'unknown') {
+    return `<p class="muted">Placement: unknown — this smoke test certifies no placement and no GPU${served}.</p>`;
+  }
+  return served ? `<p class="muted">Served as ${served}.</p>` : '';
+}
+function qualAdviceBody(row, id) {
+  let advice = null;
+  try { advice = row.advice_json ? JSON.parse(row.advice_json) : null; } catch { advice = null; }
+  if (!advice || typeof advice.summary !== 'string') {
+    // A failed assessment never blocks a retry: the server admits a new key
+    // for failed rows, so the panel offers one explicitly.
+    const retry = row.state === 'failed'
+      ? `<div class="actions"><button type="button" class="btn secondary" data-qual-request="${esc(id)}">Retry assessment</button></div>`
+      : '';
+    return `<p class="muted">Advisory (Meta recommendation): ${esc(row.state || 'retained')} — retained, no automatic retry.</p>${retry}`;
+  }
+  const mode = qualRowMode(row);
+  const pill = mode === 'live' ? '<span class="pill">live</span>' : '<span class="pill">fixture — not live evidence</span>';
+  const sug = Array.isArray(advice.suggestions) && advice.suggestions.length
+    ? `<ul>${advice.suggestions.map((x) => `<li><strong>${esc(x.label)}</strong> — ${esc(x.detail)}</li>`).join('')}</ul>`
+    : '<p class="muted">No supported benchmark (unsupported).</p>';
+  const unk = Array.isArray(advice.unknowns) && advice.unknowns.length ? `<p class="muted">Unknowns: ${esc(advice.unknowns.join('; '))}</p>` : '';
+  return `<p>Advisory (Meta recommendation): ${esc(advice.summary)} ${pill}</p>`
+    + `<p class="muted">catalog: ${esc(advice.benchmarkCatalogId || 'unsupported')}</p>` + sug + unk;
+}
+function qualRunBody(run) {
+  const st = run.state;
+  if (st === 'assigned' || st === 'leased') return '<p class="muted">Measured (benchmark result): benchmark pending — the worker lease is active; results appear here.</p>';
+  if (st === 'uncertain') return '<p class="muted">Measured (benchmark result): outcome uncertain — retained for reconciliation, never automatically rerun.</p>';
+  if (st !== 'succeeded') {
+    let res = {};
+    try { res = run.result_json ? JSON.parse(run.result_json) : {}; } catch { res = {}; }
+    const why = res && typeof res.reason === 'string' ? ` (${res.reason})` : '';
+    return `<p class="muted">Measured (benchmark result): ${esc(st)}${esc(why)}${st === 'unsupported' ? ' — this profile is not supported, reported honestly' : ' — no performance numbers to show'}.</p>`;
+  }
+  let r = {};
+  try { r = run.result_json ? JSON.parse(run.result_json) : {}; } catch { r = {}; }
+  const tps = qualTps(r);
+  const prefill = qualPromptTps(r);
+  return `<p>Measured (benchmark result): ${esc(r.runtimeId || 'unknown')} / ${esc(r.modelId || 'unknown')} · elapsed ${esc(String(r.elapsedMs ?? 'unknown'))} ms (wall clock, not a throughput source)</p>`
+    + qualProvenanceLine(r)
+    + (tps === null
+      ? '<p class="muted">Throughput: not shown (no coherent native backend timings).</p>'
+      : `<p>Throughput: ${esc(tps.toFixed(1))} tokens/s generation`
+        + (prefill === null ? '' : ` · ${esc(prefill.toFixed(1))} tokens/s prefill`)
+        + ' (native backend timings).</p>');
+}
+
+function renderQualNode(name, id, detected, recs, runs, cachedRows, profile, live) {
+  const det = !detected || !detected.snapshot
+    ? '<p class="muted">Detected (worker-reported inventory): no capability snapshot yet — the worker must report inventory first.</p>'
+    : (() => {
+      const s = detected.snapshot;
+      const rts = Array.isArray(s.runtimes) && s.runtimes.length ? s.runtimes.map((r) => esc(r.name || 'unknown')).join(', ') : 'none reported (unknown)';
+      const mem = s.mem && Number.isSafeInteger(s.mem.ramTotalBytes) ? (s.mem.ramTotalBytes / 1024 ** 3).toFixed(1) + ' GiB total' : 'memory unknown';
+      const stale = detected.fresh === false ? ' · <strong>stale snapshot</strong>' : '';
+      return `<p>Detected (worker-reported inventory, not independently attested): ${esc(s.os || 'unknown')} / ${esc(s.arch || 'unknown')} · ${esc(mem)} · runtimes: ${rts}${stale}</p>`
+        + `<p class="muted">reported ${esc(detected.reportedAt || 'unknown')}</p>`;
+    })();
+  const hasSnapshot = !!(detected && detected.snapshot);
+  const seen = new Set();
+  const atIdentity = [];
+  for (const row of (Array.isArray(recs) ? recs : []).map((r) => ({ row: r, saved: false }))
+    .concat((Array.isArray(cachedRows) ? cachedRows : []).map((r) => ({ row: r, saved: true })))) {
+    if (!row.row || !qualRowCurrent(row.row, profile)) continue;
+    const key = `${qualRowMode(row.row)}|${row.row.advice_json || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    atIdentity.push(row);
+  }
+  atIdentity.sort((a, b) => (qualRowMode(b.row) === 'live' ? 1 : 0) - (qualRowMode(a.row) === 'live' ? 1 : 0));
+  const historyCount = [...(Array.isArray(recs) ? recs : []), ...(Array.isArray(cachedRows) ? cachedRows : [])]
+    .filter((row) => row && row.profile_digest && !qualRowCurrent(row, profile)).length;
+  const requestBtn = `<div class="actions"><button type="button" class="btn secondary" data-qual-request="${esc(id)}">Request assessment</button></div>`;
+  const adv = atIdentity.length
+    ? qualAdviceBody(atIdentity[0].row, id)
+      + (atIdentity[0].saved ? '<p class="muted">From the saved cache — the assessment row was pruned; requesting again replays this, never resending a paid call.</p>' : '')
+      + (live && qualRowMode(atIdentity[0].row) === 'fixture'
+        ? `<p class="muted">Live assessments are enabled on this deployment, but this profile has fixture advice only. Requesting an assessment fetches a live recommendation.</p>${requestBtn}`
+        : '')
+      + (atIdentity.length > 1 ? `<p class="muted">Plus ${atIdentity.length - 1} more saved assessment(s) for this profile.</p>` : '')
+      + (historyCount ? `<p class="muted">${historyCount} earlier assessment(s) kept for history under changed profiles.</p>` : '')
+    : !hasSnapshot
+      ? '<p class="muted">Advisory (Meta recommendation): no capability snapshot yet — the worker must report inventory first.</p>'
+      : (historyCount
+        ? `<p class="muted">Advisory (Meta recommendation): none for the current profile — it changed since the last assessment. Requesting a new assessment replays the saved cache when the profile is unchanged, never resending a paid call.</p>${requestBtn}`
+        : `<p class="muted">Advisory (Meta recommendation): none yet. Requesting an assessment replays the saved cache when the profile is unchanged, never resending a paid call.</p>${requestBtn}`);
+  const runList = Array.isArray(runs) ? runs : [];
+  // Runs carry their mode, so currency is exact like advisories. Without a
+  // current profile (no snapshot) staleness cannot be computed: show all.
+  const currentRuns = runList.filter((r) => {
+    if (!r || !r.profile_digest || !profile || !profile.has_snapshot) return true;
+    const want = (r.mode === 'live' ? profile.profile_digest_live : profile.profile_digest);
+    return r.profile_digest === want;
+  });
+  const staleRuns = runList.length - currentRuns.length;
+  const mea = !runList.length
+    ? '<p class="muted">Measured (benchmark result): no benchmark has run for this node.</p>'
+    : !currentRuns.length
+      ? `<p class="muted">Measured (benchmark result): no benchmark for the current profile — ${runList.length} earlier run(s) kept for history under changed profiles.</p>`
+      : qualRunBody(currentRuns[0])
+        + (currentRuns.length > 1 ? `<p class="muted">Plus ${currentRuns.length - 1} more run(s) for this profile.</p>` : '')
+        + (staleRuns ? `<p class="muted">${staleRuns} earlier run(s) kept for history under changed profiles.</p>` : '');
+  return `<div class="card"><h3>${esc(name)} <span class="muted">(${esc(id)})</span></h3>${det}${adv}${mea}</div>`;
+}
+
+async function loadQualification() {
+  if (qualAbort) { qualAbort.abort(); qualAbort = null; }
+  const el = $('qual-body'); loading(el);
+  const gen = generation;
+  qualAbort = typeof AbortController === 'function' ? new AbortController() : null;
+  try {
+    const report = await api('/api/qualifications', { ...(qualAbort ? { signal: qualAbort.signal } : {}) });
+    if (gen !== generation) return;
+    const items = await allInventory();
+    if (gen !== generation) return;
+    const recs = Array.isArray(report.recommendations) ? report.recommendations : [];
+    const runs = Array.isArray(report.runs) ? report.runs : [];
+    const cached = Array.isArray(report.cached) ? report.cached : [];
+    const profiles = Array.isArray(report.profiles) ? report.profiles : [];
+    if (!items.length) { el.innerHTML = '<p class="muted">No resources yet. Register one under My Compute first.</p>'; return; }
+    // Every owned node gets its snapshot fetch, not only nodes with prior
+    // assessments: a profile-only node must show its detected lane instead
+    // of a false "no snapshot" state.
+    const active = new Set([...items.map((n) => n.id), ...recs.map((r) => r.node_id), ...runs.map((r) => r.node_id), ...cached.map((r) => r.node_id)]);
+    const detected = {};
+    await Promise.all([...active].map(async (id) => {
+      try {
+        const d = await api(`/api/resources/${encodeURIComponent(id)}/capabilities`);
+        if (gen !== generation) return;
+        detected[id] = d;
+      } catch (e) { if (!isStale(e)) detected[id] = null; }
+    }));
+    if (gen !== generation) return;
+    el.innerHTML = items.map((n) => renderQualNode(n.name, n.id,
+      Object.prototype.hasOwnProperty.call(detected, n.id) ? detected[n.id] : null,
+      recs.filter((r) => r.node_id === n.id),
+      runs.filter((r) => r.node_id === n.id),
+      cached.filter((r) => r.node_id === n.id),
+      profiles.find((p) => p.node_id === n.id) || null,
+      report.live === true)).join('')
+      + '<p class="muted note">Detected facts, advisory recommendations, and measured results are separate lanes: a fixture assessment is not live evidence and a smoke result certifies no placement and no GPU. A pruned assessment never reads as "no recommendation" — the saved cache stands until the profile changes.</p>';
+    el.querySelectorAll('[data-qual-request]').forEach((b) => b.addEventListener('click', () => requestQualification(b.dataset.qualRequest, b)));
+  } catch (e) {
+    if (isStale(e)) return;
+    if (e && e.name === 'AbortError') return;
+    if (/\(NOT_FOUND\)/.test(e.message)) { el.innerHTML = '<p class="muted">Hardware qualification is disabled on this deployment.</p>'; return; }
+    state(el, 'error', e.message);
+  } finally {
+    if (gen === generation) qualAbort = null;
+  }
+}
+
+async function requestQualification(nodeId, btn) {
+  const gen = generation;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/resources/${encodeURIComponent(nodeId)}/qualification`, { method: 'POST', body: JSON.stringify({ opKey: crypto.randomUUID ? crypto.randomUUID() : 'qop-' + Date.now().toString(36) }) });
+    if (gen !== generation) return;
+    await loadQualification();
+  } catch (e) {
+    if (isStale(e)) return;
+    if (gen !== generation) return;
+    banner('Assessment request failed: ' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
 
 // ---- federation ----
 const idem = () => ({ 'Idempotency-Key': (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)) });
@@ -2087,7 +2308,8 @@ function resetState() {
   // every sign-in before the new identity renders, so a same-document account
   // switch never shows the previous identity's data (incl. revealed secrets).
   statusPollToken++;
-  for (const id of ['status-strip', 'ov-kpis', 'ov-cards', 'ov-note', 'fabric-flow', 'fabric-throughput', 'compute-list', 'shared-list', 'grant-list', 'key-list', 'usage-totals', 'usage-list', 'audit-list']) $(id).innerHTML = '';
+  for (const id of ['status-strip', 'ov-kpis', 'ov-cards', 'ov-note', 'fabric-flow', 'fabric-throughput', 'qual-body', 'compute-list', 'shared-list', 'grant-list', 'key-list', 'usage-totals', 'usage-list', 'audit-list']) $(id).innerHTML = '';
+  if (qualAbort) { qualAbort.abort(); qualAbort = null; }
   for (const id of ['fab-node-list', 'fab-inv-out', 'fab-inv-in', 'fab-conn-list', 'fab-grant-out', 'fab-grant-in', 'fab-deny-list', 'fab-authz-out']) $(id).innerHTML = '';
   for (const id of ['fab-inv-issuer', 'fab-accept-node', 'fab-authz-node', 'fab-prev-conn']) $(id).innerHTML = '';
   connect = null;

@@ -23,8 +23,12 @@ import {
   latencySummary, tokensSummary, BASELINE_SCORE_PPM
 } from './preview.mjs';
 import { handleDgmMuse } from './muse-router.mjs';
+import { listSelfTests, selfTestEnabled, storePresent, lastScheduledRunAt } from './self-test.mjs';
 
 export const DGM_PREVIEW_PERMISSION = 'admin.dgm.preview';
+export const DGM_SELF_TEST_PATH = '/api/admin/v1/dgm/self-test';
+export const DGM_SELF_TEST_SCHEMA = 'aipster.dgm.self-test-list/v1';
+export const DGM_SELF_TEST_SCHEDULE = '15 3 * * * UTC';
 
 // Live (paused) preview runs per operator. Terminal runs are unbounded:
 // only re-holdable runs consume inspection slots. Enforced inside the
@@ -332,6 +336,40 @@ async function disabledAction(ctx, action) {
 }
 
 const ID = '([A-Za-z0-9_-]{1,64})';
+
+/**
+ * Daily self-test history (read-only). The cron itself is opt-in
+ * (DGM_SELF_TEST_ENABLED === '1'); this read is deliberately NOT behind the
+ * dark DGM_PREVIEW_ENABLED flag: the cron stores deterministic synthetic results
+ * with no spend and no tenant data, so operators can read them wherever the
+ * Worker runs. Permission 'admin.dgm.preview'; GET only (405 otherwise).
+ */
+export async function handleDgmSelfTest(ctx) {
+  if (ctx.url.pathname !== DGM_SELF_TEST_PATH) return null;
+  const gate = await ctx.requireAdmin(DGM_PREVIEW_PERMISSION);
+  if (gate.status) return send(ctx, gate.status, gate.body);
+  if (ctx.request.method !== 'GET') {
+    return send(ctx, 405, { error: 'Method not allowed.', code: 'METHOD_NOT_ALLOWED' });
+  }
+  const store = (await storePresent(ctx.db)) ? 'ready' : 'not-migrated';
+  const runs = store === 'ready' ? await listSelfTests(ctx.db) : [];
+  const enabled = selfTestEnabled(ctx.env);
+  const observedAt = nowIso();
+  return send(ctx, 200, {
+    schema: DGM_SELF_TEST_SCHEMA,
+    enabled,
+    store,
+    schedule: DGM_SELF_TEST_SCHEDULE,
+    // Server clock and the last scheduled fire, so the panel can say "a run
+    // was expected at X and none was recorded" without trusting the browser.
+    observedAt,
+    expectedRunAt: enabled ? lastScheduledRunAt(Date.parse(observedAt)) : null,
+    telemetryWindowHours: 24,
+    synthetic: true,
+    runs,
+    latest: runs.length ? runs[0] : null,
+  });
+}
 
 export async function handleDgmPreview(ctx) {
   // Returns a Response, or null when the slice is disabled so the caller

@@ -1,0 +1,3 @@
+# Local DGM execution reports and durable attempt receipts stay on the host.
+/experiments/dgm-routing/artifacts/
+/experiments/dgm-routing/attempts/

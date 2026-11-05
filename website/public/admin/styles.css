@@ -140,7 +140,8 @@ button { font: inherit; }
 .app:has(#resources:target) .rail a[href="#resources"], .app:has(#metrics:target) .rail a[href="#metrics"], .app:has(#access:target) .rail a[href="#access"],
 .app:has(#operations:target) .rail a[href="#operations"], .app:has(#tickets:target) .rail a[href="#tickets"], .app:has(#engineering:target) .rail a[href="#engineering"],
 .app:has(#audit:target) .rail a[href="#audit"], .app:has(#coverage:target) .rail a[href="#coverage"], .app:has(#dgm-preview:target) .rail a[href="#dgm-preview"],
-.app:has(#dgm-run:target) .rail a[href="#dgm-run"], .app:has(#dgm-states:target) .rail a[href="#dgm-states"], .app:has(#dgm-muse:target) .rail a[href="#dgm-muse"] { background: var(--select); color: var(--text); box-shadow: var(--rail-mark); }
+.app:has(#dgm-run:target) .rail a[href="#dgm-run"], .app:has(#dgm-states:target) .rail a[href="#dgm-states"], .app:has(#dgm-muse:target) .rail a[href="#dgm-muse"],
+.app:has(#dgm-self-test:target) .rail a[href="#dgm-self-test"], .app:has(#dgm-activity:target) .rail a[href="#dgm-activity"] { background: var(--select); color: var(--text); box-shadow: var(--rail-mark); }
 .rail-note { margin: var(--s4) var(--s2) 0; padding-top: var(--s3); border-top: 1px solid var(--line); font-size: var(--t-xs); }
 
 main { min-width: 0; width: 100%; max-width: 86rem; display: grid; align-content: start; gap: var(--s4); padding: var(--s5) var(--s5) var(--s7); }
@@ -311,3 +312,13 @@ code { font-size: .92em; }
 @media (max-width: 26rem) {
   .brand-text { display: none; }
 }
+.tbl-wrap { overflow-x: auto; max-width: 100%; min-width: 0; }
+.headline { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); min-width: 0; font-size: var(--t-m); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: var(--s2); min-width: 0; }
+.tile { display: grid; gap: .15rem; padding: var(--s2) var(--s3); border: 1px solid var(--line); border-radius: var(--r2); background: var(--raised); min-width: 0; }
+.tile-label { font-size: var(--t-xs); color: var(--muted); }
+.tile b { font: 600 var(--t-xl)/1.2 var(--font-ui); font-variant-numeric: tabular-nums slashed-zero; overflow-wrap: anywhere; }
+.tile-sub { font-size: var(--t-xs); color: var(--muted); }
+.panel-group > summary { cursor: pointer; padding: var(--s3) var(--s4); border: 1px dashed var(--line-2); border-radius: var(--r2); color: var(--muted); font-size: var(--t-s); }
+.panel-group[open] > summary { margin-bottom: var(--s3); }
+.panel-group > summary:hover { background: var(--raised); color: var(--text); }

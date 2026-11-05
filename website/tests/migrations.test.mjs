@@ -84,6 +84,10 @@ test('migrations create the auth and app tables', () => {
   }
   const unique = sqlite.prepare('SELECT * FROM pragma_index_list(?)').all('dispatch_holds');
   assert.ok(unique.some((i) => i.unique === 1), 'dispatch_holds is unique per (op_id, pool_id)');
+  assert.ok(names.includes('dgm_self_tests'), 'missing table dgm_self_tests (0031)');
+  for (const c of ['id', 'ran_at', 'scheduled_at', 'trigger_kind', 'state', 'code', 'cron', 'duration_ms', 'snapshot_json', 'routing_json', 'created_at']) {
+    assert.ok(cols('dgm_self_tests').includes(c), `dgm_self_tests.${c}`);
+  }
 });
 
 test('migration 0028 backfills the unknown-outcome flag for migrated rows', () => {

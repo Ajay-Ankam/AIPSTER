@@ -12,8 +12,12 @@ import { checkWriteBudget, assertClaimed, capError, budgetWindow, WRITE_BUDGET_P
 import { handleFabric, federationEnabled } from './fabric/router.mjs';
 import { handleAdmin } from './admin/router.mjs';
 import { dgmPreviewEnabled } from './dgm/router.mjs';
+import { runDgmSelfTest } from './dgm/self-test.mjs';
 import { advisorEnabled, advisorDescriptor, handleAdvisorPost } from './advisor/router.mjs';
 import { ADVISOR_BODY_MAX } from './advisor/validate.mjs';
+import { qualificationEnabled, QUAL_BODY_MAX } from './qualification/constants.mjs';
+import { handleQualificationPost, handleQualificationsGet, handleWorkerNext, handleWorkerResult } from './qualification/router.mjs';
+import { WORKER_RESULT_MAX_BYTES as QUAL_WORKER_RESULT_MAX_BYTES } from './qualification/validate.mjs';
 import { schemaReady } from './lib/schema.js';
 import { buildStatus, MAX_STATUS_ITEMS, STALE_AFTER_MS, resourceLiveness } from './lib/status.mjs';
 import { fixtureSearch, fixtureDetail, hubSearch, hubDetail, isFixtureEnv, validateRepoId } from './lib/catalog/hub.mjs';
@@ -443,9 +447,19 @@ function validateCapabilityBody(body) {
     if (!r || typeof r !== 'object') return bad('Each runtime must be an object.');
     if (typeof r.name !== 'string' || !r.name || r.name.length > 64) return bad('Runtime name must be 1..64 chars.');
     if (r.version !== undefined && (typeof r.version !== 'string' || r.version.length > 32)) return bad('Runtime version must be at most 32 chars.');
+    if (r.mode !== undefined && r.mode !== 'attach' && r.mode !== 'managed') return bad('Runtime mode must be attach or managed.');
     for (const f of ['formats', 'quants', 'adapters']) {
       if (r[f] !== undefined && (!Array.isArray(r[f]) || r[f].length > 32 || r[f].some((v) => typeof v !== 'string' || v.length > 64))) {
         return bad(`Runtime ${f} must be an array of at most 32 short strings.`);
+      }
+    }
+    // Ready (`models`) and configured (`configured`) model identity: bounded
+    // id lists (1..256 chars, at most 32). The qualification flow binds the
+    // stable configured set in its digest and checks the volatile ready set
+    // at lease and result time; anything else stays a display-only entry.
+    for (const f of ['models', 'configured']) {
+      if (r[f] !== undefined && (!Array.isArray(r[f]) || r[f].length > 32 || r[f].some((v) => typeof v !== 'string' || !v || v.length > 256))) {
+        return bad(`Runtime ${f} must be an array of at most 32 model ids.`);
       }
     }
     if (r.maxContext !== undefined && (!Number.isSafeInteger(r.maxContext) || r.maxContext < 0)) return bad('Runtime maxContext must be a safe integer.');
@@ -1291,6 +1305,25 @@ async function handleApi(request, env, url) {
     const body = await readJson(request, ADVISOR_BODY_MAX);
     const out = await handleAdvisorPost({ db, env, actor, demo: isDemo(), body, now: new Date() });
     return json(out.status, out.body);
+  }
+  // Hardware qualification (meta-qual lane, flag-gated). Owner session +
+  // CSRF; demo sessions get fixtures only via the router. The report is
+  // owner-scoped: no grantee-readable result path exists.
+  if (path === '/api/qualifications' && method === 'GET') {
+    const d = needSession(); if (d) return deny(d);
+    if (!qualificationEnabled(env)) return json(404, { error: 'Not found.', code: 'NOT_FOUND' });
+    const out = await handleQualificationsGet({ db, env, ownerId: me(), demo: isDemo() });
+    return json(out.status, out.body);
+  }
+  {
+    const m = /^\/api\/resources\/([A-Za-z0-9_-]{1,64})\/qualification$/.exec(path);
+    if (m && method === 'POST') {
+      const d = needSession() || needCsrf(); if (d) return deny(d);
+      if (!qualificationEnabled(env)) return json(404, { error: 'Not found.', code: 'NOT_FOUND' });
+      const body = await readJson(request, QUAL_BODY_MAX);
+      const out = await handleQualificationPost({ db, env, ownerId: me(), resourceId: m[1], body, now: new Date(), demo: isDemo(), fetchImpl: fetch });
+      return json(out.status, out.body);
+    }
   }
   {
     const m = /^\/api\/grants\/([A-Za-z0-9_-]{1,64})$/.exec(path);
@@ -3183,6 +3216,25 @@ async function handleApi(request, env, url) {
       return json(200, { ok: true, job_id: m[1], status: checked.value.status });
     }
   }
+  // ---- qualification benchmark pull (heartbeat-scoped key, one resource) ----
+  // Typed benchmark protocol, separate from inference dispatch: assignments
+  // bind lease + node + owner + profile + catalog, results are replay-safe,
+  // and uncertain terminals are retained, never auto-rerun.
+  if (qualificationEnabled(env) && path === '/api/worker/qualifications/next' && method === 'GET') {
+    const refusal = workerScope(); if (refusal) return refusal;
+    const out = await handleWorkerNext({ db, ownerId: actor.key.owner_id, resourceId: actor.key.resource_id, keyId: actor.key.id });
+    if (out.status === 204) return new Response(null, { status: 204, headers: baseHeaders() });
+    return json(out.status, out.body);
+  }
+  {
+    const m = /^\/api\/worker\/qualifications\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/result$/.exec(path);
+    if (qualificationEnabled(env) && m && method === 'POST') {
+      const refusal = workerScope(); if (refusal) return refusal;
+      const body = await readJson(request, QUAL_WORKER_RESULT_MAX_BYTES);
+      const out = await handleWorkerResult({ db, ownerId: actor.key.owner_id, resourceId: actor.key.resource_id, runId: m[1], body, keyId: actor.key.id });
+      return json(out.status, out.body);
+    }
+  }
   if (path === '/api/jobs' && method === 'GET') {
     const d = needAuthz('read'); if (d) return deny(d);
     const q = pagination(url);
@@ -3432,5 +3484,14 @@ export default {
     } catch {
       return json(500, { error: 'Request failed.', code: 'INTERNAL' });
     }
+  },
+  // Daily DGM self-test (offline evaluation only): the cron trigger runs the
+  // frozen baseline plus the exhaustive ceiling search and stores one row.
+  // No network, no model calls, no keys. A failed evaluation records its
+  // code; nothing is guessed.
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(runDgmSelfTest({ db: env.DB, env, trigger: 'cron', cron: controller.cron, scheduledAt: controller.scheduledTime }).catch((e) => {
+      console.error('dgm self-test cron failed', (e && e.code) || 'UNKNOWN');
+    }));
   }
 };

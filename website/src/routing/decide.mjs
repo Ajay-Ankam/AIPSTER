@@ -50,8 +50,10 @@ export async function decideRoute({ db, env = {}, tenant, features = {}, tenantP
   // outcome or back off while the winner runs. No budget, provider, cache
   // write or reservation happens before this line returns leader.
   let claim;
+  let claimMs;
   try {
-    claim = await claimRequest(db, { opId, tenant, requestId, nowMs: now() });
+    claimMs = now();
+    claim = await claimRequest(db, { opId, tenant, requestId, nowMs: claimMs });
   } catch (e) {
     if (e && e.code === 'ROUTE_OP_IN_FLIGHT') {
       return {
@@ -68,6 +70,9 @@ export async function decideRoute({ db, env = {}, tenant, features = {}, tenantP
     return { ...body.outcome, replay: true, receipt: { ...body.outcome.receipt, opId: claim.op.id } };
   }
 
+  // Reuse the claim instant: telemetry must not add clock reads, because
+  // scripted test clocks (and their deadline positions) count every call.
+  const startedMs = claimMs;
   try {
     const request = newRoutingRequest({ model: f.model, maxTokens: f.maxTokens, kinds: f.kinds, nowMs: now() });
     const eligible = await listEligible(db, tenant, { nowMs: now(), kinds: f.kinds || undefined, maxTokens: f.maxTokens || undefined, model: request.model || undefined });
@@ -75,20 +80,27 @@ export async function decideRoute({ db, env = {}, tenant, features = {}, tenantP
     const digests = await routingDigests({ model: request.model, maxTokens: request.maxTokens, kinds: request.kinds }, scored.ranked);
     const policy = resolveAdvicePolicy(env, tenantPolicy);
 
-    const finish = async (outcome) => {
+    const finish = async (outcome, telemetry = {}) => {
+      const endedMs = now();
+      const metrics = decisionMetrics({
+        startedMs, endedMs, injected, eligible, scored, outcome,
+        advice: telemetry.advice || null, cache: telemetry.cache || 'not-checked',
+      });
       const full = {
         ...outcome,
         executable: false,
         dispatchDisabled: true,
         replay: false,
         receipt: { opId, requestId, policyVersion: ROUTING_POLICY_VERSION, digests, ...(outcome.receipt || {}) },
+        metrics,
       };
       const served = { ...full };
       delete served.receipt;
+      delete served.metrics;
       served.receipt = { requestId, policyVersion: ROUTING_POLICY_VERSION, digests };
       await finalizeDecision(db, {
         opId, tenant, requestId, ranking: full.ranking, source: full.source,
-        failure: full.failure, outcome: served, digests, policyVersion: ROUTING_POLICY_VERSION, nowMs: now(),
+        failure: full.failure, outcome: served, metrics, digests, policyVersion: ROUTING_POLICY_VERSION, nowMs: endedMs,
       });
       return full;
     };
@@ -100,9 +112,11 @@ export async function decideRoute({ db, env = {}, tenant, features = {}, tenantP
     const key = cacheKeyFor(tenant, digests.featureDigest, digests.candidateDigest, ROUTING_POLICY_VERSION, policy.mode);
     const serveStale = env.ROUTING_ADVICE_SERVE_STALE === '1';
     const cached = await getCached(db, key, now(), { allowStale: serveStale });
+    let cacheState = cached ? 'unservable' : 'miss';
     if (cached) {
       const served = serveCached(cached.response.rankedIds || [], scored.ranked);
       if (served) {
+        const cache = cached.stale ? 'stale-hit' : 'hit';
         // Same absolute-deadline gate as the advice path: a lapsed
         // request keeps its cached ranking as evidence but holds nothing.
         if (request.deadlineMs <= now()) {
@@ -110,7 +124,7 @@ export async function decideRoute({ db, env = {}, tenant, features = {}, tenantP
             source: cached.stale ? 'degraded-stale' : 'cached',
             ranking: served.ranking, completed: served.completed, route: null,
             degraded: true, failure: { code: 'DEADLINE_EXCEEDED', status: 200 },
-          });
+          }, { cache });
         }
         const route = await cascadeFor(db, tenant, opId, served.ranking, scored.ranked, request, now());
         return await finish({
@@ -118,7 +132,7 @@ export async function decideRoute({ db, env = {}, tenant, features = {}, tenantP
           ranking: served.ranking, completed: served.completed, route,
           degraded: cached.stale || route === null,
           failure: route === null ? { code: 'ROUTE_CAPACITY_EXHAUSTED', status: 429 } : null,
-        });
+        }, { cache });
       }
     }
 
@@ -135,13 +149,14 @@ export async function decideRoute({ db, env = {}, tenant, features = {}, tenantP
         key, tenant, response: { rankedIds: advice.ranking }, ttlMs: cacheTtl(env), capPerTenant: cacheCap(env), nowMs: now(),
       }).catch(() => { /* cache is advisory; a failed write must not fail the route */ });
     }
+    const telemetry = { advice, cache: cacheState };
     // Recheck before admission: capacity holds must not start past deadline.
     if (request.deadlineMs <= now()) {
       return await finish({
         source: advice.outcome === 'advice' ? 'advice' : 'fallback',
         ranking: advice.ranking, completed: !!advice.completed, route: null, degraded: true,
         failure: advice.failure || { code: 'DEADLINE_EXCEEDED', status: 200 },
-      });
+      }, telemetry);
     }
     const route = await cascadeFor(db, tenant, opId, advice.ranking, scored.ranked, request, now());
     return await finish({
@@ -149,7 +164,7 @@ export async function decideRoute({ db, env = {}, tenant, features = {}, tenantP
       ranking: advice.ranking, completed: !!advice.completed, route,
       degraded: route === null,
       failure: advice.failure || (route === null ? { code: 'ROUTE_CAPACITY_EXHAUSTED', status: 429 } : null),
-    });
+    }, telemetry);
   } catch (e) {
     // Leader error path: release any holds and free the claim promptly so
     // retries replay instead of wedging on our corpse for 60s.
@@ -157,6 +172,82 @@ export async function decideRoute({ db, env = {}, tenant, features = {}, tenantP
     await cancelClaim(db, { opId, tenant, requestId, nowMs: now() }).catch(() => {});
     throw e;
   }
+}
+
+export const DECISION_METRICS_SCHEMA = 'aipster.routing.decision-metrics/v1';
+
+const finiteOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/**
+ * Per-decision operator telemetry, persisted beside the served outcome in
+ * routing_ops.ranking_json (never replayed to callers). Sanitized: counts,
+ * aliases, codes, timings and the advice receipt's usage/spend only — no
+ * prompts, provider bodies, resource ids, owner ids, or credentials.
+ *
+ * Honesty rules:
+ * - decisionMs under an injected (pinned or scripted) clock is the injected
+ *   clock's difference, labeled clock:'injected', never a wall-clock claim.
+ * - Selection propensity is 1 only when the served order is the
+ *   deterministic route/v1 order. Advice and cached advice orders come from
+ *   a model whose selection probability is unknown: propensity null.
+ * - An advice receipt that was never produced is null, never a zero.
+ */
+export function decisionMetrics({ startedMs, endedMs, injected, eligible, scored, outcome, advice = null, cache = 'not-checked' }) {
+  const ranked = scored && Array.isArray(scored.ranked) ? scored.ranked : [];
+  const deterministicOrder = ranked.map((r) => r.alias);
+  const servedOrder = Array.isArray(outcome && outcome.ranking) ? outcome.ranking : [];
+  const deterministicTop1 = deterministicOrder[0] ?? null;
+  const servedTop1 = servedOrder[0] ?? null;
+  const sameOrder = servedOrder.length === deterministicOrder.length
+    && servedOrder.every((a, i) => a === deterministicOrder[i]);
+  const elapsed = finiteOrNull(endedMs) !== null && finiteOrNull(startedMs) !== null ? Math.max(0, endedMs - startedMs) : null;
+  const r = advice && advice.receipt ? advice.receipt : null;
+  const usage = r && r.usage ? r.usage : null;
+  return {
+    schema: DECISION_METRICS_SCHEMA,
+    policyVersion: ROUTING_POLICY_VERSION,
+    clock: injected ? 'injected' : 'live',
+    decisionMs: elapsed,
+    candidates: {
+      eligible: Array.isArray(eligible && eligible.eligible) ? eligible.eligible.length : null,
+      rejected: Array.isArray(eligible && eligible.rejected) ? eligible.rejected.length : null,
+      scored: ranked.length,
+      truncated: !!(scored && scored.truncated),
+    },
+    cache,
+    deterministicTop1,
+    servedTop1,
+    top1AgreesWithDeterministic: deterministicTop1 !== null && servedTop1 !== null ? servedTop1 === deterministicTop1 : null,
+    orderAgreesWithDeterministic: servedOrder.length > 0 ? sameOrder : null,
+    // Propensity belongs to the LOGGING policy, not to whichever order the
+    // result happens to equal: an advice order that matches route/v1 was
+    // still chosen by the model.
+    // A fallback after an ATTEMPTED advice call is not propensity 1: whether
+    // the deterministic order got served depended on the provider's outcome.
+    selection: servedOrder.length === 0
+      ? { propensity: null, basis: 'no-selection' }
+      : (outcome.source === 'fallback' && sameOrder
+        ? (r && r.attempted
+          ? { propensity: null, basis: 'fallback-after-advice-attempt' }
+          : { propensity: 1, basis: 'deterministic-route/v1' })
+        : { propensity: null, basis: 'model-advice-unknown' }),
+    advice: advice ? {
+      outcome: advice.outcome === 'advice' ? 'advice' : 'fallback',
+      attempted: !!(r && r.attempted),
+      completed: !!advice.completed,
+      failureCode: advice.failure && advice.failure.code ? advice.failure.code : null,
+      latencyMs: r ? finiteOrNull(r.latencyMs) : null,
+      mode: r && typeof r.mode === 'string' ? r.mode : null,
+      model: r && typeof r.model === 'string' ? r.model : null,
+      usage: usage ? {
+        inputTokens: finiteOrNull(usage.inputTokens),
+        outputTokens: finiteOrNull(usage.outputTokens),
+        source: typeof usage.source === 'string' ? usage.source : 'none',
+      } : null,
+      spendUsdEst: r ? finiteOrNull(r.spendUsdEst) : null,
+      priceVersion: r && r.priceRef && typeof r.priceRef.version === 'string' ? r.priceRef.version : null,
+    } : null,
+  };
 }
 
 async function cascadeFor(db, tenant, opId, ranking, scored, request, now) {

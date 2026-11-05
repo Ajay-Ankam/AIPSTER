@@ -751,11 +751,438 @@ async function dgmControl(action) {
   }
 }
 
+document.getElementById('dgm-activity-load').addEventListener('click', loadDgmActivity);
+document.getElementById('dgm-self-test-load').addEventListener('click', loadDgmSelfTest);
 document.getElementById('dgm-runs-load').addEventListener('click', loadDgmRuns);
 document.getElementById('dgm-create').addEventListener('click', createDgmRun);
 document.getElementById('dgm-pause').addEventListener('click', () => dgmControl('pause'));
 document.getElementById('dgm-resume').addEventListener('click', () => dgmControl('resume'));
 document.getElementById('dgm-cancel').addEventListener('click', () => dgmControl('cancel'));
+
+// ---- DGM routing activity (read-only coherent view; no generation, no promotion) ----
+//
+// Reads the existing authorized endpoints only (preview status/runs/details,
+// Muse status) and renders objective, current state, run history with
+// before/after metrics, blockers, and budget facts. Fixture ppm scores are
+// labeled hardcoded, never measured. Local dry-run reports are not served by
+// this API and appear through the local harness, never invented here.
+// Promotion history: the website promote/execute routes answer 501, so the
+// view states that no promotion history exists instead of showing one.
+function dgmActivityState(status) {
+  // Nothing here executes: paused is held inspection, never running.
+  // Unknown statuses are shown unclassified, never asserted terminal.
+  if (status === 'paused') return ['paused', 'held for inspection; no execution in flight'];
+  if (status === 'failed') return ['awaiting-review', 'evaluation failed; retained for operator review'];
+  if (status === 'completed-preview' || status === 'cancelled' || status === 'validation-rejected') {
+    return ['inactive', 'terminal state ' + status];
+  }
+  return ['unknown', 'unrecognized status; not classified'];
+}
+
+function dgmActivityHtml(data) {
+  const row = (label, value) => '<tr><th>' + dgmEsc(label) + '</th><td>' + value + '</td></tr>';
+  const binding = (data.status && data.status.binding) || {};
+  const muse = data.muse || null;
+  // Actual muse status shape: {evaluation, provider: {model, configured,
+  // endpoint, bounds}, spendCapUsd, spend: {capUsd, reservedUsd, usedUsd,
+  // remainingUsd, updatedAt, status}, observedAt}. Never top-level
+  // configured/model.
+  const museProvider = (muse && muse.provider) || {};
+  const museLive = museProvider.configured === true;
+  const museSpend = (muse && muse.spend) || {};
+  const items = Array.isArray(data.items) ? data.items : [];
+  const details = new Map();
+  for (const d of (Array.isArray(data.details) ? data.details : [])) {
+    if (d && d.runId) details.set(d.runId, d);
+  }
+  let history = '<tr><td colspan="5" class="empty-row">No preview runs yet (empty — nothing is running).</td></tr>';
+  if (items.length) {
+    history = items.map((it) => {
+      const d = details.get(it.runId) || {};
+      const prov = d.provenance || {};
+      const base = typeof prov.baselineScorePpm === 'number' ? String(prov.baselineScorePpm) : 'unknown';
+      const cand = typeof prov.candidateScorePpm === 'number' ? String(prov.candidateScorePpm) : 'unknown (rejected before runner activity)';
+      const failed = (Array.isArray(d.gates) ? d.gates : []).filter((g) => g && g.passed === false).map((g) => g.name).join(', ');
+      const st = dgmActivityState(it.status);
+      return '<tr><td class="id">' + dgmEsc(it.runId) + '</td><td>' + dgmEsc(it.fixture) + '</td><td>'
+        + statusPill(st[0]) + ' (' + dgmEsc(it.status + ': ' + st[1]) + ')</td>'
+        + '<td class="num">' + dgmEsc(base) + ' → ' + dgmEsc(cand) + ' ppm (fixture, NOT MEASURED)</td>'
+        + '<td>' + (failed ? dgmEsc('failed gates: ' + failed) : dgmEsc(dgmUnknown(d.settlement))) + '</td></tr>';
+    }).join('');
+  }
+  const failedRuns = items.filter((it) => it && it.status === 'failed').length;
+  const local = data.local || null;
+  const localReports = local && Array.isArray(local.reports) ? local.reports.slice(0, 10) : [];
+  const localFailures = local && Array.isArray(local.failures) ? local.failures : [];
+  let localSection = '<h3>Local dry-run reports</h3><p>Not connected: local reports are not served by this API (pending a read-only harness hook).</p>';
+  if (local) {
+    const rows = localReports.length ? localReports.map((r) => {
+      const held = (side) => (r && r[side] && r[side].heldout) || {};
+      const base = held('baseline');
+      const cand = held('candidate');
+      // Actual report fields: heldout {n, top1Hits}, guardrails [{passed}].
+      // Each side renders its own n — never one ambiguous fraction.
+      const hits = (h) => (Number.isSafeInteger(h.top1Hits) && Number.isSafeInteger(h.n) ? h.top1Hits + '/' + h.n : 'unknown');
+      const guards = Array.isArray(r.guardrails) ? r.guardrails : [];
+      const passCount = guards.filter((g) => g && g.passed === true).length;
+      const promo = r.promotionEligible === true ? 'eligible-unapproved' : 'ineligible';
+      return '<tr><td class="id">' + dgmEsc(String(r.generatedAt || 'undated') + ' / ' + String((r.baseline && r.baseline.policyVersion) || 'unknown')) + '</td><td>'
+        + dgmEsc(hits(base) + ' → ' + hits(cand) + ' top-1 (measured-synthetic, NOT fabric quality)') + '</td><td>'
+        + dgmEsc(String(r.outcome) + '; guardrails ' + passCount + '/' + guards.length) + '</td><td>'
+        + dgmEsc(promo + '; human approval required') + '</td></tr>';
+    }).join('') : '<tr><td colspan="4" class="empty-row">No local reports on this host (empty).</td></tr>';
+    const dropped = localFailures.length
+      ? '<p>Dropped unreadable reports: ' + dgmEsc(localFailures.map((f) => (f && f.code) || 'unknown').join(', ')) + ' (never rendered).</p>'
+      : '';
+    localSection = '<h3>Local dry-run reports (this host only)</h3><table class="tbl"><thead><tr><th>report</th><th>baseline → candidate</th><th>outcome</th><th>promotion</th></tr></thead><tbody>'
+      + rows + '</tbody></table>' + dropped + dgmCeilingHtml(local.ceiling);
+  }
+  const blockers = [];
+  if (binding.state && binding.state !== 'active') blockers.push('preview binding is not active; runs cannot start');
+  if (muse && !museLive) blockers.push('Meta provider not configured: proposals answer fixture-only, never live');
+  if (failedRuns > 0) blockers.push(failedRuns + ' failed preview run(s) retained above');
+  const spendRows = !muse ? row('spend ledger', 'unknown (status unavailable)')
+    : museSpend.status === 'store-not-migrated' ? row('spend ledger', 'unavailable: store not migrated')
+    : museSpend.status === 'uninitialised' ? row('spend ledger', 'no admission recorded yet (cap ' + dgmEsc(museUsd(museSpend.capUsd)) + ')')
+    : row('spend cap', dgmEsc(museUsd(museSpend.capUsd)))
+      + row('reserved (admission bound, not a bill)', dgmEsc(museUsd(museSpend.reservedUsd)))
+      + row('used (delivered usage only, lower bound)', dgmEsc(museUsd(museSpend.usedUsd)))
+      + row('remaining', dgmEsc(museUsd(museSpend.remainingUsd)))
+      + row('ledger updated', dgmEsc(dgmUnknown(museSpend.updatedAt)));
+  return '<h3>Objective</h3><p>Bounded routing-improvement experiments: one frozen baseline versus one restricted candidate over synthetic routing decisions, human promotion only. No production execution, no autonomous loop.</p>'
+    + '<h3>Current state</h3><table class="kv">'
+    + row('preview binding', dgmEsc(dgmUnknown(binding.state)))
+    + row('provider', muse ? dgmEsc((museLive ? 'configured live' : 'fixture-only') + ' — ' + dgmUnknown(museProvider.model)) : 'unknown (status unavailable)')
+    + row('reported evaluation', dgmEsc(dgmUnknown(muse && muse.evaluation)))
+    + row('observed at', dgmEsc(dgmUnknown((data.status && data.status.observedAt) || (muse && muse.observedAt))))
+    + row('runs on record', Number.isSafeInteger(data.total) && data.total >= 0
+      ? dgmEsc(data.total + ' total (showing first ' + items.length + ')')
+      : dgmEsc('unknown total (showing ' + items.length + ' first-page rows)'))
+    + row('promotion', 'disabled: website promote/execute answer 501; no promotion history exists')
+    + '</table>'
+    + '<h3>Budget (persisted aggregate ledger)</h3><table class="kv">' + spendRows + '</table>'
+    + '<h3>History (before → after, source-labeled)</h3><table class="tbl"><thead><tr><th>run</th><th>fixture</th><th>state</th><th>baseline → candidate</th><th>retained failure</th></tr></thead><tbody>'
+    + history + '</tbody></table>'
+    + localSection
+    // "No blockers" is never bare: proposal operations are not read by this
+    // view (no ops-list route exists), so the caveat always travels with it.
+    + '<h3>Blockers</h3>' + (blockers.length
+      ? '<ul>' + blockers.map((b) => '<li>' + dgmEsc(b) + '</li>').join('') + '</ul>'
+        + '<p>Proposal operations: not listed by this API; inspect keys individually in the Muse panel.</p>'
+      : local
+        ? '<p>No blockers in the sources read here. Proposal operations: not listed by this API; inspect keys individually in the Muse panel.</p>'
+        : '<p>No blockers in the sources read here. Proposal operations: not listed by this API; inspect keys individually in the Muse panel. Local dry-run reports are not connected: they are not served by this API (pending a read-only harness hook).</p>');
+}
+
+// ---- DGM self-test and routing-weights rendering (statistics only; nothing to set) ----
+//
+// Operator vocabulary: "current weights" are the live route/v1 scoring
+// weights; "best alternative" is the best of every allowlisted weight setting
+// the self-test tried; a "score" is correct first choices on the fixed
+// synthetic routing cases (never fabric quality). Internal outcome labels
+// (tie-archived, regression) never reach the page. Every string is escaped.
+const DGM_WEIGHT_KEYS = ['EXACT_TOKEN', 'ONLINE', 'FRESHNESS_MAX', 'OWNED', 'HEADROOM'];
+const dgmPill = (tone, text) => '<span class="pill pill-' + (tone === 'ok' || tone === 'bad' ? tone : 'muted') + '">' + dgmEsc(text) + '</span>';
+const dgmInt = (v) => (Number.isSafeInteger(v) ? String(v) : 'unknown');
+// 'YYYY-MM-DD HH:MM UTC' from an ISO instant; never a locale guess, never wraps.
+function dgmWhen(iso) {
+  const ms = typeof iso === 'string' ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(ms)) return 'unknown time';
+  const s = new Date(ms).toISOString();
+  return s.slice(0, 10) + ' ' + s.slice(11, 16) + ' UTC';
+}
+function dgmAgo(ms, nowMs) {
+  const d = nowMs - ms;
+  if (!Number.isFinite(d) || d < 60000) return 'just now';
+  if (d < 3600e3) return Math.floor(d / 60000) + ' min ago';
+  if (d < 48 * 3600e3) return Math.floor(d / 3600e3) + ' h ago';
+  return Math.floor(d / 86400e3) + ' days ago';
+}
+// Panels grouped under a collapsed <details> still open from a rail link.
+function dgmRevealHash() {
+  if (typeof location === 'undefined' || !location || typeof document.getElementById !== 'function') return;
+  const id = String(location.hash || '').slice(1);
+  if (!id) return;
+  const target = document.getElementById(id);
+  if (!target || typeof target.closest !== 'function') return;
+  let group = target.closest('details');
+  while (group) {
+    group.open = true;
+    group = group.parentElement && typeof group.parentElement.closest === 'function' ? group.parentElement.closest('details') : null;
+  }
+}
+if (typeof window !== 'undefined' && window && typeof window.addEventListener === 'function') {
+  window.addEventListener('hashchange', dgmRevealHash);
+  dgmRevealHash();
+}
+
+// Current weights against the best alternative the self-test tried. Input is
+// the ceiling-summary shape (local hook) or dgmSnapshotCeiling(snapshot).
+// Only an explicit boolean says whether a better setting exists.
+function dgmCeilingHtml(c) {
+  const head = '<h3>Routing weights: current vs best alternative tried</h3>';
+  if (!c || typeof c !== 'object') return '';
+  if (c.state !== 'computed') {
+    return head + '<p>Not available' + (c.code ? ' (' + dgmEsc(c.code) + ')' : '') + '.</p>';
+  }
+  const counts = c.counts || {};
+  const best = c.best && typeof c.best === 'object' ? c.best : null;
+  const score = (v) => dgmInt(v) + '/' + dgmInt(c.heldoutN);
+  const cur = c.baselineHeldoutTop1;
+  const top = best ? best.heldoutTop1 : null;
+  let verdict;
+  if (c.proposalCanImprove === true) {
+    verdict = dgmInt(counts.improvement) + ' of ' + dgmInt(c.evaluated) + ' alternative settings would beat the current weights (best scores '
+      + score(top) + ' against ' + score(cur) + '). Review in the DGM lane before any change; nothing is applied automatically.';
+  } else if (c.proposalCanImprove === false) {
+    const rel = Number.isSafeInteger(top) && Number.isSafeInteger(cur) && top < cur ? 'scores ' + score(top) + ' against ' + score(cur) + ', lower' : 'ties at ' + score(top) + ' against ' + score(cur);
+    verdict = 'None of the ' + dgmInt(c.evaluated) + ' alternative settings beats the current weights: the best alternative ' + rel + '. Nothing to change.';
+  } else {
+    verdict = 'Whether any alternative setting would do better is unknown.';
+  }
+  const breakdown = 'Of the alternatives tried: ' + dgmInt(counts.improvement) + ' better, ' + dgmInt(counts['tie-archived']) + ' tie, '
+    + dgmInt(counts.regression) + ' worse. A score is correct first choices on ' + dgmInt(c.heldoutN) + ' synthetic routing cases; not a fabric-quality measurement.';
+  const vars = best && Array.isArray(best.variables) ? best.variables.slice(0, 10) : [];
+  const diff = (v) => {
+    if (!Number.isSafeInteger(v.baseline) || !Number.isSafeInteger(v.best)) return 'unknown';
+    const d = v.best - v.baseline;
+    return d === 0 ? 'no change' : (d > 0 ? '+' : '-') + Math.abs(d);
+  };
+  const rows = vars.length ? vars.map((v) => '<tr><td class="name">' + dgmEsc(v && v.name) + '</td><td class="num">' + dgmEsc(dgmInt(v && v.baseline))
+    + '</td><td class="num">' + dgmEsc(dgmInt(v && v.best)) + '</td><td>' + dgmEsc(diff(v || {})) + '</td></tr>').join('')
+    : '<tr><td colspan="4" class="empty-row">No alternative evaluated.</td></tr>';
+  return head + '<p>' + dgmEsc(verdict) + '</p><p class="note">' + dgmEsc(breakdown) + '</p>'
+    + '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>weight</th><th>current</th><th>best alternative</th><th>difference</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+    + '<p class="note">The live weights are not changed by this test.</p>';
+}
+
+// What the best alternative's weights did between two completed runs.
+function dgmWeightChanges(snap, prevSnap) {
+  const w = snap && snap.best && snap.best.weights && typeof snap.best.weights === 'object' ? snap.best.weights : null;
+  const p = prevSnap && prevSnap.best && prevSnap.best.weights && typeof prevSnap.best.weights === 'object' ? prevSnap.best.weights : null;
+  if (!w || !p) return 'unknown';
+  const moved = DGM_WEIGHT_KEYS.filter((k) => Number.isSafeInteger(w[k]) && Number.isSafeInteger(p[k]) && w[k] !== p[k])
+    .map((k) => k + ' ' + p[k] + '→' + w[k]);
+  return moved.length ? moved.join('; ') : 'none';
+}
+
+// One run's result for operators. prevSnap is the previous COMPLETED run's
+// snapshot (failed rows are skipped), so a regression is a real drop in the
+// current weights' score between two valid evaluations.
+function dgmRunResult(e, snap, prevSnap) {
+  if (e && e.state === 'failed') return { tone: 'bad', label: 'failed: ' + String(e.code || 'unknown') };
+  if (!snap) return { tone: 'muted', label: 'no result' };
+  const guards = Array.isArray(snap.guardrails) ? snap.guardrails : [];
+  if (!guards.length || !guards.every((g) => g && g.passed === true)) return { tone: 'bad', label: 'checks failed' };
+  const cur = snap.baseline && Number.isSafeInteger(snap.baseline.heldoutTop1) ? snap.baseline.heldoutTop1 : null;
+  const prev = prevSnap && prevSnap.baseline && Number.isSafeInteger(prevSnap.baseline.heldoutTop1) ? prevSnap.baseline.heldoutTop1 : null;
+  if (cur !== null && prev !== null && cur < prev) return { tone: 'bad', label: 'policy regressed' };
+  if (snap.proposalCanImprove === true) return { tone: 'muted', label: 'better weights available' };
+  if (cur !== null && prev !== null && cur > prev) return { tone: 'ok', label: 'policy improved' };
+  return { tone: 'ok', label: 'healthy' };
+}
+
+// Run history (newest first): one row per run with the live-routing columns
+// that can move day to day beside the deterministic policy score.
+function dgmSelfTestHtml(api) {
+  const head = '<h3>Run history (newest first)</h3>';
+  if (!api || typeof api !== 'object') return head + '<p>Unavailable: self-test history could not be read.</p>';
+  const entries = Array.isArray(api.runs) ? api.runs.slice(0, 30) : [];
+  if (!entries.length) return head + '<p>No self-test runs yet.</p>';
+  const nowMs = Number.isFinite(Date.parse(api.observedAt)) ? Date.parse(api.observedAt) : Date.now();
+  const snapOf = (e) => (e && e.state === 'completed' && e.snapshot && typeof e.snapshot === 'object' ? e.snapshot : null);
+  const pc = (v) => (typeof v === 'number' && Number.isFinite(v) ? v + '%' : '–');
+  const rows = entries.map((e, i) => {
+    const snap = snapOf(e);
+    let prevSnap = null;
+    for (let j = i + 1; j < entries.length; j++) { prevSnap = snapOf(entries[j]); if (prevSnap) break; }
+    const hn = snap && snap.workload ? snap.workload.heldoutN : null;
+    const score = (v) => (Number.isSafeInteger(v) && Number.isSafeInteger(hn) ? v + '/' + hn : 'unknown');
+    const res = dgmRunResult(e, snap, prevSnap);
+    const changed = !snap ? 'unknown' : !prevSnap ? 'no earlier completed run' : dgmWeightChanges(snap, prevSnap);
+    const r = e && e.routing && typeof e.routing === 'object' ? e.routing : null;
+    const decisions = r && Number.isSafeInteger(r.decisions) ? String(r.decisions) + (r.truncated ? '+' : '') : (r && r.state === 'failed' ? 'failed' : 'none');
+    const agree = r && r.agreement ? pc(r.agreement.top1AgreeRate) : '–';
+    const fallback = r && r.rates ? pc(r.rates.fallbackPct) : '–';
+    return '<tr><td class="id">' + dgmEsc(dgmWhen(e && e.ranAt)) + '</td><td>' + dgmEsc(String((e && e.trigger) || 'unknown')) + '</td><td>' + dgmPill(res.tone, res.label)
+      + '</td><td class="num">' + dgmEsc(snap ? score(snap.baseline && snap.baseline.heldoutTop1) : 'unknown')
+      + '</td><td class="num">' + dgmEsc(snap ? score(snap.best && snap.best.heldoutTop1) : 'unknown')
+      + '</td><td>' + dgmEsc(changed) + '</td><td class="num">' + dgmEsc(decisions) + '</td><td class="num">' + dgmEsc(agree) + '</td><td class="num">' + dgmEsc(fallback) + '</td></tr>';
+  }).join('');
+  let fresh = 'Last run: unknown.';
+  const newest = entries[0] && entries[0].ranAt ? Date.parse(entries[0].ranAt) : NaN;
+  if (Number.isFinite(newest)) {
+    const stale = nowMs - newest > 26 * 3600e3;
+    fresh = 'Last run: ' + dgmAgo(newest, nowMs) + (stale ? ' — stale (>26 h): a daily run is overdue.' : '.');
+  }
+  return head + '<p>' + dgmEsc(fresh) + '</p>'
+    + '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>run (UTC)</th><th>trigger</th><th>result</th><th>current weights score</th><th>best alternative score</th>'
+    + '<th>best alternative changed since previous run</th><th>decisions, prior 24 h</th><th>agree with deterministic choice</th><th>fallback share</th></tr></thead><tbody>'
+    + rows + '</tbody></table></div>';
+}
+
+// Latest snapshot rendered through the same weights block the local hook
+// uses (eval-core snapshot -> ceiling-summary shape).
+function dgmSnapshotCeiling(snap) {
+  if (!snap || typeof snap !== 'object') return { state: 'unavailable' };
+  const base = snap.baseline && typeof snap.baseline === 'object' ? snap.baseline : {};
+  const wl = snap.workload && typeof snap.workload === 'object' ? snap.workload : {};
+  const best = snap.best && typeof snap.best === 'object' ? snap.best : null;
+  return {
+    state: 'computed', ceiling: snap.ceiling, proposalCanImprove: snap.proposalCanImprove,
+    evaluated: snap.evaluated, counts: snap.counts, baselineHeldoutTop1: base.heldoutTop1, heldoutN: wl.heldoutN,
+    best: best ? { outcome: best.outcome, heldoutTop1: best.heldoutTop1, variables: Array.isArray(snap.variables) ? snap.variables : [] } : null,
+  };
+}
+
+// Live routing aggregate stored with the run: the figures that move with
+// real traffic. Zero traffic is said plainly, never shown as zeros.
+function dgmRoutingHtml(r, hours) {
+  const head = '<h3>Live routing in the ' + dgmEsc(dgmInt(hours)) + ' hours before the latest run</h3>';
+  if (!r || typeof r !== 'object') return head + '<p>No routing statistics were recorded with this run.</p>';
+  if (r.state === 'failed') return head + '<p>Not available: reading routing telemetry failed (' + dgmEsc(String(r.code || 'unknown')) + ').</p>';
+  if (r.store === 'not-migrated') return head + '<p>Not available: the routing ledger is not migrated on this deployment.</p>';
+  if (!Number.isSafeInteger(r.decisions) || r.decisions === 0) {
+    return head + '<p>No routing decisions were made in that window, so there are no live statistics yet. These figures start moving once the site routes real requests.</p>';
+  }
+  const tile = (label, value, sub) => '<div class="tile"><span class="tile-label">' + dgmEsc(label) + '</span><b>' + dgmEsc(value) + '</b><span class="tile-sub">' + dgmEsc(sub) + '</span></div>';
+  const rates = r.rates || {}; const a = r.advice || {}; const ag = r.agreement || {}; const c = r.cache || {}; const d = r.decisionMs || {}; const fc = r.failureCodes || {};
+  const pc = (v) => (typeof v === 'number' && Number.isFinite(v) ? v + '%' : 'n/a');
+  const lat = a.latencyMs && typeof a.latencyMs === 'object' ? a.latencyMs : {};
+  const served = 'served by model advice ' + pc(rates.advicePct) + ', cache ' + pc(rates.cachedPct) + ', deterministic fallback ' + pc(rates.fallbackPct);
+  const tiles = [
+    tile('routing decisions', dgmInt(r.decisions) + (r.truncated ? '+' : ''), r.truncated ? 'newest ' + dgmInt(r.rowCap) + ' of more; the figures are a sample' : served),
+    tile('agree with deterministic choice', pc(ag.top1AgreeRate), dgmInt(ag.top1Agree) + ' of ' + dgmInt(ag.known) + ' served first choices matched route/v1'),
+    tile('advice calls', dgmInt(a.attempted), dgmInt(a.completed) + ' completed, ' + dgmInt(a.failed) + ' failed; median ' + (Number.isFinite(lat.p50) ? lat.p50 + ' ms' : 'n/a')),
+    tile('advice spend (estimated)', typeof a.spendUsdEst === 'number' && Number.isFinite(a.spendUsdEst) ? '$' + a.spendUsdEst.toFixed(4) : 'n/a', dgmInt(a.inputTokens) + ' in / ' + dgmInt(a.outputTokens) + ' out tokens'),
+    tile('cache hit rate', pc(c.hitRate), dgmInt(c.hit) + ' fresh, ' + dgmInt(c.staleHit) + ' stale, ' + dgmInt(c.miss) + ' miss'),
+    tile('decision time', Number.isFinite(d.p50) ? d.p50 + ' ms median' : 'n/a', Number.isFinite(d.p95) ? 'p95 ' + d.p95 + ' ms over ' + dgmInt(d.n) + ' live-clock decisions' : 'no live-clock decisions'),
+  ];
+  const codes = Object.keys(fc).slice(0, 10).map((k) => k + ' ' + dgmInt(fc[k])).join(', ');
+  const failures = codes ? '<p class="note">' + dgmEsc('Decision failure codes: ' + codes + '.') + '</p>' : '<p class="note">No decision failures recorded.</p>';
+  const win = r.window && typeof r.window.from === 'string' ? '<p class="note">' + dgmEsc('Window: ' + dgmWhen(r.window.from) + ' to ' + dgmWhen(r.window.to) + '.') + '</p>' : '';
+  return head + '<div class="tiles">' + tiles.join('') + '</div>' + failures + win;
+}
+
+function dgmSelfTestPanelHtml(api) {
+  if (!api || typeof api !== 'object' || !Array.isArray(api.runs)) return '<p>Unavailable: self-test history could not be read.</p>';
+  if (api.store === 'not-migrated') return '<p>Unavailable: the self-test store is not migrated on this deployment (migration 0031).</p>';
+  const runs = api.runs;
+  const snapOf = (e) => (e && e.state === 'completed' && e.snapshot && typeof e.snapshot === 'object' ? e.snapshot : null);
+  const nowMs = Number.isFinite(Date.parse(api.observedAt)) ? Date.parse(api.observedAt) : Date.now();
+  const newest = runs[0] || null;
+  const latestIdx = runs.findIndex((e) => snapOf(e));
+  const latestEntry = latestIdx >= 0 ? runs[latestIdx] : null;
+  const latest = latestEntry ? latestEntry.snapshot : null;
+  let prev = null;
+  for (let j = latestIdx + 1; latestIdx >= 0 && j < runs.length; j++) { prev = snapOf(runs[j]); if (prev) break; }
+  let headline;
+  if (!newest) {
+    headline = '<p class="headline">' + dgmPill('muted', 'no runs yet') + ' ' + dgmEsc('The daily self-test has not recorded a run on this deployment.') + '</p>';
+  } else {
+    const res = dgmRunResult(latestEntry || newest, latest, prev);
+    const hn = latest && latest.workload ? latest.workload.heldoutN : null;
+    const score = (v) => (Number.isSafeInteger(v) && Number.isSafeInteger(hn) ? v + '/' + hn : 'unknown');
+    let sentence;
+    if (!latest) {
+      sentence = 'No completed run yet; the newest run failed (' + String(newest.code || 'unknown') + ').';
+    } else {
+      const cur = latest.baseline ? latest.baseline.heldoutTop1 : null;
+      const bestScore = latest.best ? latest.best.heldoutTop1 : null;
+      const prevScore = prev && prev.baseline ? prev.baseline.heldoutTop1 : null;
+      sentence = 'Checked ' + dgmWhen(latestEntry.ranAt) + ': the current routing weights scored ' + score(cur) + ' on the synthetic routing test';
+      if (res.label === 'policy regressed') sentence += ', down from ' + score(prevScore) + ' at the previous run. The routing policy regressed; review the last policy change.';
+      else if (res.label === 'policy improved') sentence += ', up from ' + score(prevScore) + ' at the previous run.';
+      else if (res.label === 'better weights available') sentence += '; ' + dgmInt(latest.counts && latest.counts.improvement) + ' of ' + dgmInt(latest.evaluated) + ' alternative settings scored higher (best ' + score(bestScore) + '). Review before any change; nothing is applied automatically.';
+      else if (res.label === 'healthy') sentence += '; the best of ' + dgmInt(latest.evaluated) + ' alternative settings also scored ' + score(bestScore) + ', so there is nothing to change.';
+      else sentence += '.';
+    }
+    headline = '<p class="headline">' + dgmPill(res.tone, res.label) + ' ' + dgmEsc(sentence) + '</p>';
+    if (latestEntry && newest !== latestEntry) {
+      headline += '<p class="banner">' + dgmEsc('The newest run (' + dgmWhen(newest.ranAt) + ') failed (' + String(newest.code || 'unknown') + '); the figures below are from the last completed run (' + dgmWhen(latestEntry.ranAt) + ').') + '</p>';
+    }
+  }
+  // Missed-run notice from the server's own clock and schedule: a cron that
+  // is killed (CPU limit) writes no row, so absence has to be computed.
+  let missed = '';
+  const expMs = Date.parse(api.expectedRunAt);
+  if (api.enabled === true && Number.isFinite(expMs) && nowMs > expMs + 2 * 3600e3) {
+    const newestMs = newest ? Date.parse(newest.ranAt) : NaN;
+    if (!(Number.isFinite(newestMs) && newestMs >= expMs - 5 * 60e3)) {
+      missed = '<p class="banner">' + dgmEsc('A run was expected at ' + dgmWhen(api.expectedRunAt) + ' but none was recorded: the cron did not complete. Check the Workers plan CPU limit and the deployment log.') + '</p>';
+    }
+  }
+  // '15 3 * * * UTC' reads as 'daily at 03:15 UTC'; anything else is shown as given.
+  const cron = /^(\d{1,2}) (\d{1,2}) \* \* \*(?: UTC)?$/.exec(String(api.schedule || ''));
+  const when = cron ? 'daily at ' + String(cron[2]).padStart(2, '0') + ':' + String(cron[1]).padStart(2, '0') + ' UTC' : String(api.schedule || 'unknown');
+  const sched = '<p class="note">' + dgmEsc('Schedule: ' + when + (api.enabled !== true ? ' (not enabled: the cron runs only when DGM_SELF_TEST_ENABLED=1)' : '')
+    + '. The policy check is deterministic and synthetic: no model calls, no spend, not fabric quality.') + '</p>';
+  const hours = Number.isSafeInteger(api.telemetryWindowHours) ? api.telemetryWindowHours : 24;
+  const routing = latestEntry ? dgmRoutingHtml(latestEntry.routing, hours) : '';
+  return headline + missed + sched + routing + (latest ? dgmCeilingHtml(dgmSnapshotCeiling(latest)) : '') + dgmSelfTestHtml(api);
+}
+
+async function loadDgmSelfTest() {
+  const state = document.getElementById('dgm-self-test-state');
+  const box = document.getElementById('dgm-self-test-result');
+  paintState(state, 'Loading…');
+  box.innerHTML = '';
+  try {
+    const r = await dgmFetch('/api/admin/v1/dgm/self-test');
+    if (!r.res.ok || !r.body) {
+      paintState(state, 'Unavailable: ' + dgmFailure(r.body, r.res.status) + '.');
+      return;
+    }
+    box.innerHTML = dgmSelfTestPanelHtml(r.body);
+    const n = Array.isArray(r.body.runs) ? r.body.runs.length : 0;
+    paintState(state, n ? ('Loaded ' + n + ' run(s). Read-only.') : 'Loaded. No runs yet (empty).');
+  } catch {
+    paintState(state, 'Unavailable: request failed.');
+  }
+}
+
+async function loadDgmActivity() {
+  const state = document.getElementById('dgm-activity-state');
+  const box = document.getElementById('dgm-activity-result');
+  paintState(state, 'Loading…');
+  box.innerHTML = '';
+  try {
+    const st = await dgmFetch('/api/admin/v1/dgm/preview/status');
+    const runs = await dgmFetch('/api/admin/v1/dgm/preview/runs');
+    const muse = await dgmFetch(MUSE_BASE + '/status');
+    if (!st.res.ok || !runs.res.ok || !st.body || !runs.body || !Array.isArray(runs.body.items)) {
+      paintState(state, 'Unavailable: ' + dgmFailure(runs.body, runs.res.status) + '.');
+      return;
+    }
+    const items = runs.body.items.slice(0, 10);
+    const details = [];
+    for (const it of items) {
+      if (!it || !it.runId) continue;
+      const d = await dgmFetch('/api/admin/v1/dgm/preview/runs/' + encodeURIComponent(it.runId));
+      if (d.res.ok && d.body) details.push(d.body);
+    }
+    // Optional local hook (verifier-owned): local dry-run reports are NOT
+    // served by the hosted API. This relative fetch only succeeds where a
+    // local harness serves /_local/* (loopback service); everywhere else it
+    // 404s and renders as not-connected, never as data. No literal loopback
+    // host appears here: the public-asset privacy gate forbids it, and a
+    // same-origin relative URL needs none.
+    let local = null;
+    try {
+      const lr = await dgmFetch('/_local/dgm-activity');
+      if (lr.res.ok && lr.body && Array.isArray(lr.body.reports)) local = lr.body;
+    } catch {
+      local = null;
+    }
+    box.innerHTML = dgmActivityHtml({
+      status: st.body, items, total: runs.body.total,
+      details, muse: muse.res.ok ? muse.body : null, local,
+    });
+    paintState(state, items.length ? ('Loaded ' + items.length + ' run(s). Read-only.') : 'Loaded. No preview runs yet (empty).');
+  } catch {
+    paintState(state, 'Unavailable: request failed.');
+  }
+}
 
 // ---- DGM Muse proposal (dark slice; the server authorizes and gates every call) ----
 //

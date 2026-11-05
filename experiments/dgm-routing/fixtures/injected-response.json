@@ -1,0 +1,1 @@
+{"model":"muse-spark-1.3-contributor","responseId":"resp_injected_offline_001","usage":{"input_tokens":120,"output_tokens":60},"text":"{\"weights\":{\"EXACT_TOKEN\":60,\"ONLINE\":30,\"FRESHNESS_MAX\":20,\"OWNED\":10,\"HEADROOM\":5}}"}
