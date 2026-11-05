@@ -477,17 +477,31 @@ async function loadOverview() {
 // there is nothing to download. macOS/Linux are not packaged at all. The
 // progress stage derives from the tab's inventory snapshot (setup /
 // pairing / reachable); it never claims an unverified state.
-const WORKER_COMMIT = '3fa309cb08461ea046ee23e801404911c1f3bcc2';
-const DOCS_COMMIT = '47d8f3c779a641d06a71fcf29bdd692b828a7781';
+// Immutable pins for setup. Worker source is the current main merge
+// (reviewed via PR process, hosted CI green): it supersedes the mock-era
+// 3fa309c pin (no real-runner contract), the 6af33d4 pin (presence-only
+// usable), and the 6483c2f pin (readiness without the fabric proxy) because
+// it contains the real-runner contract, merged /v1/node readiness (PR107),
+// and the reviewed fabric proxy (PR104) — none of the PR104 local-worker
+// changes alter the pinned install, readiness, or consumer contracts. Docs
+// is the staged docs commit on top of it whose README/CHANGELOG describe
+// this same real-first flow; worker and docs pins are compatible but not
+// required to be equal. Both pins are immutable; advertised links are
+// verified after publication before merge/release. Native execution remains
+// unqualified on every OS; run verify_vendor.py after checkout and move
+// either pin only with a re-verified re-pin.
+const WORKER_COMMIT = '0e6b60890c736207664d122c62e39d8c4affd2fa';
+const DOCS_COMMIT = '2742a7bb150bc732bf38a4a3f09613dbd998b1e4';
 const DOCS_TREE = 'https://github.com/synchronic1/AIPSTER/blob/' + DOCS_COMMIT + '/local-worker/';
 const WORKER_LINKS = {
   quickstart: DOCS_TREE + 'README.md',
   tested: DOCS_TREE + 'README.md#tested-installation',
-  engine: DOCS_TREE + 'README.md#optional-real-engine-preparation-not-needed-for-the-mock-check',
+  engine: DOCS_TREE + 'README.md#real-engine-preparation-resident-reuse-preferred',
   troubleshoot: DOCS_TREE + 'README.md#stop-uninstall-and-troubleshoot',
   evidence: DOCS_TREE + 'VERIFICATION.md',
   gaps: DOCS_TREE + 'EXECUTION-GAPS.md',
   pairing: DOCS_TREE + 'PAIRING-INTEGRATION.md',
+  changelog: DOCS_TREE + 'CHANGELOG.md',
   securityFix: 'https://github.com/synchronic1/AIPSTER/pull/17',
   heartbeat: 'https://github.com/synchronic1/AIPSTER/pull/20'
 };
@@ -553,7 +567,7 @@ const MOBILE_NOTE = 'You seem to be on a phone or tablet. Open AIPSTER on the co
 const needsTargetSelection = (card) => !card.picked && (!card.detected || card.detected === 'mobile');
 
 // Pinned worker commands per OS: worker-only sparse checkout at WORKER_COMMIT,
-// isolated install, self-test, fresh worker-local token, mock serve.
+// isolated install, self-test, fresh worker-local token, real serve (operator config).
 function workerCommands(os) {
   const meta = OS_META[os] || OS_META.windows;
   const py = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
@@ -571,14 +585,51 @@ function workerCommands(os) {
     'uv run --no-project --python 3.12.14 python install.py',
     py + ' test_installation.py',
     token,
-    exe + ' serve --config configs/mock.toml'
+    exe + ' serve --config config.toml'
+  ];
+}
+
+// Manual-install blocks for the Connect panel, split at an explicit human
+// edit boundary. Block 1 installs and creates the config without
+// overwriting an existing one; the operator then edits config.toml and
+// records identity by hand; block 2 plans and serves, gated on the
+// planner's success. No config.toml is shipped and install.py does not
+// generate one; load_config reads the path directly. No angle-bracket
+// placeholders appear on executable lines (they are parse errors in both
+// PowerShell and POSIX shells). workerCommands itself is unchanged.
+function manualSetupCommands(os) {
+  const meta = OS_META[os] || OS_META.windows;
+  const lines = workerCommands(os);
+  const copy = meta.posix
+    ? '[ -e config.toml ] || cp configs/cpu.toml config.toml'
+    : 'if (-not (Test-Path config.toml)) { Copy-Item configs\\cpu.toml config.toml }';
+  const setup = [
+    '# Create your own config only if you do not have one (never overwrites):',
+    copy,
+    '# STOP: edit config.toml yourself before continuing (absolute model path,',
+    '# absolute engine executable if not on PATH). Nothing is downloaded.'
+  ];
+  const serveIdx = lines.findIndex((l) => / serve --config /.test(l));
+  if (serveIdx < 0) return lines;
+  return [...lines.slice(0, serveIdx), ...setup];
+}
+function manualServeCommands(os) {
+  const meta = OS_META[os] || OS_META.windows;
+  const py = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
+  const exe = meta.posix ? meta.venvBin + '/dendrite' : meta.venvBin + '\\dendrite.exe';
+  const plan = py + ' runtime_setup.py --config config.toml';
+  const serve = exe + ' serve --config config.toml';
+  const gate = meta.posix ? `${plan} && ${serve}` : `${plan}; if ($LASTEXITCODE -eq 0) { ${serve} }`;
+  return [
+    '# Identity + plan (planner exit 2 lists setup-required actions; fix and re-run):',
+    gate
   ];
 }
 
 function workerPairingCommands(os) {
   const meta = OS_META[os] || OS_META.windows;
   const py = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
-  return [py + ' pairing.py pair', py + ' pairing.py heartbeat-loop --config configs/mock.toml', py + ' pairing.py unpair', py + ' pairing.py status'];
+  return [py + ' pairing.py pair', py + ' pairing.py heartbeat-loop --config config.toml', py + ' pairing.py unpair', py + ' pairing.py status'];
 }
 
 // Complete, version-pinned setup packet for the user's own local agent,
@@ -589,15 +640,38 @@ function workerPairingCommands(os) {
 function agentSetupPacket(os, setup) {
   const meta = OS_META[os] || OS_META.windows;
   const lines = workerCommands(os);
+  const py = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
+  const exe = meta.posix ? meta.venvBin + '/dendrite' : meta.venvBin + '\\dendrite.exe';
   const pairing = workerPairingCommands(os);
   const fetch = lines.slice(0, 6).map((l) => '  ' + l).join('\n');
   const packagedPair = installerUsable(INSTALLERS[os])
     ? ['- Packaged installs instead: pair from the tray menu (Pair this computer) or with `aipster-worker pair`;',
       '  the tray starts the sender while serving.']
     : [];
-  const tested = os === 'windows'
-    ? 'Windows x64 is the only tested platform (mock check only).'
-    : 'Only Windows x64 is tested; macOS and Linux steps are untested adaptation, so verify each step before continuing.';
+  const tested = 'Tested so far: Windows x64 mock check only. Real setup is unqualified on every OS; verify each step and report mismatches instead of adapting silently.';
+  // Linux-only early statements: real path, deliberate pins, mock-only
+  // meaning, and the fixed sequence. All commands below are the Linux
+  // variants; shell profile or PATH differences are reported, never worked
+  // around silently.
+  const linuxReadFirst = os === 'linux'
+    ? ['- Linux x64 notes (real setup path; native execution unqualified on every OS):',
+      '- The revision and the uv 0.12.12 / Python 3.12.14 pins below are deliberate,',
+      '  not latest. A newer installed uv or CLI is not a silent workaround: on any',
+      '  pin mismatch, stop and report instead of adapting.',
+      '- This packet never falls back to mock. Mock serve needs your explicit',
+      '  opt-in (see the mock note), with expected fields simulated=true,',
+      '  usable=false.',
+      '- Setup, pairing, heartbeat, and a green dashboard status prove reachability',
+      '  only. A green connection is NOT GPU readiness and NOT fabric dispatch; it',
+      '  makes no real-execution claim. An admitted AIPSTER job is the only',
+      '  inference proof, and dispatch stays disabled.',
+      '- Follow the sequence in order: preflight (Step 1) -> isolated install',
+      '  (Steps 2-3) -> configure and plan (Step 5) -> serve and verify (Step 6)',
+      '  -> pair (Step 7) -> heartbeat/status -> consumer (Step 8, dark unless',
+      '  enabled) -> readiness interpretation.',
+      '- Background reading: the linked README "Linux notes" and install changelog at',
+      '  the pinned revision above describe this same real-first flow: ' + WORKER_LINKS.changelog]
+    : [];
   const dataDir = meta.posix ? '~/.local/share/aipster-worker/pairing.json' : '%LOCALAPPDATA%\\AIPSTER-Worker\\pairing.json';
   const account = String(setup.account ?? '').replace(/[\r\n\t]+/g, ' ').slice(0, 120);
   const expiresAt = String(setup.expiresAt ?? '').replace(/[\r\n\t]+/g, ' ');
@@ -605,14 +679,19 @@ function agentSetupPacket(os, setup) {
     'Set up the AIPSTER local worker on THIS computer (assisted install).',
     '',
     'READ FIRST - what this does and does NOT do:',
-    '- Install the local Dendrite worker (ganglion-dendrite 0.1.0) from the reviewed',
-    '  AIPSTER source revision below, in an isolated folder on this machine.',
-    '- Installing does NOT share this computer and does NOT enable inference. The',
-    '  worker does not contact AIPSTER until the pair step below runs: until then',
-    '  it holds no AIPSTER credential. AIPSTER dispatch stays disabled.',
+    '- Install the local Dendrite worker (ganglion-dendrite 0.1.0) from the',
+    '  published AIPSTER source revision below, in an isolated folder on this machine.',
+    '- This sets up a REAL worker (resident engine + your model file), not a mock.',
+    '  Installing does NOT share this computer, does NOT enable inference, and',
+    '  does NOT enroll it for fabric jobs. The worker does not contact AIPSTER',
+    '  until the pair step below runs:',
+    '  until then it holds no AIPSTER credential. AIPSTER dispatch stays disabled.',
+    '- Mock serve exists only as an explicit demo/diagnostic opt-in (see the mock',
+    '  note near the end); it is never operational and never silent.',
     '- Inspect this machine first, then explain every change BEFORE making it and',
     '  wait for my approval. Do not change system Python, install global packages,',
     '  add services or startup tasks, or expose anything to a network.',
+    ...linuxReadFirst,
     '',
     'TEMPORARY PAIRING CODE - single use, expires ' + expiresAt + ':',
     '- This code registers THIS computer to my account (' + account + '). It is short-lived',
@@ -622,19 +701,48 @@ function agentSetupPacket(os, setup) {
     '',
     'Pinned source - do not substitute another revision:',
     '- Repository: https://github.com/synchronic1/AIPSTER',
-    '- Commit: ' + WORKER_COMMIT + ' (reviewed: local token required, Host/Origin checked, API edge-compatible sender)',
+    '- Commit: ' + WORKER_COMMIT + ' (published main merge: PR-reviewed, hosted CI green; supersedes the mock-era pin because only it carries the real-runner contract. Native execution is unqualified on every OS.)',
     '- Worker directory: local-worker/',
     '- Standalone worker background and troubleshooting: ' + WORKER_LINKS.quickstart,
-    '- Use the pinned commands below for pairing; do not substitute an older checkout from background documentation.',
+    '- Use the pinned commands below for pairing, which install the pinned revision above, and do not substitute an older checkout from background documentation.',
+    '',
+    'Step 0 - already installed at an older revision or running a sender (migrate, keep identity):',
+    '- If this machine is already paired or a sender is already serving, keep the',
+    '  identity: do not unpair, rotate keys, or mint a new code. Check which',
+    '  --config the running sender uses (its own terminal command line).',
+    '- A sender started on configs/mock.toml stays on the mock config (usable=false',
+    '  forever): with your approval, stop that one sender in its own terminal',
+    '  with Ctrl+C (never kill it, never run a duplicate); restart it with --config config.toml from Step 5 in a terminal',
+    '  holding the same DENDRITE_API_TOKEN as the running daemon (session only;',
+    '  never write it to a file, URL, or log, and never start a second sender).',
+    '- If the checkout predates the pinned revision above, or its .venv predates',
+    '  the vendor change, use a fresh clone or remove local-worker/.venv and',
+    '  rerun install.py (install.py refuses an existing .venv; the installed',
+    '  vendor must match the checkout). Report before changing.',
     '',
     'Step 1 - inspect this machine (report, change nothing):',
     '- OS and CPU architecture; Git version; uv 0.12.12 exactly (must match); Python',
     '  3.12.14 availability (install with "uv python install 3.12.14" if missing);',
     '  about 1 GiB free disk space and memory for tooling.',
+    '- Engine prerequisite (operator-provided, never downloaded): first reuse a',
+    '  resident loopback engine where one exists — an OpenAI /v1 upstream on',
+    '  loopback such as the resident Ganglion (serve-jobs defaults to',
+    '  loopback port 8471): read its GET /v1/models identity and bind it as',
+    '  the consumer upstream (--upstream-url) or the attached runtime (mode',
+    '  "attach" with that exact upstream_model). Only if none is running, use',
+    '  a managed engine binary on PATH: ' + (meta.posix ? 'run "command -v llama-server || command -v ik_llama-server".' : 'run "where.exe llama-server" and "where.exe ik_llama-server".') + ' If neither reports',
+    '  a path: stop — building from the pinned ik_llama.cpp source in the README or',
+    '  installing a release yourself is a prerequisite, not a silent skip.',
+    '  cpu.toml defaults to executable "llama-server": if only ik_llama-server',
+    '  exists, set the absolute executable path in your config.toml.',
+    '- Model prerequisite (operator-provided, never downloaded): a GGUF file you',
+    '  obtained, with its published digest; record its full path for Step 5. A',
+    '  missing engine or model file stops the setup; it never falls back to mock.',
     '- Confirm CPU architecture: these steps cover x64 only. On ARM64 or any other',
     '  architecture, stop and explain that no qualified instructions exist; do not',
     '  adapt them silently.',
     '- ' + tested,
+    ...(os === 'windows' ? ['- Windows x64 is the only tested platform; macOS and Linux instructions are unqualified adaptations.'] : []),
     '',
     'Step 2 - fetch worker files only (in ' + meta.shell + '):',
     fetch,
@@ -656,15 +764,54 @@ function agentSetupPacket(os, setup) {
     '- This token is NOT an AIPSTER key: never paste it into AIPSTER, a URL, a file',
     '  you share, or any chat log. "serve" refuses to start without it, even on loopback.',
     '',
-    'Step 5 - start the mock worker and verify (simulated output only):',
-    '- Start: ' + lines[9],
-    '- In a second terminal with the same token, run the three verification requests',
-    '  from the quickstart\'s second-terminal block against the loopback address it',
-    '  specifies (health, node identity, simulated execution). Expect ok status and',
-    '  simulated output. A running worker is NOT proof of inference readiness: no',
-    '  engine or model is installed by these steps.',
+    'Step 5 - configure the real runtime (edit your own copy, report before changing):',
+    '- Copy the operator template: ' + (meta.posix ? '"cp configs/cpu.toml config.toml".' : '"copy configs\\cpu.toml config.toml".'),
+    '- Edit config.toml yourself: set the [[models]] path to the absolute path of',
+    '  your GGUF file (relative paths resolve against the config file directory,',
+    '  which changes when you copy it) and, if the engine binary is not on PATH,',
+    '  the absolute executable path. Nothing downloads a model or engine; report',
+    '  exact values before writing them.',
+    '- Identity evidence: run "' + py + ' model_identity.py <your-model.gguf>" and keep',
+    '  its row (cached_on_disk, fingerprint, content_digest). Require cached_on_disk',
+    '  true: a non-GGUF file exits 0 with cached_on_disk false and stops the setup;',
+    '  an unreadable file exits nonzero.',
+    '- Preflight the plan: run "' + py + ' runtime_setup.py --config config.toml" until',
+    '  it reports ready (exit 0). "setup-required" (exit 2) lists the exact actions;',
+    '  do them yourself and re-run. The planner never downloads, installs, starts, or',
+    '  enrolls anything. Inspect availability without loading a model: ' + exe + ' inspect --config config.toml.',
     '',
-    'Step 6 - link this computer to my account (use the code above exactly once):',
+    'Step 6 - start the real worker and verify (no simulation):',
+    '- Start: ' + lines[9],
+    '- If a sender is already serving this worker directory (an earlier terminal,',
+    '  tray, or service), reuse it; do not start a duplicate sender.',
+    '- In a second terminal with the same token, run these verification requests',
+    '  against the loopback node host and port in the config.toml you wrote (node',
+    '  default port 8090):',
+    '  GET /healthz is an unauthenticated liveness probe (status ok, no identity);',
+    '  GET /v1/node needs Authorization: Bearer with your token and must show your',
+    '  configured model id with available true and simulated false, and the entry',
+    '  fingerprint must equal the model_identity.py row fingerprint (compare',
+    '  fingerprint only, never content_digest).',
+    '- Read resident honestly: a managed runtime stays cold (resident false) until',
+    '  an explicit load — that is expected, not a failure. For attach mode the',
+    '  entry must show resident true. Load a managed model only with explicit',
+    '  approval: POST /v1/models/load with {"model_id": "<your-configured-id>"}',
+    '  and the same Bearer token (this starts real inference), then re-check',
+    '  /v1/node for resident true. A running, paired, reachable',
+    '  worker proves reachability only: it is NOT GPU readiness and NOT fabric',
+    '  dispatch, and it makes no real-execution claim until an admitted AIPSTER',
+    '  job actually runs (dispatch stays disabled). These steps configure',
+    '  no fabric endpoint: the loopback address above is local-only and is',
+    '  not a fabric route. A running worker is NOT proof of inference readiness.',
+    '',
+    'Demo/diagnostic mock only (explicit opt-in, never operational, never silent):',
+    '- Serve the mock config only by explicitly typing configs/mock.toml yourself',
+    '  (nothing auto-selects it): run "' + exe + ' serve --config configs/mock.toml".',
+    '  The AIPSTER_WORKER_MOCK_DEMO=1 variable is honored by the planner and tray,',
+    '  not by serve itself. Expected mock fields: simulated=true, usable=false.',
+    '  Mock output proves nothing beyond the local mock path.',
+    '',
+    'Step 7 - link this computer to my account (use the code above exactly once):',
     '- First check whether this machine is already paired: in the local-worker directory, run: ' + pairing[3],
     '- If it reports "status: paired ...", STOP: do not consume the code, rotate keys, unpair, or start a second',
     '  sender. Ask me whether this is a repair or an account change before doing anything.',
@@ -679,13 +826,42 @@ function agentSetupPacket(os, setup) {
     '  does not start a sender.',
     '- Then explicitly start reachability heartbeats with:',
     '  ' + pairing[1],
-    '- Mock reports usable=false. Choose Done or reopen My Compute to load the paired resource;',
-    '  a heartbeat proves reachability only, never inference readiness.',
+    '- Start the sender in a terminal that holds the SAME worker-LOCAL token as',
+    '  the running daemon: set DENDRITE_API_TOKEN in that session only before',
+    '  running the command — a different terminal does not inherit the daemon',
+    '  env, and never write the token to a file, URL, or log. The sender needs',
+    '  the matching token for the authenticated /v1/node readiness probe;',
+    '  without it the worker reports usable=false even when everything else',
+    '  is ready.',
+    '- Heartbeat usability at this pin is verified readiness, not file presence:',
+    '  usable is true only when the running worker proves it over its own',
+    '  authenticated loopback /v1/node — managed: model file with GGUF magic on',
+    '  disk, executable on PATH, and the worker reports the model available and',
+    '  not simulated on a live managed runtime (cold counts; loading is transient);',
+    '  attach: the worker reports your exact configured model resident on a ready',
+    '  attach runtime. Worker down or restarting, a non-loopback listener, a',
+    '  missing token, or any mock config always reports false, so report the status',
+    '  row as-is and never relabel it. Choose Done or reopen My Compute to load the paired',
+    '  resource; a heartbeat proves reachability only, never inference readiness.',
     ...packagedPair,
     '',
-    'Step 7 - disconnect and uninstall (I choose when to do this):',
-    '- Stop both the sender and daemon terminals with Ctrl+C, then discard the',
-    '  worker-local token. In AIPSTER Keys I revoke this resource\'s heartbeat key.',
+    'Step 8 - start the leased-job consumer (dark unless enabled; bounded test only):',
+    '- Prerequisites: this machine paired (Step 7) and the resident upstream from',
+    '  Step 1 running on loopback. Run: ' + py + ' pairing.py serve-jobs --once',
+    '  (one poll cycle, then exit) or without --once to keep serving with Ctrl+C.',
+    '- Bind it explicitly: --upstream-url your-loopback-upstream (serve-jobs',
+    '  defaults to loopback port 8471) and --runtime-id ganglion or llama-server',
+    '  matching the upstream. Loopback only; a remote upstream is not qualified.',
+    '- Only one serve-jobs runs per data directory (jobs.lock; a second one exits 6).',
+    '  On the managed-only path there is no resident upstream from Step 1, so this',
+    '  step stays not-applicable until one exists. Never attach this worker to a',
+    '  managed runtime owned by another Dendrite.',
+    '  Nothing runs unless you start it here, and the server keeps worker job routes',
+    '  disabled: no dispatch or inference claim until an admitted AIPSTER job runs.',
+    '',
+    'Step 9 - disconnect and uninstall (I choose when to do this):',
+    '- Stop the sender, consumer (if started), and daemon terminals with Ctrl+C,',
+    '  then discard the worker-local token. In AIPSTER Keys I revoke this resource\'s heartbeat key.',
     '- To forget local pairing I run: ' + pairing[2],
     '  Local unpair does not revoke the server key. Keep it private until revoked.',
     '- Remove only local-worker/.venv and .state if present. Do not delete other',
@@ -862,24 +1038,28 @@ function paintConnectCard() {
     : (stage === 'awaiting' || authorizing)
       ? '<p><span class="pill warn">Pairing</span></p>'
       : '<p><span class="pill warn">Setup needed</span></p>';
-  const commands = unpickedTarget ? '' : workerCommands(connect.os).map(esc).join('\n');
+  const setupBlock = unpickedTarget ? '' : manualSetupCommands(connect.os).map(esc).join('\n');
+  const serveBlock = unpickedTarget ? '' : manualServeCommands(connect.os).map(esc).join('\n');
+  const setupPy = meta.posix ? meta.venvBin + '/python' : meta.venvBin + '\\python.exe';
   const pairingCommands = workerPairingCommands(connect.os);
   const packagedPairPara = usable
     ? `<p>Packaged install? Open the AIPSTER Worker tray menu and choose Pair this computer (or run <code>aipster-worker pair</code> in a terminal), then type the code above when asked. The tray starts the sender for you while serving; update by reinstalling from a newer reviewed pin AIPSTER publishes (uninstall preserves pairing).</p>`
     : '';
   const advanced = unpickedTarget ? '' : `<details><summary>Advanced: manual install, source and troubleshooting</summary>
 <h3>Manual install (${esc(meta.label)})</h3>
-<p>Prerequisites: Git, <code>uv 0.12.12</code> and Python 3.12.14 (<code>uv python install 3.12.14</code>). Use these pairing-capable commands in ${esc(meta.shell)}. The linked <a href="${esc(L.tested)}">standalone tested installation</a> is background and may name an earlier release. The sparse checkout contains the worker and its root <code>LICENSE</code> only:</p>
-<pre tabindex="0" aria-label="${esc(meta.label)} install commands"><code>${commands}</code></pre>
+<p>Prerequisites: Git, <code>uv 0.12.12</code> and Python 3.12.14 (<code>uv python install 3.12.14</code>). Use these pairing-capable commands in ${esc(meta.shell)}. The linked <a href="${esc(L.tested)}">standalone tested installation</a> is background reference at the same pinned revision. The sparse checkout contains the worker and its root <code>LICENSE</code> only:</p>
+<pre tabindex="0" aria-label="${esc(meta.label)} install commands, part 1 of 2"><code>${setupBlock}</code></pre>
+<p class="muted"><strong>STOP — edit <code>config.toml</code> before continuing.</strong> Edit it yourself with the absolute model path (and absolute engine executable if not on PATH); nothing is downloaded. Record identity with <code>${esc(setupPy)} model_identity.py</code> using that absolute GGUF path (require <code>cached_on_disk</code> true). Then run the second block below.</p>
+<pre tabindex="0" aria-label="${esc(meta.label)} install commands, part 2 of 2"><code>${serveBlock}</code></pre>
 <p class="muted"><code>serve</code> refuses to start without <code>DENDRITE_API_TOKEN</code> (32+ characters), even on loopback. This is a <strong>worker-local</strong> token that you generate on this machine. It is not an AIPSTER API key or heartbeat key. Never reuse it, and never paste it into AIPSTER, a URL or a shared config. Local requests other than <code>/healthz</code> need <code>Authorization: Bearer</code> with that token (see the <a href="${esc(L.quickstart)}">quickstart</a>).</p>
-<p class="muted">The mock config returns simulated output only. A native engine (llama-server, built separately) and a GGUF model you obtain yourself are separate prerequisites. See <a href="${esc(L.engine)}">engine preparation</a>.</p>
+<p class="muted">The default setup is a real worker: reuse a resident loopback engine where one exists (attach mode or the <code>serve-jobs</code> upstream) before building one. Otherwise a native engine (llama-server, built separately or on PATH) and a GGUF model you obtain yourself are separate prerequisites. The mock config returns simulated output only and is explicit opt-in. See <a href="${esc(L.engine)}">engine preparation</a>.</p>
 <h3>Platforms and source</h3>
 <ul class="platforms"><li><span class="pill ok">Windows x64: tested</span> <span class="muted">mock check only, from a git clone with CPython 3.12.14 and uv 0.12.12 (<a href="${esc(L.evidence)}">evidence</a>). No real engine or model was tested.</span></li>
 <li><span class="pill warn">macOS / Linux: not qualified</span> <span class="muted">commands are for adaptation only (use <code>.venv/bin/</code>). They are untested.</span></li></ul>
-<p class="muted">The worker is published as source, pinned to the <a href="${esc(L.securityFix)}">security-fixed revision</a> that requires a local token and checks Host/Origin.</p>
+<p class="muted">The worker is published as source, pinned to the reviewed revision, which includes the <a href="${esc(L.securityFix)}">local-token and Host/Origin guards (#17)</a>. See the <a href="${esc(L.changelog)}">install changelog</a> for dated pin history.</p>
 <h3>Connect</h3>
 <p>Mint a one-time pairing code in Manual repair below (10-minute expiry, single use). In a second terminal in the same <code>local-worker</code> directory, run <code>${esc(pairingCommands[0])}</code> and type the code locally. Pairing contacts AIPSTER, registers this computer automatically and stores a private heartbeat key. Do not paste the code or key into an agent chat.</p>
-<p>Pairing does not start the sender. In that terminal, run <code>${esc(pairingCommands[1])}</code> to post reachability heartbeats. The mock stays <code>usable=false</code>; no inference is enabled. Keep this sender terminal open. See the <a href="${esc(L.pairing)}">pairing and sender details</a>.</p>
+<p>Pairing does not start the sender. In a terminal holding the same <code>DENDRITE_API_TOKEN</code> as the running daemon (set it in that session only; a different terminal does not inherit it, and never write it to a file, URL, or log), run <code>${esc(pairingCommands[1])}</code> to post reachability heartbeats. The heartbeat <code>usable</code> bit at this pin is verified readiness from the running worker (see Step 7); the mock stays <code>usable=false</code>. No inference is enabled. Keep this sender terminal open. See the <a href="${esc(L.pairing)}">pairing and sender details</a>.</p>
 <p>Status: <strong>not linked until paired</strong>. Choose Done or reopen My Compute after pairing to load the resource below. Heartbeats prove reachability only, never readiness. Manual entry stays under <strong>Advanced: manual resource registration</strong>. See the <a href="${esc(L.heartbeat)}">heartbeat intake</a> and the <a href="${esc(L.gaps)}">execution gaps</a>.</p>
     ${packagedPairPara}
 <p class="muted">If the key is revoked or expires, the sender exits asking for a re-pair with a fresh code.</p>
@@ -887,8 +1067,8 @@ function paintConnectCard() {
 <p>Use the generate action above for agent setup. If you install by hand, mint a one-time code here and type it into the worker's pair step.</p>
 <p class="actions">${pairBtn}</p>
 ${pairBlock}
-<details><summary>Troubleshooting</summary><ul><li>Existing <code>.venv</code>: use a fresh clone, or stop the worker and remove that local venv.</li><li>uv version mismatch: install uv 0.12.12. Do not update the lock files.</li><li>Hash mismatch: restore the exact public commit and run <code>verify_vendor.py</code>.</li><li><code>serve</code> exits asking for <code>DENDRITE_API_TOKEN</code>: generate a fresh value of 32+ characters as shown above.</li><li>401 from <code>/v1/...</code>: send <code>Authorization: Bearer</code> with the exact token the worker started with.</li><li>400 Host or 403 Origin not allowed: call the worker by its loopback address and port, not another hostname.</li><li>Port 8090 in use: stop the other worker through its own controls (never kill it), or pick a free loopback port in the config. Pairing needs no local port, so it stays available.</li><li>TLS or package index failure: check access to public PyPI.</li></ul><p><a href="${esc(L.troubleshoot)}">Full troubleshooting table</a></p></details>
-<details><summary>Disconnect and uninstall</summary><p>Stop both sender and daemon terminals with Ctrl+C, then discard the worker-local token. A paired worker also holds an AIPSTER heartbeat key: revoke this resource's key in AIPSTER Keys. Run <code>${esc(pairingCommands[2])}</code> to forget its local pairing; this does not revoke the server key. Then remove only <code>local-worker/.venv</code> and <code>.state</code> if present. Keep unrelated models and engines. This setup adds no service, startup task, global package or automatic update. Keep the daemon on loopback.</p></details>
+<details><summary>Troubleshooting</summary><ul><li>Existing <code>.venv</code>: use a fresh clone, or stop the worker and remove that local venv.</li><li>Sender exits <code>SENDER_RUNNING</code>: a sender is already serving this data directory — reuse it, do not start a duplicate.</li><li>uv version mismatch: install uv 0.12.12. Do not update the lock files.</li><li>Hash mismatch: restore the exact public commit and run <code>verify_vendor.py</code>.</li><li><code>serve</code> exits asking for <code>DENDRITE_API_TOKEN</code>: generate a fresh value of 32+ characters as shown above.</li><li>401 from <code>/v1/...</code>: send <code>Authorization: Bearer</code> with the exact token the worker started with.</li><li>400 Host or 403 Origin not allowed: call the worker by its loopback address and port, not another hostname.</li><li>Port 8090 in use: stop the other worker through its own controls (never kill it), or pick a free loopback port in the config. Pairing needs no local port, so it stays available.</li><li>TLS or package index failure: check access to public PyPI.</li></ul><p><a href="${esc(L.troubleshoot)}">Full troubleshooting table</a></p></details>
+<details><summary>Disconnect and uninstall</summary><p>Stop the sender, consumer (if started), and daemon terminals with Ctrl+C, then discard the worker-local token. A paired worker also holds an AIPSTER heartbeat key: revoke this resource's key in AIPSTER Keys. Run <code>${esc(pairingCommands[2])}</code> to forget its local pairing; this does not revoke the server key. Then remove only <code>local-worker/.venv</code> and <code>.state</code> if present. Keep unrelated models and engines. This setup adds no service, startup task, global package or automatic update. Keep the daemon on loopback.</p></details>
 </details>`;
   el.innerHTML = `<div class="connect-grid"><div class="connect-rail">
 <h2>Connect your computer</h2>

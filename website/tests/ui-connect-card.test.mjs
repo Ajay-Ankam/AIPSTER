@@ -19,18 +19,20 @@ import { checkPublic } from '../scripts/check.mjs';
 
 const PUBLIC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 // Reviewed pairing client retaining the #17 local-token and Host/Origin guards.
-const WORKER_COMMIT = '3fa309cb08461ea046ee23e801404911c1f3bcc2';
-// Immutable docs revision; kept independent so docs can be corrected without moving the code pin.
-const DOCS_COMMIT = '47d8f3c779a641d06a71fcf29bdd692b828a7781';
+const WORKER_COMMIT = '0e6b60890c736207664d122c62e39d8c4affd2fa';
+// Staged docs commit (local, unpublished): README/CHANGELOG describe the same
+// real-first flow and install WORKER_COMMIT (see pin-consistency.test.mjs).
+const DOCS_COMMIT = '2742a7bb150bc732bf38a4a3f09613dbd998b1e4';
 const TREE = `https://github.com/synchronic1/AIPSTER/blob/${DOCS_COMMIT}/local-worker/`;
 const EXPECTED_LINKS = [
   `${TREE}README.md`,
   `${TREE}README.md#tested-installation`,
-  `${TREE}README.md#optional-real-engine-preparation-not-needed-for-the-mock-check`,
+  `${TREE}README.md#real-engine-preparation-resident-reuse-preferred`,
   `${TREE}README.md#stop-uninstall-and-troubleshoot`,
   `${TREE}VERIFICATION.md`,
   `${TREE}EXECUTION-GAPS.md`,
   `${TREE}PAIRING-INTEGRATION.md`,
+  `${TREE}CHANGELOG.md`,
   'https://github.com/synchronic1/AIPSTER/pull/17',
   'https://github.com/synchronic1/AIPSTER/pull/20'
 ].sort();
@@ -261,9 +263,18 @@ test('OS is suggested but correctable; wrong OS changes instructions honestly', 
   const linuxHtml = mac.el('connect-card').innerHTML;
   assert.ok(textOf(linuxHtml).includes('Installer for Linux: not available'));
   assert.ok(textOf(linuxHtml).includes('macOS / Linux: not qualified'));
-  const linuxPre = nodesOf(linuxHtml.slice(linuxHtml.indexOf('<pre'), linuxHtml.indexOf('</pre>'))).filter((n) => n.nodeName === '#text').map((n) => n.value).join('');
+  const linuxPres = [...linuxHtml.matchAll(/<pre[\s\S]*?<\/pre>/g)].map((m) =>
+    nodesOf(m[0]).filter((n) => n.nodeName === '#text').map((n) => n.value).join(''));
+  assert.equal(linuxPres.length, 2, 'Linux manual install is split at the human edit boundary');
+  const linuxPre = linuxPres.join('\n');
   assert.ok(linuxPre.includes('.venv/bin/python test_installation.py'), 'Advanced follows the picked OS');
   assert.ok(linuxPre.includes('git sparse-checkout set --no-cone /local-worker/ /LICENSE'));
+  assert.ok(linuxPre.includes('[ -e config.toml ] || cp configs/cpu.toml config.toml'), 'manual install never overwrites an existing config');
+  assert.ok(linuxPre.indexOf('cp configs/cpu.toml config.toml') < linuxPre.indexOf('.venv/bin/python runtime_setup.py'), 'config creation precedes planning');
+  assert.ok(linuxPre.includes('.venv/bin/python runtime_setup.py --config config.toml && .venv/bin/dendrite serve --config config.toml'), 'serve is gated on planner success');
+  for (const l of linuxPre.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    if (!l.startsWith('#')) assert.ok(!/[<>]/.test(l), 'no executable placeholder: ' + l);
+  }
   await mac.press('gen-setup');
   assert.equal(mac.captured.length, 2, 'Linux prompt copies too');
   assert.ok(mac.captured[1].includes('.venv/bin/python test_installation.py'));
@@ -384,12 +395,17 @@ test('one action mints and copies the code-bearing setup packet once', async () 
     'already paired', 'do not consume the code', 'private no-echo prompt', 'Never pass',
     'command-line argument', 'cannot type into that private prompt',
     'Pairing registers the resource',
-    'pairing.py heartbeat-loop --config configs/mock.toml', 'pairing.py unpair',
+    'pairing.py heartbeat-loop --config config.toml', 'pairing.py unpair',
+    'do not start a duplicate sender', 'not a fabric route', 'never relabel it',
+    'where.exe llama-server', 'pairing.py serve-jobs --once', 'GET /v1/node',
+    'compare fingerprint only, never content_digest',
+    'verified readiness, not file presence', 'cold counts; loading is transient',
     'a heartbeat proves reachability only, never inference readiness', 'A running worker is NOT proof of inference readiness',
     'Remove only local-worker/.venv', 'There is no automatic update']) {
     assert.ok(flat.includes(phrase), `missing: ${phrase}`);
   }
   assert.ok(!flat.includes('tray menu') && !flat.includes('aipster-worker pair'), 'no packaged pairing copy while no installer is usable');
+  assert.ok(!flat.includes('reflects your configured runtime and model'), 'no false readiness claim about the heartbeat usable bit');
   assert.ok(!new RegExp(`--code\\s+${FAKE_SETUP_CODE}`).test(packet), 'code never interpolated into a command');
   assert.ok(!SECRET_SHAPED.test(packet), 'no long-lived credential shapes in the packet');
   assert.ok(!/127\.0\.0\.1|localhost|C:\\Users/.test(packet), 'no loopback literal or user path baked in');
@@ -607,17 +623,19 @@ test('Advanced keeps the pinned manual commands, warnings and platform labels', 
   const text = textOf(html);
   for (const phrase of ['refuses to start without DENDRITE_API_TOKEN', 'worker-local token',
     'It is not an AIPSTER API key or heartbeat key', 'never paste it into AIPSTER, a URL or a shared config',
-    'security-fixed revision', 'Windows x64: tested', 'mock check only', 'macOS / Linux: not qualified',
+    'local-token and Host/Origin guards (#17)', 'Windows x64: tested', 'mock check only', 'macOS / Linux: not qualified',
     'untested', 'separate prerequisites', 'Manual repair', 'mint a code to type yourself',
     'Mint a one-time pairing code in Manual repair below',
     'not linked until paired', 'Advanced: manual resource registration',
-    'pairing.py heartbeat-loop',
+    'pairing.py heartbeat-loop', 'same DENDRITE_API_TOKEN as the running daemon',
     'Disconnect and uninstall', 'Troubleshooting', 'worker and its root LICENSE only']) {
     assert.ok(text.includes(phrase), `missing: ${phrase}`);
   }
   assert.ok(!text.includes('tray menu') && !text.includes('aipster-worker pair'), 'no packaged pairing copy while no installer is usable');
-  const commands = nodesOf(html.slice(html.indexOf('<pre'), html.indexOf('</pre>'))).filter((n) => n.nodeName === '#text').map((n) => n.value).join('');
-  const lines = commands.split('\n').map((s) => s.trim()).filter(Boolean);
+  const pres = [...html.matchAll(/<pre[\s\S]*?<\/pre>/g)].map((m) =>
+    nodesOf(m[0]).filter((n) => n.nodeName === '#text').map((n) => n.value).join(''));
+  assert.equal(pres.length, 2, 'manual install is split at the human edit boundary');
+  const lines = pres.join('\n').split('\n').map((s) => s.trim()).filter(Boolean);
   assert.deepEqual(lines, [
     'git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git',
     'cd AIPSTER',
@@ -628,9 +646,17 @@ test('Advanced keeps the pinned manual commands, warnings and platform labels', 
     'uv run --no-project --python 3.12.14 python install.py',
     '.\\.venv\\Scripts\\python.exe test_installation.py',
     '$env:DENDRITE_API_TOKEN = .\\.venv\\Scripts\\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"',
-    '.\\.venv\\Scripts\\dendrite.exe serve --config configs/mock.toml'
+    '# Create your own config only if you do not have one (never overwrites):',
+    'if (-not (Test-Path config.toml)) { Copy-Item configs\\cpu.toml config.toml }',
+    '# STOP: edit config.toml yourself before continuing (absolute model path,',
+    '# absolute engine executable if not on PATH). Nothing is downloaded.',
+    '# Identity + plan (planner exit 2 lists setup-required actions; fix and re-run):',
+    '.\\.venv\\Scripts\\python.exe runtime_setup.py --config config.toml; if ($LASTEXITCODE -eq 0) { .\\.venv\\Scripts\\dendrite.exe serve --config config.toml }'
   ]);
-  assert.ok(!/aip_|AIPSTER_(?:API_)?KEY|X-Aipster|\/api\//.test(commands), 'no AIPSTER credential or endpoint in worker commands');
+  for (const l of lines) {
+    if (!l.startsWith('#')) assert.ok(!/[<>]/.test(l), 'no executable placeholder: ' + l);
+  }
+  assert.ok(!/aip_|AIPSTER_(?:API_)?KEY|X-Aipster|\/api\//.test(lines.join('\n')), 'no AIPSTER credential or endpoint in worker commands');
 });
 
 test('standalone README is background; authoritative pairing commands preserve the worker-only checkout and license', async () => {

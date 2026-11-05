@@ -19,14 +19,14 @@ using the appropriate official release for your OS. Ensure `uv --version` report
 0.12.12. Obtain Python 3.12.14 using `uv python install 3.12.14` if needed.
 Python and uv are prerequisites; they are not bundled.
 
-From PowerShell in a fresh directory (these commands match the tested Windows x64 setup):
+From PowerShell in a fresh directory (historical tested Windows x64 mock check — the tested-installation record, not the current setup; the current real-first setup follows the generated setup prompt with `config.toml` in place of the mock config below):
 
 ```powershell
 git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
 cd AIPSTER
 git sparse-checkout set --no-cone /local-worker/ /LICENSE
-git fetch origin 3fa309cb08461ea046ee23e801404911c1f3bcc2
-git checkout --detach 3fa309cb08461ea046ee23e801404911c1f3bcc2
+git fetch origin 0e6b60890c736207664d122c62e39d8c4affd2fa
+git checkout --detach 0e6b60890c736207664d122c62e39d8c4affd2fa
 cd local-worker
 uv run --no-project --python 3.12.14 python install.py
 .\.venv\Scripts\dendrite.exe inspect --config configs/mock.toml
@@ -69,17 +69,19 @@ git status --short
 Continue only if the single modified file is `local-worker/pairing.py`. If
 anything else changed, back it up and use a fresh clone instead.
 
-1. Stop the running `heartbeat-loop` sender terminal with Ctrl+C. Old senders
-   hold no lock, so confirm only one sender runs afterwards.
-2. Fetch the reviewed revision (current pin `3fa309c`):
+1. Stop the running `heartbeat-loop` sender terminal with Ctrl+C. Mock-era
+   senders hold no lock; newer senders enforce one sender per data directory
+   (a second one exits SENDER_RUNNING) — either way, confirm only one sender
+   runs afterwards.
+2. Fetch the reviewed revision (current pin `0e6b608`):
 ```powershell
-git fetch origin 3fa309cb08461ea046ee23e801404911c1f3bcc2
+git fetch origin 0e6b60890c736207664d122c62e39d8c4affd2fa
 ```
 3. Hash-gate the overlay: the LF-normalized local `pairing.py` must equal the
    reviewed blob:
 ```powershell
 $blob = .\local-worker\.venv\Scripts\python.exe -c "import hashlib,pathlib;b=pathlib.Path('local-worker/pairing.py').read_bytes().replace(b'\r\n',b'\n');print(hashlib.sha1(b'blob '+str(len(b)).encode()+b'\x00'+b).hexdigest())"
-$want = git rev-parse 3fa309cb08461ea046ee23e801404911c1f3bcc2:local-worker/pairing.py
+$want = git rev-parse 0e6b60890c736207664d122c62e39d8c4affd2fa:local-worker/pairing.py
 if ($blob.Trim() -ne $want.Trim()) { Write-Output 'STOP: pairing.py does not match the reviewed overlay; use a fresh clone instead' }
 ```
    If it prints STOP, do not continue; use a fresh clone.
@@ -89,11 +91,18 @@ git checkout -- local-worker/pairing.py
 ```
 5. Move to the reviewed revision:
 ```powershell
-git checkout --detach 3fa309cb08461ea046ee23e801404911c1f3bcc2
+git checkout --detach 0e6b60890c736207664d122c62e39d8c4affd2fa
 ```
-6. Keep `.venv` and do not rerun `install.py`: there are no lock or vendor
-   changes between `f3e115e` and `3fa309c`.
-7. Restart one `heartbeat-loop` sender from `local-worker`. Pairing state
+6. Do NOT keep `.venv`: the vendored `dendrite` package changed across these
+   pins (including the `pairing.py` readiness rework in the merged revision),
+   and `install.py` installs `vendor/eif`
+   non-editable into `.venv` while refusing an existing `.venv`. Remove
+   `local-worker/.venv` and rerun `install.py` (quickstart step) so the
+   installed package matches the new checkout.
+7. Restart one `heartbeat-loop` sender from `local-worker` on your real
+   `config.toml` (see the migration note in the generated setup prompt:
+   keep the pairing identity, stop the old sender in its own terminal with
+   Ctrl+C, never kill it, never run a duplicate). Pairing state
    lives in `%LOCALAPPDATA%\AIPSTER-Worker` and survives the update.
 
 ## Pairing with AIPSTER
@@ -113,8 +122,20 @@ stores a sender key privately. It exits without starting the sender. Explicitly
 start it in that terminal, next to the daemon's `serve` terminal:
 
 ```powershell
-.\.venv\Scripts\python.exe pairing.py heartbeat-loop --config configs/mock.toml
+.\.venv\Scripts\python.exe pairing.py heartbeat-loop --config config.toml
 ```
+
+(The mock-era flow used `configs/mock.toml`; use your real `config.toml`.)
+
+Start the sender in a terminal holding the same `DENDRITE_API_TOKEN` as the
+running daemon: set it in that session only before running the command, the
+same private per-session handling as Step 4 of the generated prompt (Windows:
+`$env:`, POSIX: `export`) — a different terminal does not inherit the
+daemon's environment, and the token is never written to a file, URL, or log
+and never pasted into a chat. The sender needs the matching token for its
+authenticated `/v1/node` readiness probe; without it the worker heartbeats
+`usable=false` even when everything else is ready, and no usable value is
+ever claimed without that probe.
 
 Mock always reports `usable=false`. Heartbeats prove reachability only, never
 inference readiness; `/api/jobs` remains disabled. Choose Done or reopen My
@@ -362,9 +383,13 @@ owner may stop or switch it. A genuine end-to-end run needs the token, a residen
 model this worker owns (or explicit consent for a shared attachment) and the
 operator's authorization to run inference.
 
-## Optional real engine preparation (not needed for the mock check)
+## Real engine preparation (resident reuse preferred)
 
-The worker does not contain llama-server. The separately obtained native source
+Prefer reusing a resident loopback engine: point `serve-jobs` at it with
+`--upstream-url` (or read its `GET /v1/models` identity for attach mode with
+`mode = "attach"` and that exact `upstream_model`). Build from source only if
+no resident engine exists. The worker does not contain llama-server. The
+separately obtained native source
 pin is `ikawrakow/ik_llama.cpp` commit
 `3bb386eb68ffee0a5dc7db21da0735d594929eeb`. Its root license is MIT, with ggml,
 llama.cpp and ik_llama.cpp authors credited; dependencies retain their notices.
@@ -404,6 +429,61 @@ managed model. `serve` starts the daemon; an explicit load/execute request would
 start real inference, outside this PR's verification. Do not infer CPU confinement
 from `gpu_layers=0`: the public worker lacks the newer device/KV/environment controls.
 
+## Linux notes (unqualified adaptation)
+
+x64 only, in bash (or another POSIX shell) inside a fresh directory. These
+commands mirror the generated setup prompt's Linux variants; Windows x64
+remains the only tested installation, and this section is an unqualified
+adaptation. The uv 0.12.12 and Python 3.12.14 pins are deliberate, not
+latest: on any pin mismatch, stop and report instead of adapting silently.
+
+```bash
+git clone --filter=blob:none --no-checkout https://github.com/synchronic1/AIPSTER.git
+cd AIPSTER
+git sparse-checkout set --no-cone /local-worker/ /LICENSE
+git fetch origin 0e6b60890c736207664d122c62e39d8c4affd2fa
+git checkout --detach 0e6b60890c736207664d122c62e39d8c4affd2fa
+cd local-worker
+uv run --no-project --python 3.12.14 python install.py
+.venv/bin/python test_installation.py
+export DENDRITE_API_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+cp configs/cpu.toml config.toml
+# edit config.toml yourself: set the [[models]] path to your operator-provided GGUF file
+.venv/bin/python model_identity.py <your-model.gguf>
+.venv/bin/python runtime_setup.py --config config.toml
+.venv/bin/dendrite serve --config config.toml
+```
+
+Real-path expectations: `runtime_setup.py --config config.toml` must report
+ready (exit 0; exit 2 means setup-required actions remain, exit 1 means
+config-error) before serving. `GET /healthz` is an unauthenticated liveness
+probe (status ok, no identity); authenticated `GET /v1/node` must show your
+configured model id with available true and simulated false, and the entry
+fingerprint must equal the `model_identity.py` row fingerprint (compare
+fingerprint only, never content_digest). A managed runtime stays cold
+(resident false) until an explicit user-approved `POST /v1/models/load`;
+attach mode must show resident true. A running worker, a completed pairing,
+a green heartbeat, and a reachable dashboard status prove reachability only —
+never GPU readiness and never fabric dispatch; dispatch stays disabled and
+no fabric endpoint is configured (loopback is local-only, not a fabric
+route). The heartbeat usable bit at this pin is verified readiness from the running
+worker, not file presence: managed needs GGUF magic on disk, the executable
+on PATH, and the worker reporting the model available and not simulated on
+a live managed runtime (cold counts; loading is transient); attach needs the
+exact configured model resident on a ready runtime. Worker down or
+restarting, a non-loopback listener, a missing token, or any mock config
+always reports false. If a sender is already
+serving, reuse it; do not start a duplicate. Prefer a resident loopback
+engine where one exists (generated prompt Step 1): bind it as the consumer
+upstream or attach runtime; after pairing, `pairing.py serve-jobs --once`
+runs one bounded dark poll cycle. Mock serve (explicitly typing
+`configs/mock.toml` yourself — nothing auto-selects it; expecting
+simulated=true, usable=false) is explicit demo/diagnostic opt-in only. The
+`AIPSTER_WORKER_MOCK_DEMO=1` variable is honored by the planner and tray,
+not by serve itself. Pairing and uninstall follow the generated prompt's steps
+(private no-echo code entry, one sender, heartbeat loop for reachability,
+`unpair` plus key revocation to disconnect, remove only `.venv`/`.state`).
+
 ## Stop, uninstall and troubleshoot
 
 Stop the foreground server with Ctrl+C and verify the port is closed. Managed
@@ -426,6 +506,9 @@ startup task, global Python package or cloud configuration.
 | Model unavailable | Check real GGUF path/magic and engine PATH; daemon health alone is insufficient. |
 | Runtime binary not found | Set the actual compiled executable path; no automatic native download occurs. |
 | TLS/index failure | Check access to public PyPI; installer deliberately ignores private indexes/proxies. |
+| `uv: command not found` in a new terminal | Open a fresh login shell so the installer's PATH change applies, then `uv --version` must report 0.12.12. |
+| `permission denied` creating `.venv` | Use a directory you own; do not run the install with sudo. |
+| ARM64 (`aarch64`) | Stop: these steps cover x64 only; no qualified instructions exist. |
 
 ## Provenance and updates
 
