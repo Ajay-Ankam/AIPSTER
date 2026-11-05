@@ -427,3 +427,87 @@ test('routing decide: post-commit read failure does not roll back a committed ro
   assert.equal(replay.route.reservation.state, 'held');
   assert.deepEqual(await grantUsage(t.DB, 'g_rb'), { used_jobs: 1, used_tokens: 500 });
 });
+
+// --- Per-decision telemetry persisted beside the served outcome ---
+
+const storedRow = async (t, tenant, requestId) => JSON.parse((await getOpByRequest(t.DB, tenant, requestId)).ranking_json);
+
+test('routing decide metrics: advice receipt, agreement and timing persist; replay never serves them', async () => {
+  const t = await createTestEnv(ENV);
+  await seed(t);
+  const fetchImpl = async () => new Response(JSON.stringify(rankResponse(['r3', 'r1', 'r2'])), { status: 200 });
+  const out = await decideRoute({ db: t.DB, env: t.env, tenant: 'u_alice', features: { model: 'fast-path', maxTokens: 500 }, fetchImpl, nowMs: NOW });
+  const row = await storedRow(t, 'u_alice', out.receipt.requestId);
+  const m = row.metrics;
+  assert.deepEqual(out.metrics, m, 'leader sees exactly what was persisted');
+  assert.equal(m.schema, 'aipster.routing.decision-metrics/v1');
+  assert.equal(m.clock, 'injected');
+  assert.equal(m.decisionMs, 0, 'pinned clock: injected difference, not a wall-clock claim');
+  assert.equal(m.cache, 'miss');
+  assert.equal(m.candidates.scored, out.ranking.length);
+  assert.equal(m.servedTop1, 'r3');
+  assert.equal(typeof m.deterministicTop1, 'string');
+  assert.equal(m.top1AgreesWithDeterministic, m.deterministicTop1 === 'r3');
+  assert.deepEqual(m.selection, { propensity: null, basis: 'model-advice-unknown' });
+  assert.equal(m.advice.outcome, 'advice');
+  assert.equal(m.advice.attempted, true);
+  assert.equal(m.advice.failureCode, null);
+  assert.deepEqual(m.advice.usage, { inputTokens: 100, outputTokens: 30, source: 'reported' });
+  assert.ok(m.advice.spendUsdEst > 0);
+  assert.equal(typeof m.advice.priceVersion, 'string');
+  // Sanitized: no resource/owner/grant ids or provider text in telemetry.
+  const blob = JSON.stringify(m);
+  for (const leak of ['rb', 'u_bob', 'g_rb', 'resp_rank', 'reasonCodes']) {
+    assert.ok(!blob.includes(`"${leak}"`), `metrics leak ${leak}`);
+  }
+  // Replay serves the stored outcome only.
+  assert.equal(row.outcome.metrics, undefined);
+  const again = await decideRoute({ db: t.DB, env: t.env, tenant: 'u_alice', features: { model: 'fast-path', maxTokens: 500, requestId: out.receipt.requestId }, fetchImpl, nowMs: NOW });
+  assert.equal(again.replay, true);
+  assert.equal(again.metrics, undefined);
+});
+
+test('routing decide metrics: failed advice attempt is not propensity 1; cache hit logs no advice', async () => {
+  {
+    const t = await createTestEnv(ENV);
+    await seed(t);
+    const out = await decideRoute({ db: t.DB, env: t.env, tenant: 'u_alice', features: { model: 'm' }, fetchImpl: async () => new Response('{}', { status: 500 }), nowMs: NOW });
+    const m = (await storedRow(t, 'u_alice', out.receipt.requestId)).metrics;
+    assert.equal(out.source, 'fallback');
+    assert.deepEqual(m.selection, { propensity: null, basis: 'fallback-after-advice-attempt' });
+    assert.equal(m.orderAgreesWithDeterministic, true);
+    assert.equal(m.advice.outcome, 'fallback');
+    assert.equal(m.advice.attempted, true);
+    assert.equal(m.advice.failureCode, 'ADVICE_UPSTREAM');
+  }
+  {
+    const t = await createTestEnv(ENV);
+    await seed(t);
+    const ok = async () => new Response(JSON.stringify(rankResponse(['r2', 'r1'])), { status: 200 });
+    await decideRoute({ db: t.DB, env: t.env, tenant: 'u_alice', features: { model: 'm', kinds: ['local'] }, fetchImpl: ok, nowMs: NOW });
+    const second = await decideRoute({ db: t.DB, env: t.env, tenant: 'u_alice', features: { model: 'm', kinds: ['local'] }, fetchImpl: ok, nowMs: NOW + 1000 });
+    const m = (await storedRow(t, 'u_alice', second.receipt.requestId)).metrics;
+    assert.equal(second.source, 'cached');
+    assert.equal(m.cache, 'hit');
+    assert.equal(m.advice, null, 'no advice call: null, never a zero receipt');
+    assert.deepEqual(m.selection, { propensity: null, basis: 'model-advice-unknown' });
+  }
+  {
+    // Advice disabled: deterministic order, attempted:false.
+    const t = await createTestEnv({});
+    await seed(t);
+    const out = await decideRoute({ db: t.DB, env: t.env, tenant: 'u_alice', features: { model: 'm' }, fetchImpl: async () => { throw new Error('must not call'); }, nowMs: NOW });
+    const m = (await storedRow(t, 'u_alice', out.receipt.requestId)).metrics;
+    assert.equal(m.advice.attempted, false);
+    assert.equal(m.advice.failureCode, 'ADVICE_DISALLOWED');
+    assert.deepEqual(m.selection, { propensity: 1, basis: 'deterministic-route/v1' });
+  }
+});
+
+test('routing decide metrics: live clock is labeled live with a measured duration', async () => {
+  const t = await createTestEnv({});
+  await seed(t);
+  const out = await decideRoute({ db: t.DB, env: t.env, tenant: 'u_alice', features: { model: 'm' }, fetchImpl: async () => { throw new Error('must not call'); } });
+  assert.equal(out.metrics.clock, 'live');
+  assert.ok(Number.isFinite(out.metrics.decisionMs) && out.metrics.decisionMs >= 0);
+});

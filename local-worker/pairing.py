@@ -808,6 +808,8 @@ def _reportable_runtimes(config_path, data_dir=None):
     found = []
     attached = None  # probed lazily, at most once per report
     attach_pairs = set()
+    managed = None  # same for the managed readiness probe
+    managed_pairs = set()
     for runtime in getattr(config, "runtimes", []) or []:
         name = CAPABILITY_RUNTIME_NAMES.get(getattr(runtime, "kind", ""))
         if name is None:
@@ -819,8 +821,12 @@ def _reportable_runtimes(config_path, data_dir=None):
             if attached is None:
                 attach_pairs = attach_readiness(config, data_dir)[0]
                 attached = {rid for rid, _ in attach_pairs}
-            if runtime.id in attached and all(r["name"] != name for r in found):
-                entry = {"name": name, "formats": list(CAPABILITY_FORMATS)}
+            # Dedupe by (name, mode): a mixed config (attach + managed
+            # runtimes of one kind) reports both entries; name-only dedupe
+            # would silently drop the second transport.
+            if runtime.id in attached and all((r["name"], r.get("mode")) != (name, "attach") for r in found):
+                entry = {"name": name, "mode": "attach",
+                         "formats": list(CAPABILITY_FORMATS)}
                 # Worker-origin model IDs (FABRIC067 integration): attach
                 # the probed models for qualified runtimes only. The helper
                 # returns {} for foreign names and never raises; a missing
@@ -831,6 +837,7 @@ def _reportable_runtimes(config_path, data_dir=None):
                         name, sorted({m for r, m in attach_pairs if r == runtime.id})[:32]))
                 except Exception:
                     pass
+                entry["configured"] = _configured_model_ids(config, runtime.id)
                 found.append(entry)
             continue
         if mode != "managed":
@@ -838,9 +845,48 @@ def _reportable_runtimes(config_path, data_dir=None):
         executable = getattr(runtime, "executable", None)
         if not executable or not shutil.which(str(executable)):
             continue
-        if all(r["name"] != name for r in found):
-            found.append({"name": name, "formats": list(CAPABILITY_FORMATS)})
+        if all((r["name"], r.get("mode")) != (name, "managed") for r in found):
+            entry = {"name": name, "mode": "managed",
+                     "formats": list(CAPABILITY_FORMATS)}
+            # Managed readiness models, same shape as attach: the running
+            # worker must report the configured model available and not
+            # simulated. Unavailable probe keeps the entry model-less.
+            if data_dir is not None or _worker_token(config, None):
+                if managed is None:
+                    managed_pairs = managed_readiness(config, data_dir)[0]
+                    managed = {rid for rid, _ in managed_pairs}
+                if runtime.id in managed:
+                    try:
+                        from model_readiness import runtime_models_entry
+                        entry.update(runtime_models_entry(
+                            name, sorted({m for r, m in managed_pairs if r == runtime.id})[:32]))
+                    except Exception:
+                        pass
+            entry["configured"] = _configured_model_ids(config, runtime.id)
+            found.append(entry)
     return found[:16]
+
+
+def _configured_model_ids(config, runtime_id):
+    """Stable configured model ids for one runtime, from config only.
+
+    Unlike readiness, this changes only when the operator edits the config,
+    so the qualification digest binds it without churning on unload/reload.
+    Bounded, sorted, deduplicated; never raises.
+    """
+    try:
+        ids = []
+        for model in getattr(config, "models", []) or []:
+            if getattr(model, "runtime", None) != runtime_id:
+                continue
+            mid = getattr(model, "id", None)
+            if isinstance(mid, str) and 1 <= len(mid) <= 256:
+                ids.append(mid)
+            if len(ids) >= 32:
+                break
+        return sorted(set(ids))
+    except Exception:
+        return []
 
 
 def _bounded_pair(total, avail):
@@ -1602,6 +1648,30 @@ def build_parser():
                       help="seconds to cache the upstream model list")
     jobs.add_argument("--once", action="store_true",
                       help="poll for one job and exit")
+    # Qualification benchmark runner (meta-qual lane). Same lazy pattern:
+    # the import happens only when this command is used, so every other
+    # command keeps working with the frozen pairing-only bundle.
+    qual = sub.add_parser("serve-qualification",
+                          help="poll benchmark assignments and run the fixed CPU smoke (dark by default)")
+    qual.add_argument("--model-id", required=True,
+                      help="already-configured ready CPU model to benchmark")
+    qual.add_argument("--runtime-id", default="ganglion",
+                      help="runtime identity this worker claims: ganglion or "
+                           "llama-server (default ganglion)")
+    qual.add_argument("--ganglion-base", "--upstream-url", dest="ganglion_base",
+                      default=None,
+                      help="local upstream base URL, Ganglion or llama-server "
+                           "(default http://127.0.0.1:8471); --upstream-url is an alias")
+    qual.add_argument("--allow-non-loopback-ganglion", action="store_true",
+                      help="permit a non-loopback upstream base (not qualified)")
+    qual.add_argument("--config", default=None,
+                      help="worker config file used to verify the local CPU "
+                           "runtime/model binding before every run "
+                           "(required: without it all runs report unsupported)")
+    qual.add_argument("--interval", type=float, default=5.0,
+                      help="base idle poll interval in seconds")
+    qual.add_argument("--once", action="store_true",
+                      help="poll for one assignment and exit")
     return parser
 
 
@@ -1630,6 +1700,10 @@ def main(argv=None):
             # here keeps a pair/heartbeat-only frozen bundle self-contained.
             import inference_worker
             return inference_worker.cmd_serve_jobs(args)
+        if args.command == "serve-qualification":
+            # Lazy, same as serve-jobs: the benchmark runner is opt-in only.
+            import qual_runner
+            return qual_runner.cmd_serve_qualification(args)
     except KeyboardInterrupt:
         # Ctrl+C stops the sender cleanly: no traceback, no partial claim
         # (pair's manifest commit is atomic under the pair mutex).

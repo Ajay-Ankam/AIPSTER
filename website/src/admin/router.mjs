@@ -16,7 +16,7 @@
 import { all, first, pageQuery } from '../lib/store.js';
 import { pagination } from '../lib/validate.js';
 import { parseStatusRow, resourceLiveness, STALE_AFTER_MS } from '../lib/status.mjs';
-import { handleDgmPreview } from '../dgm/router.mjs';
+import { handleDgmPreview, handleDgmSelfTest } from '../dgm/router.mjs';
 import { readAudit } from './audit-read.mjs';
 import { ADMIN_METRICS, coverageSnapshot } from './coverage.mjs';
 import { readHealth } from './health.mjs';
@@ -417,6 +417,12 @@ export async function handleAdmin(ctx) {
   // passed through the context so the preview router needs no import cycle.
   if (path === '/api/admin/v1/dgm/preview/status' || path.startsWith('/api/admin/v1/dgm/preview/')) {
     const out = await handleDgmPreview({ ...ctx, requireAdmin: (permission) => requireAdmin(ctx, permission) });
+    if (out) return out;
+  }
+  // DGM worker-cron self-test history (exact path; the DGM router owns the
+  // handler, guard, and method gate — this line only routes to it).
+  if (path === '/api/admin/v1/dgm/self-test') {
+    const out = await handleDgmSelfTest({ ...ctx, requireAdmin: (permission) => requireAdmin(ctx, permission) });
     if (out) return out;
   }
   return send(ctx, 404, { error: 'Unknown admin route.', code: 'NOT_FOUND' });

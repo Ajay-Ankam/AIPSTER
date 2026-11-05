@@ -60,15 +60,19 @@ export async function claimRequest(db, { opId, tenant, requestId, nowMs = null }
  * after the commit that could falsely trigger rollback-style cleanup of an
  * admitted decision.
  */
-export async function finalizeDecision(db, { opId, tenant, requestId, ranking, source, failure = null, outcome = null, digests = {}, policyVersion = 'route/v1', ttlMs = ROUTING_OP_TTL_MS, nowMs = null } = {}) {
+export async function finalizeDecision(db, { opId, tenant, requestId, ranking, source, failure = null, outcome = null, metrics = null, digests = {}, policyVersion = 'route/v1', ttlMs = ROUTING_OP_TTL_MS, nowMs = null } = {}) {
   if (!SOURCES.includes(source)) throw new Error('unknown source.');
   const now = Number.isFinite(nowMs) ? nowMs : Date.now();
   const at = new Date(now).toISOString();
+  // `metrics` is operator telemetry (advice receipt, timing, agreement). It
+  // sits beside `outcome`, never inside it: replay serves `outcome` only, so
+  // duplicate callers never receive spend or latency telemetry.
   const row = {
     ranking: Array.isArray(ranking) ? ranking : [],
     source,
     failure: failure ? { code: failure.code || 'UNKNOWN', status: failure.status || 502 } : null,
     outcome: outcome && typeof outcome === 'object' ? outcome : null,
+    metrics: metrics && typeof metrics === 'object' ? metrics : null,
   };
   const prev = await getOpByRequest(db, tenant, requestId);
   const state = row.ranking.length > 0 ? 'admitted' : 'rejected';

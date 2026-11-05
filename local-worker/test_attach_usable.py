@@ -324,11 +324,13 @@ class AttachUsableTests(unittest.TestCase):
     def test_capability_report_claims_verified_attach_runtime(self):
         node = self.node(body=node_report())
         config = write_config(self.data, node.port)
-        self.assertEqual(pairing._reportable_runtimes(str(config), self.data),
-                         [{"name": "llama-server", "formats": ["gguf"], "models": [MODEL]}])
+        # Qualification lane: the entry carries its transport mode, the
+        # probed ready models, and the stable configured model ids.
+        expected = [{"name": "llama-server", "mode": "attach", "formats": ["gguf"], "models": [MODEL], "configured": [MODEL]}]
+        self.assertEqual(pairing._reportable_runtimes(str(config), self.data), expected)
         report = pairing.build_capability_report(str(config), self.data)
         if report is not None:  # None only when psutil/disk cannot be measured
-            self.assertEqual(report["runtimes"], [{"name": "llama-server", "formats": ["gguf"], "models": [MODEL]}])
+            self.assertEqual(report["runtimes"], expected)
 
     def test_capability_report_drops_unready_or_unprobed_attach(self):
         node = self.node(body=node_report(runtime={"state": "unavailable"}))
