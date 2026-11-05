@@ -1952,17 +1952,53 @@ function resetState() {
   $('grant-form').hidden = false;
   document.querySelectorAll('[data-tab]').forEach((b) => b.setAttribute('aria-selected', b.dataset.tab === 'overview' ? 'true' : 'false'));
   document.querySelectorAll('[role="tabpanel"]').forEach((p) => { p.hidden = p.id !== 'tab-overview'; });
+  activeTab = 'overview';
 }
 
-document.querySelectorAll('[data-tab]').forEach((btn) => btn.addEventListener('click', () => {
+// In-app history (issue #106): each tab is a same-document history entry
+// (/app/#compute, …; Overview is the bare /app/ URL), so browser back/forward
+// walk the tabs. Only known tab names are honoured: other fragments (e.g. the
+// #main skip link) never switch tabs, and the query string is kept as is.
+const tabButton = (name) => Array.from(document.querySelectorAll('[data-tab]')).find((b) => b.dataset.tab === name) || null;
+// The tab a URL names: 'overview' for no fragment, the tab for a known tab
+// fragment, and null for any other fragment (e.g. the #main skip link), which
+// must never switch tabs or clear in-progress tab state.
+function tabFromUrl() {
+  const name = String((location.hash || '').replace(/^#/, ''));
+  if (!name) return 'overview';
+  return Object.prototype.hasOwnProperty.call(loaders, name) && tabButton(name) ? name : null;
+}
+const tabUrl = (name) => (location.pathname || '/app/') + (location.search || '') + (name === 'overview' ? '' : '#' + name);
+let activeTab = 'overview';
+function activateTab(name) {
+  const btn = tabButton(name);
+  if (!btn) return;
   clearPairingCode();
   clearSetupCode();
   if (connect) paintConnectCard();
   generation++;
+  activeTab = name;
   document.querySelectorAll('[data-tab]').forEach((b) => b.setAttribute('aria-selected', b === btn ? 'true' : 'false'));
-  document.querySelectorAll('[role="tabpanel"]').forEach((p) => { p.hidden = p.id !== 'tab-' + btn.dataset.tab; });
-  loaders[btn.dataset.tab]();
+  document.querySelectorAll('[role="tabpanel"]').forEach((p) => { p.hidden = p.id !== 'tab-' + name; });
+  loaders[name]();
+}
+document.querySelectorAll('[data-tab]').forEach((btn) => btn.addEventListener('click', () => {
+  const name = btn.dataset.tab;
+  if (tabFromUrl() !== name && typeof history !== 'undefined' && typeof history.pushState === 'function') {
+    history.pushState(null, '', tabUrl(name));
+  }
+  activateTab(name);
 }));
+function onHistoryNav() {
+  // Signed-out (or still-checking) documents never render protected panels.
+  if (!me) return;
+  const name = tabFromUrl();
+  if (name !== null && name !== activeTab) activateTab(name);
+}
+if (typeof addEventListener === 'function') {
+  addEventListener('popstate', onHistoryNav);
+  addEventListener('hashchange', onHistoryNav);
+}
 
 // Cross-card navigation (e.g. the Overview catalog card): delegates to the
 // real tab buttons so generation fencing and loaders stay identical.
@@ -2010,7 +2046,9 @@ $('logout').addEventListener('click', async () => {
   resetState();
   connect = null;
   $('connect-card').innerHTML = ''; $('connect-card').hidden = true;
-  $('view-app').hidden = true; $('view-login').hidden = false; $('sessionbar').hidden = true;
+  // Drop the tab fragment so the signed-out URL is plain /app/ (query kept).
+  if (typeof history !== 'undefined' && typeof history.replaceState === 'function') history.replaceState(null, '', tabUrl('overview'));
+  showLogin();
 });
 
 $('resource-form').addEventListener('submit', async (e) => {
@@ -2175,6 +2213,7 @@ $('fab-authz-form').addEventListener('submit', async (e) => {
 function showApp() {
   generation++;
   resetState();
+  $('view-auth').hidden = true;
   $('view-login').hidden = true; $('view-app').hidden = false; $('sessionbar').hidden = false;
   $('whoami').textContent = me.name + ' (' + (me.username || me.email) + ')';
   const demo = !!(me && me.demo);
@@ -2183,7 +2222,15 @@ function showApp() {
   $('demo-grants-note').hidden = !demo;
   $('demo-keys-note').hidden = !demo;
   $('demo-fab-note').hidden = !demo;
-  loadOverview();
+  // resetState() selected Overview; honour a tab deep link (/app/#models).
+  const tab = tabFromUrl();
+  if (tab === null || tab === 'overview') loadOverview(); else activateTab(tab);
+}
+
+function showLogin() {
+  $('view-auth').hidden = true;
+  $('view-app').hidden = true; $('sessionbar').hidden = true;
+  $('view-login').hidden = false;
 }
 
 function callbackErrorMessage(code) {
@@ -2198,17 +2245,53 @@ function callbackErrorMessage(code) {
   return 'GitHub sign-in failed. Please try again.'
 }
 
+// Session bootstrap (issue #106). The sign-in view is hidden until the server
+// answers: a verified user shows the app, a confirmed absent/expired/rejected
+// session shows sign-in, and a transport/server failure says so with a retry
+// instead of pretending the caller is signed out. Bounded, never a permanent
+// spinner. Nothing identity-scoped is cached across loads.
+const SESSION_CHECK_MS = 15000;
+let sessionCheck = 0;
+async function restoreSession() {
+  const run = ++sessionCheck;
+  $('auth-status').textContent = 'Checking your session…';
+  $('auth-retry').hidden = true;
+  $('view-auth').hidden = false;
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), SESSION_CHECK_MS) : null;
+  let outcome;
+  try {
+    const res = await fetch('/api/auth/get-session', ctl ? { signal: ctl.signal } : {});
+    if (res.status === 401 || res.status === 403) outcome = 'signed-out';
+    else if (!res.ok) outcome = 'error';
+    else {
+      let data = null;
+      try { data = await res.json(); } catch { outcome = 'error'; }
+      if (!outcome) {
+        if (data && data.user) { outcome = 'user'; me = data.user; }
+        else outcome = 'signed-out';
+      }
+    }
+  } catch { outcome = 'error'; }
+  finally { if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer); }
+  if (run !== sessionCheck) return;
+  // A sign-in completed meanwhile (demo form) owns the view.
+  if (me && outcome !== 'user') return;
+  if (outcome === 'user') { showApp(); return; }
+  if (outcome === 'signed-out') { me = null; showLogin(); return; }
+  $('auth-status').textContent = 'Could not reach AIPSTER to check your session. Check your connection and try again.';
+  $('auth-retry').hidden = false;
+}
+$('auth-retry').addEventListener('click', () => { restoreSession(); });
+
 (async () => {
   try {
-    try {
-      const params = new URLSearchParams(location.search || '');
-      const cbError = params.get('error');
-      if (cbError) {
-        const err = $('login-error'); err.textContent = callbackErrorMessage(cbError); err.hidden = false;
-        history.replaceState(null, '', location.pathname);
-      }
-    } catch { /* error display must never break session restore */ }
-    const data = await api('/api/auth/get-session');
-    if (data && data.user) { me = data.user; showApp(); }
-  } catch { /* stay on login */ }
+    const params = new URLSearchParams(location.search || '');
+    const cbError = params.get('error');
+    if (cbError) {
+      const err = $('login-error'); err.textContent = callbackErrorMessage(cbError); err.hidden = false;
+      history.replaceState(null, '', location.pathname);
+    }
+  } catch { /* error display must never break session restore */ }
+  await restoreSession();
 })();

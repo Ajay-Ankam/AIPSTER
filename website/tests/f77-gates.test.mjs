@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTestEnv, readJson } from './d1-shim.mjs';
 import { verifyLive } from '../scripts/verify-live.mjs';
+import { LANDING_CSP } from '../scripts/check.mjs';
 
 // Finding 7: readiness validates the migration contract (columns), not just
 // table names. A database at 0001-0003 must not report ready.
@@ -47,6 +48,7 @@ async function verifierFixture(t, healthBody) {
       body = data[asset];
       headers['Cache-Control'] = asset.startsWith('app/') ? 'no-store' : 'public, no-transform';
       headers['Content-Type'] = asset.endsWith('.html') ? 'text/html; charset=utf-8' : asset.endsWith('.js') ? 'text/javascript' : 'application/json';
+      if (asset === 'index.html') headers['Content-Security-Policy'] = LANDING_CSP;
       if (asset === 'app/index.html') {
         headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
         headers['X-Content-Type-Options'] = 'nosniff';

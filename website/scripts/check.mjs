@@ -5,7 +5,11 @@ import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {parse} from 'parse5';
 
-export const publicFiles=['404.html','_headers','admin/admin.js','admin/index.html','admin/styles.css','app/app.js','app/background166.css','app/background166.js','app/experiments/dsh-dgm/admin-gate.mjs','app/experiments/dsh-dgm/dsh-dgm.js','app/experiments/dsh-dgm/fixtures/work-items.mjs','app/experiments/dsh-dgm/index.html','app/experiments/dsh-dgm/site.css','app/experiments/dsh-dgm/src/adapter.mjs','app/experiments/dsh-dgm/src/canonical.mjs','app/experiments/dsh-dgm/src/checks.mjs','app/experiments/dsh-dgm/src/contract.mjs','app/experiments/dsh-dgm/src/demo.mjs','app/experiments/dsh-dgm/src/evaluate.mjs','app/experiments/dsh-dgm/src/measure.mjs','app/experiments/dsh-dgm/src/selection.mjs','app/experiments/dsh-dgm/src/view.mjs','app/experiments/dsh-dgm/styles.css','app/experiments/inference-demo/app.js','app/experiments/inference-demo/contract.mjs','app/experiments/inference-demo/index.html','app/experiments/inference-demo/styles.css','app/icon.svg','app/index.html','app/styles.css','assets/AIPSTER-model-LoRA-drilldown.png','assets/AIPSTER-model-LoRA-drilldown.svg','assets/IRB-DGM-JEV-component-flow.png','assets/IRB-DGM-JEV-component-flow.svg','assets/aipster-intro-v0-2-poster.jpg','assets/aipster-intro-v0-2.mp4','assets/aipster-intro-v0-2.vtt','assets/aipster-wordmark.svg','assets/aipster-wordmark-on-dark.svg','assets/progress-log-20261026.png','assets/progress-wordmark-d.png','assets/sponsors/baseten.svg','assets/sponsors/heurchain.svg','assets/sponsors/kainotomic.svg','assets/sponsors/meta.svg','assets/sponsors/modal.svg','assets/social-preview.png','assets/social-preview.svg','favicon.svg','index.html','release.json','styles.css'].sort();
+export const publicFiles=['404.html','_headers','admin/admin.js','admin/index.html','admin/styles.css','app/app.js','app/background166.css','app/background166.js','app/experiments/dsh-dgm/admin-gate.mjs','app/experiments/dsh-dgm/dsh-dgm.js','app/experiments/dsh-dgm/fixtures/work-items.mjs','app/experiments/dsh-dgm/index.html','app/experiments/dsh-dgm/site.css','app/experiments/dsh-dgm/src/adapter.mjs','app/experiments/dsh-dgm/src/canonical.mjs','app/experiments/dsh-dgm/src/checks.mjs','app/experiments/dsh-dgm/src/contract.mjs','app/experiments/dsh-dgm/src/demo.mjs','app/experiments/dsh-dgm/src/evaluate.mjs','app/experiments/dsh-dgm/src/measure.mjs','app/experiments/dsh-dgm/src/selection.mjs','app/experiments/dsh-dgm/src/view.mjs','app/experiments/dsh-dgm/styles.css','app/experiments/inference-demo/app.js','app/experiments/inference-demo/contract.mjs','app/experiments/inference-demo/index.html','app/experiments/inference-demo/styles.css','app/icon.svg','app/index.html','app/styles.css','assets/AIPSTER-model-LoRA-drilldown.png','assets/AIPSTER-model-LoRA-drilldown.svg','assets/aipster-intro-v0-2-poster.jpg','assets/aipster-intro-v0-2.mp4','assets/aipster-intro-v0-2.vtt','assets/aipster-wordmark.svg','assets/aipster-wordmark-on-dark.svg','assets/progress-log-20261026.png','assets/progress-wordmark-d.png','assets/sponsors/baseten.svg','assets/sponsors/heurchain.svg','assets/sponsors/kainotomic.svg','assets/sponsors/meta.svg','assets/sponsors/modal.svg','assets/social-preview.png','assets/social-preview.svg','favicon.svg','index.html','motion.js','release.json','styles.css'].sort();
+
+// The landing and 404 policy, set by public/_headers. /app and /admin replace it
+// with the Worker's own policy (src/worker.js); verify-live.mjs checks both.
+export const LANDING_CSP="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; font-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 export const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 async function files(root,dir=root){const result=[];for(const entry of await readdir(dir,{withFileTypes:true})){assert(!entry.isSymbolicLink(),'Symlinks are outside the public upload policy');const path=resolve(dir,entry.name);if(entry.isDirectory())result.push(...await files(root,path));else{assert(entry.isFile(),'Unexpected asset type');result.push(relative(root,path).replaceAll('\\','/'));}}return result.sort();}
@@ -64,7 +68,8 @@ function checkCss(text, path, ids = new Set()) {
 // Reviewed panel shells and their single approved same-origin script each.
 // Adding a shell here is a policy change: it must stay minimal, carry no
 // authority of its own, and keep every API call server-authorized.
-const APPROVED_PANEL_SCRIPTS = new Map([['app/index.html', '/app/app.js'], ['admin/index.html', '/admin/admin.js'], ['app/experiments/dsh-dgm/index.html', '/app/experiments/dsh-dgm/dsh-dgm.js'], ['app/experiments/inference-demo/index.html', '/app/experiments/inference-demo/app.js']]);
+// The landing page loads only its presentation-only motion script.
+const APPROVED_PANEL_SCRIPTS = new Map([['index.html', '/motion.js'], ['app/index.html', '/app/app.js'], ['admin/index.html', '/admin/admin.js'], ['app/experiments/dsh-dgm/index.html', '/app/experiments/dsh-dgm/dsh-dgm.js'], ['app/experiments/inference-demo/index.html', '/app/experiments/inference-demo/app.js']]);
 
 // BACKGROUND166: the signed-in control panel alone may load one extra
 // decorative script after its approved entry. It carries no authority of its
@@ -169,7 +174,9 @@ export async function checkPublic(root){
   assert(!/(?:href|src)="\/(?:login|api)(?:[\/"?])/i.test(html),'Raw login/API paths must not be advertised on the landing page');
   assert(html.includes('User login is not enabled on this public site.'));
   assert(html.includes('In development'));
-  assert((await readFile(resolve(root,'_headers'),'utf8')).includes('no-transform'));
+  const headers=await readFile(resolve(root,'_headers'),'utf8');
+  assert(headers.includes('no-transform'));
+  assert.deepEqual(headers.split('\n').filter(line=>/^\s*content-security-policy\s*:/i.test(line)).map(line=>line.trim()),[`Content-Security-Policy: ${LANDING_CSP}`],'_headers must set exactly the reviewed landing CSP');
   const release=JSON.parse(await readFile(resolve(root,'release.json'),'utf8'));
   assert.equal(release.auth_deployed,false);
   return {files:manifest,manifest_sha256:sha(JSON.stringify(manifest)),revision:release.revision};

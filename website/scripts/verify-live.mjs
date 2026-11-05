@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile, writeFile, mkdir} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {publicFiles, sha} from './check.mjs';
+import {LANDING_CSP, publicFiles, sha} from './check.mjs';
 
 // .mjs modules are JavaScript and are held to exactly the .js media types.
 const JAVASCRIPT_TYPES = ['text/javascript', 'application/javascript'];
@@ -113,6 +113,7 @@ export async function verifyLive({base = 'https://aipster.net',
     const cache = response.headers.get('cache-control') || '';
     assert(cache.includes(path.startsWith('app/') ? 'no-store' : 'no-transform'), `Incorrect cache policy: ${path}`);
     if (path === 'app/index.html') verifyAppSecurity(response);
+    if (path === 'index.html') assert.equal(response.headers.get('content-security-policy'), LANDING_CSP, 'Landing CSP must match the reviewed policy');
     assets++;
   }
   const redirect = await request('/app');

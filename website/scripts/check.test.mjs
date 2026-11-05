@@ -6,7 +6,7 @@ import {resolve,join,sep} from 'node:path';
 import {checkPublic} from './check.mjs';
 const original=resolve(import.meta.dirname,'../public');
 async function fixture(change,run){const root=await mkdtemp(join(tmpdir(),'aipster-public-check-'));try{await cp(original,root,{recursive:true});await change(root);await run(root);}finally{assert(root.startsWith(resolve(tmpdir())+sep)&&root.includes('aipster-public-check-'));await rm(root,{recursive:true,force:true});}}
-test('valid public-only artifact passes',async()=>{assert.equal((await checkPublic(original)).files.length,52);});
+test('valid public-only artifact passes',async()=>{assert.equal((await checkPublic(original)).files.length,51);});
 
 test('an accidentally copied auth/credential file fails',async()=>fixture(root=>writeFile(resolve(root,'.dev.vars'),'SYNTHETIC_ONLY=1'),root=>assert.rejects(checkPublic(root),/allowlist/)));
 test('inline active HTML fails',async()=>fixture(async root=>{const path=resolve(root,'index.html');await writeFile(path,(await readFile(path,'utf8')).replace('</body>','<script>1</script></body>'));},root=>assert.rejects(checkPublic(root),/Active/)));
@@ -106,7 +106,7 @@ test('semantic approved script and link spellings remain allowed', async () => f
   await edit(root, 'app/index.html', text => text.replace('<script src="/app/app.js"></script>', "<script SRC = '/app/app.js'></script>"));
   await edit(root, 'index.html', text => text.replace('href="#overview"', "HREF = '#overview'"));
   await edit(root, 'styles.css', text => text + '\nbody{background-image:url(/favicon.svg)}');
-}, async root => assert.equal((await checkPublic(root)).files.length, 52)));
+}, async root => assert.equal((await checkPublic(root)).files.length, 51)));
 
 test('approved script cannot acquire inline code or be duplicated', async () => {
   for (const replacement of [
@@ -129,6 +129,62 @@ test('demo shell pins exactly its approved module script', async () => {
     root => edit(root, 'app/experiments/inference-demo/index.html', text => text.replace('<script src="/app/experiments/inference-demo/app.js" type="module"></script>', replacement)),
     root => assert.rejects(checkPublic(root), /Active|exactly/),
   );
+});
+
+test('the landing loads only its same-origin motion script', async () => {
+  const html = await readFile(resolve(original, 'index.html'), 'utf8');
+  assert.deepEqual([...html.matchAll(/<script\b[^>]*>/gi)].map(m => m[0]), ['<script src="/motion.js">']);
+  for (const replacement of [
+    '<script src="/app/app.js"></script>',
+    '<script src="/motion.js" type="module"></script>',
+    '<script src="/motion.js">alert(1)</script>',
+    '<script src="/motion.js"></script><script src="/motion.js"></script>',
+  ]) await fixture(
+    root => edit(root, 'index.html', text => text.replace('<script src="/motion.js"></script>', replacement)),
+    root => assert.rejects(checkPublic(root), /Active|exactly/),
+  );
+  await fixture(
+    root => edit(root, '404.html', text => text.replace('</body>', '<script src="/motion.js"></script></body>')),
+    root => assert.rejects(checkPublic(root), /Active/),
+  );
+});
+
+// The reviewed landing policy, pinned as a literal: a change here is a
+// policy change. /app and /admin replace it in src/worker.js.
+const LANDING_CSP_LINE = "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; font-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+test('_headers sets the reviewed landing CSP once, on the wildcard rule', async () => {
+  const headers = await readFile(resolve(original, '_headers'), 'utf8');
+  const rules = headers.split(/\n\s*\n/).map(block => block.split('\n').filter(line => line.trim() && !line.trimStart().startsWith('#')))
+    .filter(lines => lines.length);
+  const withCsp = rules.filter(lines => lines.some(line => /content-security-policy/i.test(line)));
+  assert.equal(withCsp.length, 1);
+  assert.equal(withCsp[0][0], '/*');
+  assert.deepEqual(withCsp[0].filter(line => /content-security-policy/i.test(line)).map(line => line.trim()), [LANDING_CSP_LINE]);
+  for (const change of [
+    text => text.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'"),
+    text => text.replace(LANDING_CSP_LINE, LANDING_CSP_LINE + '\n  ' + LANDING_CSP_LINE),
+    text => text.replace('  ' + LANDING_CSP_LINE + '\n', '\n'),
+  ]) await fixture(
+    root => edit(root, '_headers', change),
+    root => assert.rejects(checkPublic(root), /landing CSP/),
+  );
+});
+
+test('the status key tallies count the matrix rows in each state', async () => {
+  const html = await readFile(resolve(original, 'index.html'), 'utf8');
+  const keys = [...html.matchAll(/<li><span class="st (st-[a-z]+) st-quiet">([^<]+)<\/span><span class="tally">(\d+)<\/span><\/li>/g)]
+    .map(([, state, label, tally]) => ({state, label, tally: Number(tally)}));
+  const tbody = html.slice(html.indexOf('<table class="matrix">'), html.indexOf('</table>'));
+  const rows = [...tbody.matchAll(/<tr><th scope="row">[^<]+<\/th><td><span class="st (st-[a-z]+)">([^<]+)<\/span>/g)]
+    .map(([, state, label]) => ({state, label}));
+  assert.equal(keys.length, 5);
+  assert.equal(rows.length, (tbody.match(/<tr>/g) || []).length - 1, 'every body row carries one state');
+  // A key matches rows of its state; where two keys share a state, by label.
+  const matches = (key, row) => key.state === row.state
+    && (keys.filter(k => k.state === key.state).length === 1 || key.label === row.label);
+  for (const row of rows) assert.equal(keys.filter(key => matches(key, row)).length, 1, `${row.label} has one key`);
+  for (const key of keys) assert.equal(key.tally, rows.filter(row => matches(key, row)).length, `${key.label} tally`);
 });
 
 test('social preview metadata is one consistent absolute-URL set', async () => {

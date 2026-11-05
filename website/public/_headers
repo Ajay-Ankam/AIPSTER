@@ -11,5 +11,11 @@
 /assets/aipster-intro-v0-2.vtt
   Content-Type: text/vtt
 
+# Landing and 404: a self-only policy. Unknown paths are answered with
+# 404.html under the requested path, so only the wildcard reaches the 404
+# page. The landing's one script is /motion.js; its styles, images, video,
+# poster and captions are all same-origin. /app and /admin keep the Worker's
+# own policy: src/worker.js sets (replaces) Content-Security-Policy there.
 /*
   Cache-Control: public, max-age=0, must-revalidate, no-transform
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; font-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'

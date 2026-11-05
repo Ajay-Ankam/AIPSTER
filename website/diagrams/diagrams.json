@@ -1,0 +1,231 @@
+{
+  "version": 1,
+  "about": "Source for the landing-page diagrams. Run `npm run diagrams` to rewrite the inline SVG in public/index.html; `node scripts/diagrams.mjs --check` fails when the page is out of date. Coordinates are in grid units (layout.grid px each). Wording comes from the page, the repository README and the published figure text.",
+  "diagrams": [
+    {
+      "id": "how",
+      "type": "flow",
+      "title": "How it would work: four owner-controlled steps",
+      "desc": "The owner sits at the centre and decides each step in order: choose your capacity, choose who can use it, set limits and keep visibility, then revoke access when needed. The first two steps are proposed, the third is planned controls, and revocation is not live. Secure sharing is not live yet.",
+      "lanes": [
+        {"id": "owner", "label": "Owner"},
+        {"id": "steps", "label": "Steps"}
+      ],
+      "nodes": [
+        {"id": "owner", "label": "Owner", "sublabel": "Your compute, your terms", "state": "none", "lane": "owner"},
+        {"id": "capacity", "label": "Choose your capacity", "sublabel": "Local CPUs, GPUs, clusters", "state": "planned", "stateLabel": "Proposed", "lane": "steps"},
+        {"id": "people", "label": "Choose who can use it", "sublabel": "People and teams", "state": "planned", "stateLabel": "Proposed", "lane": "steps"},
+        {"id": "limits", "label": "Set limits and keep visibility", "sublabel": "Usage and access", "state": "planned", "stateLabel": "Planned controls", "lane": "steps"},
+        {"id": "revoke", "label": "Revoke access when needed", "sublabel": "Owner control", "state": "notlive", "stateLabel": "Not live", "lane": "steps"}
+      ],
+      "edges": [
+        {"from": "owner", "to": "capacity", "kind": "architectural"},
+        {"from": "owner", "to": "people", "kind": "architectural"},
+        {"from": "owner", "to": "limits", "kind": "architectural"},
+        {"from": "owner", "to": "revoke", "kind": "architectural"},
+        {"from": "capacity", "to": "people", "kind": "request"},
+        {"from": "people", "to": "limits", "kind": "request"},
+        {"from": "limits", "to": "revoke", "kind": "request"}
+      ],
+      "layouts": {
+        "wide": {
+          "grid": 8,
+          "size": [130, 31],
+          "prefer": "vertical",
+          "nodes": {
+            "owner": [51, 2, 28, 8],
+            "capacity": [3, 17, 28, 12],
+            "people": [35, 17, 28, 12],
+            "limits": [67, 17, 28, 12],
+            "revoke": [99, 17, 28, 12]
+          }
+        },
+        "narrow": {
+          "grid": 4,
+          "size": [85, 110],
+          "prefer": "vertical",
+          "nodes": {
+            "owner": [14, 2, 56, 14],
+            "capacity": [9, 24, 74, 18],
+            "people": [9, 46, 74, 18],
+            "limits": [9, 68, 74, 18],
+            "revoke": [9, 90, 74, 18]
+          },
+          "routes": {
+            "owner>capacity": {"from": "left", "to": "left"},
+            "owner>people": {"from": "left", "to": "left"},
+            "owner>limits": {"from": "left", "to": "left"},
+            "owner>revoke": {"from": "left", "to": "left"}
+          }
+        }
+      }
+    },
+    {
+      "id": "research",
+      "type": "flow",
+      "title": "Proposed design: from bounded search to a separate release decision",
+      "desc": "Proposed design, not a deployed integration. IRB refinement offers a reuse facade to an external, trusted DGM controller with its archive. The controller sends a RunSpec to a bounded, Karpathy-style experiment loop and receives development evidence back. Optional JEV advice can rank or abstain but has no execution authority. Artifacts go to an independent evaluation. Only after search stops does a promotion gate run a separate held-out suite and a final audit, and human approval leads to a separate release decision. No promotion or final-audit feedback returns to the same search campaign.",
+      "lanes": [
+        {"id": "search", "label": "Search control and bounded trials"},
+        {"id": "promotion", "label": "Post-search promotion"}
+      ],
+      "nodes": [
+        {"id": "irb", "label": "IRB refinement", "sublabel": "Selective reuse only", "state": "planned", "lane": "search"},
+        {"id": "dgm", "label": "DGM controller", "sublabel": "External, trusted, with archive", "state": "planned", "lane": "search"},
+        {"id": "loop", "label": "Bounded experiment loop", "sublabel": "Karpathy-style, local", "state": "planned", "lane": "search"},
+        {"id": "eval", "label": "Independent evaluation", "sublabel": "Frozen development protocol", "state": "planned", "lane": "search"},
+        {"id": "jev", "label": "JEV advice", "sublabel": "Optional, advisory only", "state": "optional", "lane": "search"},
+        {"id": "promotion", "label": "Promotion gate", "sublabel": "Held-out suite, final audit", "state": "planned", "lane": "promotion"},
+        {"id": "release", "label": "Release decision", "sublabel": "Separate release action", "state": "planned", "lane": "promotion"}
+      ],
+      "edges": [
+        {"from": "irb", "to": "dgm", "label": "reuse facade", "kind": "request"},
+        {"from": "dgm", "to": "loop", "label": "RunSpec", "kind": "request"},
+        {"from": "loop", "to": "dgm", "label": "dev evidence", "kind": "result"},
+        {"from": "loop", "to": "eval", "label": "artifact", "kind": "request"},
+        {"from": "jev", "to": "dgm", "label": "ranking / abstain", "kind": "optional"},
+        {"from": "eval", "to": "promotion", "label": "after search stops", "kind": "request"},
+        {"from": "promotion", "to": "release", "label": "human approval", "kind": "request"}
+      ],
+      "layouts": {
+        "wide": {
+          "grid": 8,
+          "size": [130, 36],
+          "prefer": "horizontal",
+          "nodes": {
+            "irb": [3, 3, 21, 11],
+            "dgm": [37, 3, 21, 11],
+            "loop": [71, 3, 21, 11],
+            "eval": [105, 3, 21, 11],
+            "jev": [37, 22, 21, 11],
+            "release": [71, 22, 21, 11],
+            "promotion": [105, 22, 21, 11]
+          },
+          "routes": {
+            "eval>promotion": {
+              "label": "left"
+            }
+          }
+        },
+        "narrow": {
+          "grid": 4, "size": [85, 162], "prefer": "vertical",
+          "nodes": {
+            "jev": [6, 2, 72, 14],
+            "irb": [6, 26, 72, 14],
+            "dgm": [6, 50, 72, 14],
+            "loop": [6, 74, 72, 14],
+            "eval": [6, 98, 72, 14],
+            "promotion": [6, 122, 72, 14],
+            "release": [6, 146, 72, 14]
+          },
+          "routes": {
+            "jev>dgm": {"from": "right", "to": "right", "label": "none"}
+          }
+        }
+      }
+    },
+    {
+      "id": "mesh",
+      "type": "mesh",
+      "title": "Concept illustration: three personal meshes joined by architectural lanes",
+      "desc": "Three personal meshes, yours, a friend's and a team's. Each owner's machines report heartbeats to their own hub, and dashed architectural lanes join the hubs; they are not live connections. Machine state is drawn by shape: online is a filled disc, stale a half disc, offline a hollow diamond and unknown a dashed ring. Copper marks capacity an owner chooses to share: two machines in your mesh and one in each other mesh.",
+      "lanes": [
+        {"id": "you", "label": "Your mesh", "live": true},
+        {"id": "friend", "label": "A friend’s mesh"},
+        {"id": "team", "label": "Team mesh"}
+      ],
+      "nodes": [
+        {"id": "you-hub", "kind": "hub", "state": "online", "lane": "you"},
+        {"id": "you-1", "kind": "machine", "state": "online", "lane": "you"},
+        {"id": "you-2", "kind": "machine", "state": "online", "shared": true, "lane": "you"},
+        {"id": "you-3", "kind": "machine", "state": "stale", "lane": "you"},
+        {"id": "you-4", "kind": "machine", "state": "online", "shared": true, "lane": "you"},
+        {"id": "you-5", "kind": "machine", "state": "offline", "lane": "you"},
+        {"id": "friend-hub", "kind": "hub", "state": "online", "lane": "friend"},
+        {"id": "friend-1", "kind": "machine", "state": "online", "lane": "friend"},
+        {"id": "friend-2", "kind": "machine", "state": "online", "shared": true, "lane": "friend"},
+        {"id": "friend-3", "kind": "machine", "state": "unknown", "lane": "friend"},
+        {"id": "friend-4", "kind": "machine", "state": "stale", "lane": "friend"},
+        {"id": "team-hub", "kind": "hub", "state": "online", "lane": "team"},
+        {"id": "team-1", "kind": "machine", "state": "online", "lane": "team"},
+        {"id": "team-2", "kind": "machine", "state": "offline", "lane": "team"},
+        {"id": "team-3", "kind": "machine", "state": "online", "shared": true, "lane": "team"},
+        {"id": "team-4", "kind": "machine", "state": "unknown", "lane": "team"}
+      ],
+      "edges": [
+        {"from": "you-1", "to": "you-hub", "kind": "heartbeat"},
+        {"from": "you-2", "to": "you-hub", "kind": "heartbeat"},
+        {"from": "you-3", "to": "you-hub", "kind": "heartbeat"},
+        {"from": "you-4", "to": "you-hub", "kind": "heartbeat"},
+        {"from": "you-5", "to": "you-hub", "kind": "heartbeat"},
+        {"from": "friend-1", "to": "friend-hub", "kind": "heartbeat"},
+        {"from": "friend-2", "to": "friend-hub", "kind": "heartbeat"},
+        {"from": "friend-3", "to": "friend-hub", "kind": "heartbeat"},
+        {"from": "friend-4", "to": "friend-hub", "kind": "heartbeat"},
+        {"from": "team-1", "to": "team-hub", "kind": "heartbeat"},
+        {"from": "team-2", "to": "team-hub", "kind": "heartbeat"},
+        {"from": "team-3", "to": "team-hub", "kind": "heartbeat"},
+        {"from": "team-4", "to": "team-hub", "kind": "heartbeat"},
+        {"from": "you-hub", "to": "friend-hub", "kind": "architectural"},
+        {"from": "you-hub", "to": "team-hub", "kind": "architectural"},
+        {"from": "friend-hub", "to": "team-hub", "kind": "architectural"}
+      ],
+      "layouts": {
+        "wide": {
+          "grid": 2,
+          "size": [260, 180],
+          "nodes": {
+            "you-hub": [75, 95],
+            "you-1": [43, 70],
+            "you-2": [35, 112],
+            "you-3": [56, 141],
+            "you-4": [108, 136],
+            "you-5": [104, 62],
+            "friend-hub": [185, 48],
+            "friend-1": [217, 29],
+            "friend-2": [226, 64],
+            "friend-3": [154, 30],
+            "friend-4": [205, 80],
+            "team-hub": [195, 126],
+            "team-1": [231, 113],
+            "team-2": [229, 149],
+            "team-3": [165, 148],
+            "team-4": [205, 159]
+          },
+          "groups": {
+            "you": [75, 173],
+            "friend": [185, 12],
+            "team": [195, 175]
+          }
+        },
+        "narrow": {
+          "grid": 2,
+          "size": [160, 300],
+          "nodes": {
+            "you-hub": [62, 58],
+            "you-1": [30, 36],
+            "you-2": [22, 74],
+            "you-3": [44, 100],
+            "you-4": [96, 94],
+            "you-5": [92, 26],
+            "friend-hub": [104, 152],
+            "friend-1": [136, 134],
+            "friend-2": [142, 168],
+            "friend-3": [74, 134],
+            "friend-4": [122, 186],
+            "team-hub": [62, 244],
+            "team-1": [96, 226],
+            "team-2": [96, 266],
+            "team-3": [30, 266],
+            "team-4": [28, 228]
+          },
+          "groups": {
+            "you": [62, 10],
+            "friend": [118, 208],
+            "team": [62, 294]
+          }
+        }
+      }
+    }
+  ]
+}
