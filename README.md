@@ -83,6 +83,25 @@ It includes a bounded procedure for checking the reported usage further and does
 cover the unmerged catalog lane. Source files carry a `Built with Meta Muse` authorship
 comment; the landing page names Meta among its hackathon sponsors.
 
+## How it would work
+
+Owners would choose their capacity, choose who can use it, set limits and keep
+visibility, and revoke access when needed. The first two steps are proposed, the
+third is planned controls, and revocation is not live. Secure sharing is not live yet.
+
+![How it would work: the owner decides four steps in order. Choose your capacity (proposed), choose who can use it (proposed), set limits and keep visibility (planned controls), and revoke access when needed (not live).](assets/diagrams/how.svg)
+
+## Personal meshes
+
+Each owner keeps a mesh of their own machines and decides which capacity to offer,
+and to whom. Concept illustration: the drawing illustrates the proposed design, not
+live traffic. Lanes between meshes are architectural; secure compute sharing is not
+live yet. Machine state is drawn by shape: online is a filled disc, stale a half
+disc, offline a hollow diamond and unknown a dashed ring; copper rings mark capacity
+an owner chooses to share.
+
+![Concept illustration: three personal meshes, yours, a friend's and a team's, each machine reporting heartbeats to its owner's hub, with dashed architectural lanes between the hubs that are not live connections.](assets/diagrams/mesh.svg)
+
 ## Install the standalone local worker
 
 The [local-worker quickstart](local-worker/README.md) installs the included public
@@ -99,7 +118,14 @@ The offline scaffold — a separate local-only `stack/` repository with no remot
 no public source link, not the Cloudflare build above — has tested selection,
 probability, budget, and event controls. Live self-improvement, full JEV integration, runner containment, and production deployment have not been demonstrated. This repository documents the proposed direction; it makes no claim of frontier results.
 
-**Proposed architecture**
+**Proposed design**
+
+![Proposed design, not a deployed integration: IRB refinement offers a reuse facade to an external, trusted DGM controller; the controller sends a RunSpec to a bounded experiment loop and gets development evidence back; optional JEV advice can rank or abstain; artifacts go to an independent evaluation; only after search stops does a promotion gate run a held-out suite and final audit, and human approval leads to a separate release decision.](assets/diagrams/research.svg)
+
+No promotion or final-audit feedback returns to the same search campaign.
+
+**Fig. 1: proposed IRB / DGM component flow** (the published figure, with its
+original conceptual labels)
 
 ![Proposed IRB/DGM architecture: bounded search, independent evaluation, optional JEV advice, and separate promotion gates.](assets/IRB-DGM-JEV-component-flow.png)
 

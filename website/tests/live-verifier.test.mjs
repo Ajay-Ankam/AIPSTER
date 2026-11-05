@@ -4,6 +4,7 @@ import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {verifyLive, verifyDeploymentReceipt} from '../scripts/verify-live.mjs';
+import {LANDING_CSP} from '../scripts/check.mjs';
 
 const commit = '1'.repeat(40);
 async function fixture(t, mutate = () => {}) {
@@ -26,6 +27,7 @@ async function fixture(t, mutate = () => {}) {
     if (asset in data) {
       body = data[asset]; headers['Cache-Control'] = asset.startsWith('app/') ? 'no-store' : 'public, no-transform';
       headers['Content-Type'] = asset.endsWith('.html') ? 'text/html; charset=utf-8' : /\.m?js$/.test(asset) ? 'text/javascript' : 'application/json';
+      if (asset === 'index.html') headers['Content-Security-Policy'] = LANDING_CSP;
       if (asset === 'app/index.html') {
         headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
         headers['X-Content-Type-Options'] = 'nosniff';
@@ -56,6 +58,8 @@ for (const [name, mutate] of [
   ['CSP override', (p, r) => { if (p === '/app/index.html') r.headers['Content-Security-Policy'] += '; script-src-elem *'; }],
   ['missing nosniff', (p, r) => { if (p === '/app/index.html') delete r.headers['X-Content-Type-Options']; }],
   ['cross-origin redirect', (p, r) => { if (p === '/app') r.headers.Location = 'https://attacker.invalid/app/'; }],
+  ['missing landing CSP', (p, r) => { if (p === '/') delete r.headers['Content-Security-Policy']; }],
+  ['widened landing CSP', (p, r) => { if (p === '/') r.headers['Content-Security-Policy'] += '; script-src *'; }],
 ]) test(`verifier rejects ${name}`, async t => { await assert.rejects(verifyLive(await fixture(t, mutate))); });
 // The reviewed experiment ships .mjs modules. They are JavaScript and must be
 // recognized exactly like .js, not skipped and not waved through: a module
