@@ -372,6 +372,8 @@ class FabricOpenAIProxyHandler(BaseHTTPRequestHandler):
             self._send_json(502, openai_error(502, "fabric_bad_redirect", "The fabric entrypoint redirected; redirects are never followed."), route)
             return
         bounded = _bounded_upstream_error(data)
+        if bounded is None:
+            bounded = _flat_worker_error(data, status)
         if bounded is not None:
             self._send_json(status, bounded, route)
             return
@@ -495,6 +497,34 @@ def _bounded_upstream_error(data):
     if isinstance(obj.get("automatic_retry"), bool):
         out["automatic_retry"] = obj["automatic_retry"]
     return out
+
+
+FLAT_WORKER_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+
+
+def _flat_worker_error(data, status):
+    """Map a worker-level flat denial to a bounded OpenAI-style error, else None.
+
+    worker.js answers flag-off (INFERENCE_DISABLED), auth (AUTH_REQUIRED,
+    KEY_EXPIRED, KEY_SCOPE, CSRF_REQUIRED) and unknown-route refusals as
+    ``{"error": "<text>", "code": "<UPPER_CODE>"}``. Those are truthful typed
+    4xx outcomes and must reach the caller with their status, not as a 502.
+    Only 4xx with a strict upper-case code is accepted; the code is lowered
+    to the OpenAI convention. No other field is relayed.
+    """
+    if not 400 <= status < 500:
+        return None
+    try:
+        obj = json.loads(bytes(data).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    message, code = obj.get("error"), obj.get("code")
+    if not isinstance(message, str) or not message or not isinstance(code, str) \
+            or not FLAT_WORKER_CODE_RE.match(code):
+        return None
+    return openai_error(status, code.lower(), message)
 
 
 def build_parser():
